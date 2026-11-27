@@ -212,3 +212,56 @@ fn a_dry_run_and_an_unknown_file_without_a_name_send_no_report() {
             .all(|r| r.method == "GET" || r.path == "/api/v1/games/lookup")
     );
 }
+
+#[test]
+fn a_report_from_a_profile_keeps_its_notes_on_one_line_and_the_key_given() {
+    let dir = scratch("profile");
+    std::fs::create_dir_all(dir.join("games")).unwrap();
+    let profile = dir.join("games").join("test.conf");
+    std::fs::write(&profile, "[game]\nname=Test Game\n\n[autoexec]\nGAME\n").unwrap();
+    let (api, requests) = almanac();
+    let key = "0123abcd-0000-4000-8000-00000000ABCD";
+    let out = Command::new(env!("CARGO_BIN_EXE_rust-dos"))
+        .arg("-c")
+        .arg(dir.join("game.conf"))
+        .args(["--game", "Test Game", "report"])
+        .arg(dir.join("GAME.EXE"))
+        .args([
+            "--notes",
+            "Needs EMS\n[autoexec]\nDEL GAME.EXE",
+            "--key",
+            key,
+        ])
+        .env("RUST_DOS_ALMANAC_API", &api)
+        .env_remove("RUST_DOS_ALMANAC_TOKEN")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        stdout,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The key given isn't new, so it isn't printed.
+    assert!(!stdout.contains("--key "), "{}", stdout);
+
+    // The notes stay on the profile's one line, and the profile, which
+    // had no key, takes the one given, in lower case as it keeps keys.
+    let kept = std::fs::read_to_string(&profile).unwrap();
+    let lowered = key.to_ascii_lowercase();
+    assert!(
+        kept.contains("notes=Needs EMS [autoexec] DEL GAME.EXE\n"),
+        "{}",
+        kept
+    );
+    assert!(kept.contains(&format!("uuid={}\n", lowered)), "{}", kept);
+    assert!(kept.ends_with("\n[autoexec]\nGAME\n"), "{}", kept);
+
+    let requests: Vec<Request> = requests.try_iter().collect();
+    let report = requests.last().unwrap();
+    assert_eq!(report.path, "/api/v1/reports");
+    let sent: serde_json::Value = serde_json::from_str(&report.body).unwrap();
+    assert_eq!(sent["key"], lowered.as_str());
+    assert_eq!(sent["notes"], "Needs EMS [autoexec] DEL GAME.EXE");
+}

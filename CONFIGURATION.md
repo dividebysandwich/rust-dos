@@ -5085,9 +5085,10 @@ game of that name. A file the almanac doesn't know needs `--name`.
 A report from a game profile is sent with the profile's `uuid`, which
 the profile gets if it has none, and keeps the year, publisher and notes
 in the profile, as a report from the settings window does: report again
-from it and the almanac replaces the report. Without a profile or
-`--key`, the report gets a new key, which `report` prints; give it with
-`--key` to replace that report later.
+from it and the almanac replaces the report. `--key` goes over the
+profile's `uuid`, and becomes it where the profile has none. Without a
+profile or `--key`, the report gets a new key, which `report` prints;
+give it with `--key` to replace that report later.
 
 The almanac limits how many games, versions and reports one address may
 add. A moderator seeding it with many reports puts the token the

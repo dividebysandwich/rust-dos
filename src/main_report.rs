@@ -43,8 +43,19 @@ fn send(args: &Args, report: ReportArgs) -> Result<(), String> {
         name = name.or_else(|| Some(entry.name.clone()));
     }
     about.year = report.year.or(about.year);
-    about.publisher = report.publisher.clone().or(about.publisher);
-    about.notes = report.notes.clone().or(about.notes);
+    // On one line, as the settings window's dialog takes them: a line
+    // break would end the profile's `notes=` line and start another.
+    if let Some(publisher) = &report.publisher {
+        about.publisher = games::one_line(publisher);
+    }
+    if let Some(notes) = &report.notes {
+        about.notes = games::one_line(notes);
+    }
+    let key = match &report.key {
+        Some(key) if games::valid_uuid(key) => Some(key.to_ascii_lowercase()),
+        Some(key) => return Err(format!("--key {} isn't a UUID", key)),
+        None => None,
+    };
 
     let bytes = std::fs::read(&report.program)
         .map_err(|e| format!("{}: {}", report.program.display(), e))?;
@@ -53,38 +64,8 @@ fn send(args: &Args, report: ReportArgs) -> Result<(), String> {
         (!almanac::is_installer(&file.name)).then(|| almanac::platform_of(&bytes).to_string());
     let files = vec![file];
 
-    // The key: the one given, else the profile's, which it keeps (with
-    // the year, publisher and notes) as the settings window has it keep
-    // them, else a new one.
-    let mut new_key = false;
-    match &report.key {
-        Some(key) if games::valid_uuid(key) => about.key = Some(key.clone()),
-        Some(key) => return Err(format!("--key {} isn't a UUID", key)),
-        None => match &profile {
-            // A dry run changes nothing.
-            Some(_) if report.dry_run => {}
-            Some((entry, text, dir)) => {
-                let kept = about.into_profile(text);
-                if kept != *text {
-                    let path = dir.join(format!("{}.conf", entry.id));
-                    match std::fs::write(&path, &kept) {
-                        Ok(()) => about = About::of_profile(&kept),
-                        Err(e) => eprintln!(
-                            "rust-dos report: the profile can't keep the report's key: {}: {}",
-                            path.display(),
-                            e
-                        ),
-                    }
-                }
-            }
-            None => {
-                about.key = games::new_uuid();
-                new_key = about.key.is_some();
-            }
-        },
-    }
-
-    let candidates = almanac::candidates(&files, name.as_deref().unwrap_or(""), name.is_some())?;
+    let candidates = almanac::matches(&files, name.as_deref().unwrap_or(""), name.is_some())
+        .map_err(limit_hint)?;
     let subject = almanac::subject_for(&candidates, name.as_deref()).ok_or_else(|| {
         format!(
             "{} doesn't know {}: give the game's name with --name",
@@ -92,6 +73,39 @@ fn send(args: &Args, report: ReportArgs) -> Result<(), String> {
             files[0].name.to_ascii_uppercase()
         )
     })?;
+
+    // A profile keeps the year, publisher and notes, and a key, as the
+    // settings window has it keep them: the key given if it has none of
+    // its own. The report goes with the key given, else the profile's,
+    // else a new one, printed. A dry run changes nothing.
+    if let Some((entry, text, dir)) = profile.as_ref().filter(|_| !report.dry_run) {
+        let with_key = match &key {
+            Some(key) if About::of_profile(text).key.is_none() => {
+                games::set_game_value(text, "uuid", Some(key))
+            }
+            _ => text.clone(),
+        };
+        let kept = about.into_profile(&with_key);
+        if kept != *text {
+            let path = dir.join(format!("{}.conf", entry.id));
+            match std::fs::write(&path, &kept) {
+                Ok(()) => about = About::of_profile(&kept),
+                Err(e) => eprintln!(
+                    "rust-dos report: the profile can't keep the year, publisher, notes \
+                     and key: {}: {}",
+                    path.display(),
+                    e
+                ),
+            }
+        }
+    }
+    let mut new_key = false;
+    if key.is_some() {
+        about.key = key;
+    } else if about.key.is_none() && !report.dry_run {
+        about.key = games::new_uuid();
+        new_key = about.key.is_some();
+    }
     let settings = almanac::report_settings(&settings, settings.memory_mb(), home.as_deref());
     if report.dry_run {
         match &subject {
@@ -125,14 +139,7 @@ fn send(args: &Args, report: ReportArgs) -> Result<(), String> {
         &settings,
         &about,
     )
-    .map_err(|e| match e.contains("too many requests") {
-        true => format!(
-            "{} (an almanac staff token in {} lifts the limit)",
-            e,
-            almanac::TOKEN_VARIABLE
-        ),
-        false => e,
-    })?;
+    .map_err(limit_hint)?;
 
     let done = if reported.replaced {
         "replaces the one sent with its key before"
@@ -154,4 +161,18 @@ fn send(args: &Args, report: ReportArgs) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// The almanac's error `e`, with how to lift its limit on an address if
+/// that is what turned the request down.
+fn limit_hint(e: String) -> String {
+    if e.contains("too many requests") {
+        format!(
+            "{} (an almanac staff token in {} lifts the limit)",
+            e,
+            almanac::TOKEN_VARIABLE
+        )
+    } else {
+        e
+    }
 }

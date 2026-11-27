@@ -463,10 +463,11 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
 
 /// Where a report from the command line goes (`rust-dos report`), given
 /// the candidates for the program's file and the game's `name`: the
-/// game and version its file matched by checksum, else the game with
-/// that name (the report adds the file as a version of it), else a new
-/// game of that name. None if the file matched nothing and there is no
-/// name to add a game by.
+/// game and version its file matched by checksum (the one with that
+/// name where the file is in several, as a mission pack's is in its
+/// game's), else the game with that name (the report adds the file as a
+/// version of it), else a new game of that name. None if the file
+/// matched nothing and there is no name to add a game by.
 pub fn subject_for(candidates: &[Candidate], name: Option<&str>) -> Option<Subject> {
     let words = |text: &str| -> String {
         text.chars()
@@ -474,7 +475,9 @@ pub fn subject_for(candidates: &[Candidate], name: Option<&str>) -> Option<Subje
             .flat_map(char::to_lowercase)
             .collect()
     };
-    if let Some(c) = candidates.iter().find(|c| c.hash_match) {
+    let named = |c: &&Candidate| name.is_some_and(|n| words(&c.name) == words(n));
+    let matched = || candidates.iter().filter(|c| c.hash_match);
+    if let Some(c) = matched().find(named).or_else(|| matched().next()) {
         return Some(Subject::Game {
             slug: c.slug.clone(),
             version: c.version.as_ref().map(|(id, _)| *id),
@@ -689,6 +692,17 @@ pub fn candidates(
     }
 }
 
+/// `client::matches`, where this rust-dos asks the almanac.
+pub fn matches(files: &[FileInfo], name: &str, with_names: bool) -> Result<Vec<Candidate>, String> {
+    #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
+    return client::matches(files, name, with_names);
+    #[cfg(not(all(feature = "sdl", not(target_arch = "wasm32"))))]
+    {
+        let _ = (files, name, with_names);
+        Err(format!("This Rust-DOS doesn't ask {}", SITE))
+    }
+}
+
 /// `client::report`, where this rust-dos asks the almanac.
 pub fn report(
     subject: &Subject,
@@ -858,6 +872,23 @@ pub mod client {
         name: &str,
         with_names: bool,
     ) -> Result<Vec<Candidate>, String> {
+        let mut out = matches(files, name, with_names)?;
+        for c in &mut out {
+            c.recommendation = recommendation(&c.slug, c.version.as_ref().map(|(id, _)| *id)).ok();
+            if let Some(r) = &c.recommendation {
+                c.ratings = r.rating.clone();
+            }
+        }
+        Ok(out)
+    }
+
+    /// `candidates` without their settings, which a report doesn't need:
+    /// one request for each game less.
+    pub fn matches(
+        files: &[FileInfo],
+        name: &str,
+        with_names: bool,
+    ) -> Result<Vec<Candidate>, String> {
         let mut out: Vec<Candidate> = Vec::new();
         for m in lookup(files)? {
             // A version a name alone matched is only a guess.
@@ -898,12 +929,6 @@ pub mod client {
             }
         }
         out.truncate(25);
-        for c in &mut out {
-            c.recommendation = recommendation(&c.slug, c.version.as_ref().map(|(id, _)| *id)).ok();
-            if let Some(r) = &c.recommendation {
-                c.ratings = r.rating.clone();
-            }
-        }
         Ok(out)
     }
 
@@ -1164,6 +1189,16 @@ mod tests {
             subject_for(named, Some("lands of LORE!")),
             Some(game("lands-of-lore", None))
         );
+        // Of two games the file matched, the one named.
+        let both = [
+            candidate("quake", "Quake", Some(3), true),
+            candidate("scourge", "Scourge of Armagon", Some(9), true),
+        ];
+        assert_eq!(
+            subject_for(&both, Some("Scourge of Armagon")),
+            Some(game("scourge", Some(9)))
+        );
+        assert_eq!(subject_for(&both, None), Some(game("quake", Some(3))));
         // A name the almanac hasn't is a new game; no name, no report.
         assert_eq!(
             subject_for(named, Some(" Dune ")),
