@@ -90,15 +90,15 @@ rust-dos-ne = { path = "crates/ne" }
 # game profiles' installs (crates/installshield).
 rust-dos-installshield = { path = "crates/installshield" }
 # Indeo Video 3 and 5, the codecs of Video for Windows files (MSVFW32's
-# DrawDib and AVIFIL32's AVIStreamGetFrame). Taken from a commit of the
-# kibertoad/oxideav-indeo fork until a release has its Indeo 5
-# transparency mask (issue 1151): a release replaces this line with an
-# exact version ("=0.0.x"). Pinned to one revision: the crate's API
-# changes between 0.0.x versions, and the pictures it decodes go into
-# deterministic runs and the game suite's golden hashes, so a new
-# version comes in only by changing this line, once its pictures are
-# checked.
-oxideav-indeo = { git = "https://github.com/kibertoad/oxideav-indeo", rev = "bb5587acc7cf974c5b7ee3aae5699eddbb309a39" }
+# DrawDib and AVIFIL32's AVIStreamGetFrame). Taken from the merge commit
+# of OxideAV/oxideav-indeo#11 in the crate's own repository, the first
+# commit with the Indeo 5 transparency mask (issue 1151), until a release
+# has it: 0.0.6 replaces this line with "=0.0.6". Pinned to one
+# revision: the crate's API changes between 0.0.x versions, and the
+# pictures it decodes go into deterministic runs and the game suite's
+# golden hashes, so a new version comes in only by changing this line,
+# once its pictures are checked.
+oxideav-indeo = { git = "https://github.com/OxideAV/oxideav-indeo", rev = "8c51619f8eac05730bab3f30c3b37e0a98f056c2" }
 # MPEG-1 video and its Layer II audio, which MCI's MPEGVideo device
 # plays, and the framework's packet and frame types the audio decoder
 # takes. Pinned as oxideav-indeo is. oxideav-indeo's commit above needs
