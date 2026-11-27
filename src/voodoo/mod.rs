@@ -2408,6 +2408,9 @@ impl Voodoo {
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.resync(snapshot, key);
         }
+        // A program's write may now land on a pixel of theirs, which the
+        // recording hears of (`mirror_memory`).
+        self.gpu.get_mut().tracker.revoke_writes();
         // A Banshee's tiles follow the recording's buffers.
         self.update_tiles();
     }

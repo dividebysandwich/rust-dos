@@ -169,6 +169,22 @@ impl Bus {
         Some((bar1, direct))
     }
 
+    /// What translated code may do by itself on the page with byte `at`
+    /// of the card's memory, where `banshee_direct` gave grants
+    /// (`Voodoo::banshee_grant`).
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn banshee_grant(&self, at: u32) -> Option<(u8, u64)> {
+        Some(self.voodoo.as_ref()?.banshee_grant(at))
+    }
+
+    /// The same for every page, which `f` gets from the first.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn banshee_grants(&self, f: impl FnOnce(&mut dyn Iterator<Item = u8>)) {
+        if let Some(v) = &self.voodoo {
+            v.banshee_grants(f);
+        }
+    }
+
     /// Translated code wrote the card's memory by itself.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn banshee_wrote_directly(&mut self) {
