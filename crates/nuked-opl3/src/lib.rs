@@ -821,25 +821,34 @@ mod tests {
     fn operator_registers_without_an_operator_are_ignored() {
         // Offsets 0x06, 0x07, 0x0e, 0x0f and 0x16 to 0x1f of each operator
         // register block have no operator slot. Civilization's AdLib
-        // driver writes some of them; such a write reaches no slot.
+        // driver writes some of them; such a write reaches no slot. On the
+        // second register file, main's debug builds panicked with an
+        // overflow in decoded_slot.
+        let file = |secondary: bool| {
+            if secondary {
+                OplRegisterFile::Secondary
+            } else {
+                OplRegisterFile::Primary
+            }
+        };
+        let chip_state = |device: &Opl3Device| format!("{:?}", device.inner_chip.chip);
         let mut device = Opl3Device::new(44_100);
-        let empty = [0x06u8, 0x07, 0x0e, 0x0f, 0x16, 0x17, 0x18, 0x1f];
+        let before = chip_state(&device);
         for secondary in [false, true] {
             for base in [0x20u8, 0x40, 0x60, 0x80, 0xe0] {
-                for offset in empty {
-                    let file = if secondary {
-                        OplRegisterFile::Secondary
-                    } else {
-                        OplRegisterFile::Primary
-                    };
-                    device.write_register(base + offset, 0xff, file, false);
+                for offset in [0x06u8, 0x07, 0x0e, 0x0f].into_iter().chain(0x16..=0x1f) {
+                    device.write_register(base + offset, 0xff, file(secondary), false);
                 }
             }
         }
+        assert_eq!(chip_state(&device), before);
 
-        let mut buffer = [0i16; 64];
-        device.generate_samples(&mut buffer).unwrap();
-        assert!(buffer.iter().all(|&sample| sample == 0));
+        // The comparison sees a write that reaches a slot, in either file.
+        for secondary in [false, true] {
+            let before = chip_state(&device);
+            device.write_register(0x20, 0xff, file(secondary), false);
+            assert_ne!(chip_state(&device), before);
+        }
     }
 
     #[test]
