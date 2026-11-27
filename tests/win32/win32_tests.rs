@@ -20821,6 +20821,121 @@ fn icdecompress_draws_microsoft_video_1_frames_in_place() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
+/// A Cinepak chunk, strip or frame: `id`, its size in 24 bits with the
+/// 4 bytes of `id` and size, then `header` and `body`.
+fn cinepak_part(id: u8, header: &[u8], body: &[u8]) -> Vec<u8> {
+    let size = (4 + header.len() + body.len()) as u32;
+    let mut out = vec![id];
+    out.extend_from_slice(&size.to_be_bytes()[1..]);
+    out.extend_from_slice(header);
+    out.extend_from_slice(body);
+    out
+}
+
+/// A Cinepak frame of 8 by 4 pixels, of one strip of `chunks`, with the
+/// frame's flags `flags`.
+fn cinepak_frame(flags: u8, chunks: &[Vec<u8>]) -> Vec<u8> {
+    let strip_header: Vec<u8> = [0u16, 0, 4, 8].iter().flat_map(|v| v.to_be_bytes()).collect();
+    let strip = cinepak_part(0x11, &strip_header, &chunks.concat());
+    let header: Vec<u8> = [8u16, 4, 1].iter().flat_map(|v| v.to_be_bytes()).collect();
+    cinepak_part(flags, &header, &strip)
+}
+
+/// ICDecompress decodes Cinepak frames to the program's 16-bit buffer,
+/// as Outlaw Racers plays its films: ICLocate finds iccvid.dll for a
+/// `cvid` stream and an RGB555 output (and none for 8 bits, whose
+/// palette is the codec's own), and the decoder keeps its picture and
+/// codebooks from frame to frame, so a frame that skips a block gives
+/// the block it had. ICM_DECOMPRESS_GET_FORMAT gives 24 bits. The
+/// program ends with a bit set for each check that held.
+#[test]
+fn icdecompress_decodes_cinepak_frames_to_16_bits() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICDecompress", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const OUT8: usize = 0x180;
+    const FRAMES: usize = 0x200;
+    const BITS: usize = 0x300;
+    const FORMAT: usize = 0x400;
+    let mut data = bitmap_info(8, 4, 24, b"cvid");
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(8, 4, 16, &[0; 4]));
+    data.resize(OUT8, 0);
+    data.extend(bitmap_info(8, 4, 8, &[0; 4]));
+    data.resize(FRAMES, 0);
+    // A key frame: a grey V1 codebook of one entry, level 200, and both
+    // blocks V1 of it.
+    let books = cinepak_part(0x26, &[], &[200; 4]);
+    data.extend(cinepak_frame(0, &[books, cinepak_part(0x32, &[], &[0, 0])]));
+    data.resize(FRAMES + 0x40, 0);
+    // The next keeps the codebook but for entry 0, now level 90, skips
+    // the left block and gives the right one entry 0: flags 0, 1 0.
+    let update = cinepak_part(0x27, &[], &[0x80, 0, 0, 0, 90, 90, 90, 90]);
+    let blocks = cinepak_part(0x31, &[], &[0x40, 0, 0, 0, 0]);
+    data.extend(cinepak_frame(1, &[update, blocks]));
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 64]);
+    data.resize(FORMAT + 0x100, 0);
+    const ICM_DECOMPRESS_GET_FORMAT: i32 = 0x400A;
+    // RGB555 of grey 200 and of grey 90.
+    const GREY_200: u32 = 0x6739_6739;
+    const GREY_90: u32 = 0x2D6B_2D6B;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        let vidc = i32::from_le_bytes(*b"vidc");
+        a.xor(ebx, ebx)?;
+        push_args(a, &[vidc, 0, at(0), at(OUT8), 2])?;
+        a.call(f("ICLocate"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 0)?;
+        push_args(a, &[vidc, 0, at(0), at(OUT), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setnz(al)?;
+        a.shl(al, 1)?;
+        a.or(bl, al)?;
+        let decompress = |a: &mut CodeAssembler, frame: usize| {
+            push_args(a, &[0, 0, at(0), at(frame), at(OUT), at(BITS)])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICDecompress"))?;
+            a.add(esp, 24)?;
+            a.cmp(eax, 0)
+        };
+        // Rows of 8 pixels of 2 bytes; the left block's first two
+        // pixels, then the right block's.
+        let pixels = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 16 * y + 2 * x));
+        decompress(a, FRAMES)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(pixels(0, 0), GREY_200 as i32)?;
+        bit_if_equal(a, 3)?;
+        a.cmp(pixels(3, 4), GREY_200 as i32)?;
+        bit_if_equal(a, 4)?;
+        decompress(a, FRAMES + 0x40)?;
+        a.cmp(pixels(3, 0), GREY_200 as i32)?;
+        bit_if_equal(a, 5)?;
+        a.cmp(pixels(0, 4), GREY_90 as i32)?;
+        bit_if_equal(a, 6)?;
+        push_args(a, &[0, ICM_DECOMPRESS_GET_FORMAT, at(0), at(FORMAT)])?;
+        a.mov(dword_ptr(esp), esi)?;
+        a.call(f("ICSendMessage"))?;
+        a.cmp(word_ptr(l.at(FORMAT as u32 + 14)), 24)?;
+        bit_if_equal(a, 7)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompress_cvid", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
 /// A program linked with MFC's OLE support imports OLEDLG.DLL's
 /// OleUIBusyA and OLEPRO32.DLL's OleCreateFontIndirect by ordinal (8 and
 /// 253), as Discworld Noir's setup does. It loads, and OleTranslateColor,
