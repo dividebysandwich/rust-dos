@@ -1975,7 +1975,7 @@ fn live_displacement(
 /// by the count the instruction was decoded with. Bytes and words aren't
 /// read this way: a count of their width or more goes through the
 /// handler (`shift`), so they leave the block where the count changes.
-fn live_shift_count(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
+fn live_shift_count(instr: &Instruction, phys: u32, watched: &[usize], u: &mut [Uop]) -> bool {
     // The count is the last byte.
     let start = instr.len() - 1;
     if watched.iter().any(|&w| w < start) {
