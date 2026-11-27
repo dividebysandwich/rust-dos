@@ -1078,3 +1078,66 @@ fn regsvr32_registers_a_dll() {
     let code = run("regsvr32", None, files, runs_regsvr32());
     assert_eq!(code, 0x7F, "the runs that failed: {:07b}", !code & 0x7F);
 }
+
+/// Reads REGSVR32.EXE's version resource with VERSION.DLL; a bit of the
+/// exit code for each check that passes.
+fn reads_regsvr32_version() -> Vec<u8> {
+    // The path at 0, the handle at 0x40, "\" at 0x48, the value's
+    // address and length at 0x50 and 0x54, and the resource at 0x100.
+    let mut data = vec![0u8; 0x2000];
+    put(&mut data, 0, b"C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE\0");
+    put(&mut data, 0x40, &u32::MAX.to_le_bytes());
+    put(&mut data, 0x48, b"\\\0");
+    let imports: &[(&str, &[&'static str])] = &[
+        ("KERNEL32.DLL", &["ExitProcess"]),
+        (
+            "VERSION.DLL",
+            &[
+                "GetFileVersionInfoSizeA",
+                "GetFileVersionInfoA",
+                "VerQueryValueA",
+            ],
+        ),
+    ];
+    program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        let size = [l.at(0), l.at(0x40)];
+        call(a, l.import("GetFileVersionInfoSizeA"), &size)?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        a.cmp(dword_ptr(l.at(0x40) as u64), 0)?;
+        check(a, false, 1)?;
+        a.push(l.at(0x100) as i32)?;
+        a.push(esi)?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import("GetFileVersionInfoA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        let query = [l.at(0x100), l.at(0x48), l.at(0x50), l.at(0x54)];
+        call(a, l.import("VerQueryValueA"), &query)?;
+        a.test(eax, eax)?;
+        check(a, true, 3)?;
+        // VS_FIXEDFILEINFO: the file version at 8 and 12, the type at 36.
+        a.mov(esi, dword_ptr(l.at(0x50) as u64))?;
+        a.cmp(dword_ptr(esi + 8), 0x0005_0000)?;
+        check(a, false, 4)?;
+        a.cmp(dword_ptr(esi + 12), 0x0632_0001)?;
+        check(a, false, 5)?;
+        a.cmp(dword_ptr(esi + 36), 1)?;
+        check(a, false, 6)?;
+        a.push(ebx)?;
+        a.call(l.import("ExitProcess"))
+    })
+}
+
+/// REGSVR32.EXE in the system folder has a version resource, as Windows
+/// 98 SE's has: GetFileVersionInfoSizeA gives its size and a handle of
+/// 0, and VerQueryValueA finds its fixed part, file version 5.00.1586.1
+/// and type VFT_APP. Wine's version tests read it (info.c).
+#[test]
+fn regsvr32_has_a_version_resource() {
+    let code = run("regsvr32_version", None, &[], reads_regsvr32_version());
+    assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
+}

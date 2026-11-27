@@ -421,6 +421,10 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
 /// dwFileType for a DLL and a driver.
 const VOS_DOS_WINDOWS16: u32 = 0x0001_0001;
 const VOS_DOS_WINDOWS32: u32 = 0x0001_0004;
+/// dwFileOS of Windows 98 SE's REGSVR32.EXE, an NT file, and
+/// dwFileType for a program.
+const VOS_NT_WINDOWS32: u32 = 0x0004_0004;
+const VFT_APP: u32 = 1;
 const VFT_DLL: u32 = 2;
 const VFT_DRV: u32 = 3;
 
@@ -476,11 +480,14 @@ fn builtin_node(
         // DirectX 6.1's DirectShow, as Windows 98 SE has it.
         "QUARTZ" => [6, 1, 5, 319],
         "AMSTREAM" => [6, 1, 5, 217],
+        // Windows 98 SE's REGSVR32.EXE, a file of Windows 2000's.
+        "REGSVR32" => [5, 0, 1586, 1],
         _ => [4, 0, 0, 950],
     };
     let text = match version {
         [4, 0, 0, 950] => "4.00.950".to_string(),
         [5, 0, 1693, 1] => "5.00.1693.1".to_string(),
+        [5, 0, 1586, 1] => "5.00.1586.1".to_string(),
         [4, 3, 0, 1998] => "4.03.1998".to_string(),
         [4, 10, 0, 1998] => "4.10.1998".to_string(),
         [a, b, c, d] => format!("{}.{:02}.{:02}.{:04}", a, b, c, d),
@@ -561,6 +568,21 @@ pub(super) fn builtin_version(name: &str, windows: WindowsVersion) -> Vec<u8> {
     match builtin_resource(name, windows) {
         Resource::Unicode(b) | Resource::Ansi(b) => b,
     }
+}
+
+/// The version resource of the built-in program `name` (REGSVR32.EXE),
+/// as its file in the system directory has it (dll_files.rs). Windows
+/// 98 SE's REGSVR32.EXE is 5.00.1586.1, a VFT_APP of VOS_NT_WINDOWS32,
+/// and setups and Wine's version tests read it.
+pub(super) fn builtin_program_version(name: &str, windows: WindowsVersion) -> Vec<u8> {
+    let base = name.trim_end_matches(".EXE").trim_end_matches(".exe");
+    write_unicode(&builtin_node(
+        name,
+        base,
+        windows,
+        VOS_NT_WINDOWS32,
+        (VFT_APP, 0),
+    ))
 }
 
 /// The version resource of the file `name` names: a file on disk, found

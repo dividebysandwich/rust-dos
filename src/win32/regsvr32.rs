@@ -157,8 +157,17 @@ pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
         pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
     );
     b.entry(text_rva);
+    // A version resource, as Windows 98 SE's REGSVR32.EXE has.
+    let windows = super::version::shown(&bus.win32);
+    let version = super::verdll::builtin_program_version("REGSVR32.EXE", windows);
+    b.resource(RT_VERSION, VS_VERSION_INFO, LANG_ENGLISH_US, &version);
     b.build()
 }
+
+/// RT_VERSION, the version resource's name, and the language it is in.
+const RT_VERSION: u16 = 16;
+const VS_VERSION_INFO: u16 = 1;
+const LANG_ENGLISH_US: u16 = 0x0409;
 
 /// The import address table slots the program calls through.
 struct Imports {
