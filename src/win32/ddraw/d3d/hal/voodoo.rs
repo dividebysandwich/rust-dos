@@ -1935,19 +1935,3 @@ pub fn clear(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::blend;
-
-    /// SRCCOLOR as the source factor is the card's code 2, which as a
-    /// source factor is the destination's colour: 3dfx's Voodoo3
-    /// driver gives Outlaw Racers' rain (SRCCOLOR, ZERO) so, and the
-    /// scene is multiplied by it.
-    #[test]
-    fn a_source_colour_source_factor_takes_the_destination_colour() {
-        const SRCCOLOR: u32 = 3;
-        const D3DZERO: u32 = 1;
-        assert_eq!(blend(SRCCOLOR, D3DZERO), (2, 0));
-    }
-}

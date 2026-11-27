@@ -2830,6 +2830,33 @@ fn alpha_blending_mixes_with_the_target() {
     assert_rgb(&p, 48, 30, [0, 0, 255], 0);
 }
 
+/// The Voodoo3 has no source colour as a source factor. 3dfx's Voodoo3
+/// driver (4.11.01.1151) draws a SRCBLEND of SRCCOLOR as the card's
+/// code 2, the destination's colour there: Outlaw Racers' rain
+/// (SRCCOLOR, ZERO) multiplies the scene on Windows 98 with it. A grey
+/// quad so halves the blue clear, where ONE would draw it grey.
+#[test]
+fn a_srccolor_source_factor_multiplies_by_the_target_on_the_voodoo3() {
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: BLUE,
+        zbuffer: None,
+        texture: None,
+        texture_alpha: false,
+        texture_system: false,
+        steps: vec![
+            Step::State(RS_ALPHABLENDENABLE, 1),
+            Step::State(RS_SRCBLEND, 3),
+            Step::State(RS_DESTBLEND, 1),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, 0xFF80_8080)),
+        ],
+    };
+    let p = draw_scene("srccolor_blend", &scene);
+    assert_rgb(&p, 16, 30, [0, 0, 128], 12);
+    assert_rgb(&p, 48, 30, [0, 0, 255], 0);
+}
+
 #[test]
 fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
     let fogged = |alpha: u32, x0: f32, x1: f32| {
