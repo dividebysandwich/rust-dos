@@ -120,10 +120,12 @@ pub const PAGE: u32 = 4096;
 /// vertex buffer has it (`BYTES` bytes with no gaps), so a run's
 /// vertices go there in one copy: the position (x, y, z and 1 / w),
 /// the two colours, the coordinates of each slot, where the shader
-/// looks for them, and the depth of the triangle the vertex is of as
-/// the card works it out at a pixel (`setup::DepthPlane`: the plane's
-/// value at its origin, its change for a pixel right and down, and
-/// the origin), the same at the triangle's three vertices.
+/// looks for them, and, in a run with `Run::card_depth`, the depth of
+/// the triangle the vertex is of as the card works it out at a pixel
+/// (`setup::DepthPlane`: the plane's value at its origin, its change
+/// for a pixel right and down, and the origin), the same at the
+/// triangle's three vertices. Other runs leave it 0, and the host
+/// interpolates their depth.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct Vertex {
@@ -153,8 +155,12 @@ impl Vertex {
         }
     }
 
-    /// The vertex of a primitive whose depth is `depth`.
-    pub fn at_depth(self, depth: &DepthPlane) -> Self {
+    /// The vertex of a primitive whose depth is `depth`, where it has
+    /// one for the host.
+    pub fn at_depth(self, depth: Option<&DepthPlane>) -> Self {
+        let Some(depth) = depth else {
+            return self;
+        };
         let z = depth.z;
         Vertex {
             depth: [z.at, z.dx, z.dy, depth.ox, depth.oy],
@@ -325,6 +331,15 @@ pub struct Run {
     /// triangles at the planes the card cuts at, and leaves out those
     /// `Shape::cull` names.
     pub geometry: Option<Geometry>,
+    /// The card transformed the vertices, from the program's
+    /// untransformed ones, and each has the card's depth of its
+    /// primitive (`Vertex::depth`), which the host writes. The host
+    /// takes the vertices of most such draws itself, but none with a
+    /// depth bias (`DrawState::biased_depth`), whose depth decides
+    /// which pixels of a mark on a surface are drawn: a surface the
+    /// card transforms has to have the card's depth for those to go
+    /// its way. A program's screen vertices have the host's depth.
+    pub card_depth: bool,
 }
 
 /// What a host draws at once: runs for one render target, in the

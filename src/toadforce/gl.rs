@@ -752,6 +752,7 @@ impl ToadForceGl {
                     state: state(blend),
                     vertices: 0..3,
                     geometry: None,
+                    card_depth: false,
                 }];
                 let batch = Batch {
                     target,
@@ -805,6 +806,7 @@ impl ToadForceGl {
             state: Arc::new(hidden),
             vertices: 0..3,
             geometry: None,
+            card_depth: false,
         }];
         let batch = Batch {
             target,
@@ -2156,8 +2158,8 @@ impl ToadForceGl {
             gl.uniform_2_f32(u.scale.as_ref(), scale[0], scale[1]);
             gl.uniform_1_i32(u.pack.as_ref(), pack as i32);
             // The bias in steps of the depth buffer: as a part of its
-            // range for a program that transforms, and with the
-            // buffer's bits for one that works out the card's depth.
+            // range for the vertex shaders, and with the buffer's bits
+            // for a program that works out the card's depth.
             let (bias, bits) = match state.target.depth.map(|d| d.format) {
                 Some(Format::D16) => (v.z_bias, 16),
                 _ => (v.z_bias >> 8, 24),
@@ -2355,7 +2357,7 @@ impl Host for ToadForceGl {
             }
         }
         // SAFETY: the context is current (see the module comment).
-        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0, false)) } {
+        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0, false, false)) } {
             None
         } else {
             Some(Decline::ProgramFailed)
@@ -2363,12 +2365,17 @@ impl Host for ToadForceGl {
     }
 
     fn transforms(&self, state: &DrawState) -> bool {
-        // OpenGL ES has no clip distances.
-        if self.broken || self.glsl == Glsl::Es300 {
+        // OpenGL ES has no clip distances. The card transforms a draw
+        // with a depth bias, and the host writes the card's depth of
+        // it (`gpu::Run::card_depth`): the host's depth of vertices it
+        // transforms is a few steps of a 24-bit buffer off the card's,
+        // and with a bias of a step or two that decides which pixels
+        // of a mark on the ground are drawn (Giants).
+        if self.broken || self.glsl == Glsl::Es300 || state.biased_depth() {
             return false;
         }
         // SAFETY: the context is current (see the module comment).
-        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0, false)) }
+        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0, false, false)) }
     }
 
     fn status(&self) -> serde_json::Value {
@@ -2478,14 +2485,20 @@ impl Host for ToadForceGl {
                 if (count == 0 && geometry.is_none()) || !self.fixed(state) {
                     continue;
                 }
-                // `declines` compiled the program without the range's
-                // `discard`. The one with it is compiled when a run
-                // first needs it; were it to fail, the run is drawn
-                // without, with its pixels outside the range.
+                // `declines` compiled the program with the host's depth
+                // and without the range's `discard`. The one that
+                // writes the card's depth, and the one with the
+                // `discard`, are compiled when a run first needs them;
+                // were one to fail, the run is drawn with the host's
+                // depth, or without the `discard` and with its pixels
+                // outside the range.
                 let anisotropic = self.anisotropy > 0.0;
-                let base = shader::key(state, anisotropic, false);
+                let base = shader::key(state, anisotropic, false, false);
+                let card = Some(shader::key(state, anisotropic, false, true))
+                    .filter(|key| run.card_depth && self.compiled(key));
+                let base = card.unwrap_or(base);
                 let key = match outside {
-                    true => Some(shader::key(state, anisotropic, true))
+                    true => Some(shader::key(state, anisotropic, true, base.card_depth))
                         .filter(|key| self.compiled(key))
                         .unwrap_or(base),
                     false => base,

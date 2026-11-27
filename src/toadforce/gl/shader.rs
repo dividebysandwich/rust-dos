@@ -77,14 +77,22 @@ pub const ATTRIBUTES_TNL: [(u32, &str); 4 + SLOTS] = [
 
 /// The vertex shader of every program. Dividing the position by 1 / w
 /// has the host interpolate the colours and the coordinates with
-/// perspective correction, as `setup.rs` does.
+/// perspective correction, as `setup.rs` does; depth goes linearly
+/// over the screen there, which the host's own depth does.
 ///
-/// The fragment shader works out a pixel's depth itself, from the
-/// card's plane of the triangle (`LINEAR`), so the depth here only
-/// places the triangle: the host keeps depth in its range
-/// (`DEPTH_CLAMP`) and cuts nothing at the near and the far plane.
+/// The depth bias is taken from the depth here, as a part of the
+/// buffer's range, and the host rounds the result to the buffer's
+/// steps: the steps `span.rs` takes from the rounded depth. The host's
+/// own polygon offset counts in a unit of the host's choosing, which
+/// isn't a step of a 16-bit buffer on every host. A program of
+/// vertices the card transformed (`Key::card_depth`) works out the
+/// depth itself, from the card's plane of the triangle
+/// (`LINEAR_CARD`), so for it the depth here only places the
+/// triangle: the host keeps depth in its range (`DEPTH_CLAMP`) and
+/// cuts nothing at the near and the far plane.
 pub const VERTEX: &str = "
 uniform vec2 u_scale;
+uniform float u_bias;
 in vec4 a_pos;
 in vec4 a_diffuse;
 in vec4 a_specular;
@@ -99,12 +107,13 @@ out vec4 v_specular;
 out vec4 v_tex[4];
 noperspective out vec4 v_stw[4];
 noperspective out float v_q;
+noperspective out float v_z;
 flat out vec3 v_zplane;
 flat out vec2 v_zorigin;
 void main() {
     float w = 1.0 / a_pos.w;
     vec2 at = a_pos.xy * u_scale - 1.0;
-    gl_Position = vec4(at * w, (a_pos.z * 2.0 - 1.0) * w, w);
+    gl_Position = vec4(at * w, ((a_pos.z - u_bias) * 2.0 - 1.0) * w, w);
     v_diffuse = a_diffuse.zyxw;
     v_specular = a_specular.zyxw;
     v_tex[0] = a_tex0;
@@ -118,6 +127,7 @@ void main() {
     v_stw[2] = a_tex2 * a_pos.w;
     v_stw[3] = a_tex3 * a_pos.w;
     v_q = a_pos.w;
+    v_z = a_pos.z;
     v_zplane = a_zplane;
     v_zorigin = a_zorigin;
 }
@@ -339,15 +349,23 @@ void main() {
 }
 ";
 
-/// The inputs of `fragment` that go linearly over the screen, and the
-/// depth's plane with what works the depth out from it, and what
-/// `fragment_tnl` has in their place.
-///
-/// The programs of screen vertices write the depth the card works out
-/// for a pixel, so a depth test, and a depth bias of a step or two,
-/// go the way they do on the card. The host's own depth, interpolated
-/// in single precision over the triangle and rounded by the host, is
-/// a few steps of a 24-bit buffer off.
+/// The inputs of `fragment` that go linearly over the screen, what
+/// `fragment_tnl` has in their place, and what a program of a draw
+/// with a depth bias (`Key::card_depth`) has: the depth's plane, with
+/// what works the depth out from it.
+const LINEAR: &str = "noperspective in vec4 v_stw[4];
+noperspective in float v_q;
+noperspective in float v_z;
+";
+
+/// `LINEAR` for a program that writes the depth the card works out
+/// for a pixel, so a depth test with a bias of a step or two goes the
+/// way it does on the card. The host's own depth, interpolated in
+/// single precision over the triangle and rounded by the host, is a
+/// few steps of a 24-bit buffer off, which such a bias doesn't
+/// outweigh. Writing the depth keeps the host from testing it before
+/// the shader runs, so only the programs of vertices the card
+/// transformed do it (`gpu::Run::card_depth`).
 ///
 /// `tf_z` is `Plane::eval` at the pixel, from the plane and its origin
 /// the card gave the triangle (`setup::DepthPlane`), in the card's
@@ -372,7 +390,7 @@ void main() {
 /// range, it did for every one, where n + 0.5 over 2^24 went to the
 /// next number below 2^23, and n over 2^24 to the one before from 2^23
 /// up.
-const LINEAR: &str = "noperspective in vec4 v_stw[4];
+const LINEAR_CARD: &str = "noperspective in vec4 v_stw[4];
 noperspective in float v_q;
 flat in vec3 v_zplane;
 flat in vec2 v_zorigin;
@@ -449,9 +467,12 @@ float tf_frag_depth(float z) {
 ";
 const LINEAR_TNL: &str = "in float v_zw;
 ";
-/// The start of `fragment`'s `main`: the pixel's depth as the card has
-/// it, written to the host's depth buffer.
+/// The start of `fragment`'s `main`, and of it with `LINEAR_CARD`: the
+/// pixel's depth as the card has it, written to the host's depth
+/// buffer.
 const MAIN: &str = "void main() {
+";
+const MAIN_CARD: &str = "void main() {
     float v_z = tf_z();
     gl_FragDepth = tf_frag_depth(v_z);
 ";
@@ -468,8 +489,9 @@ const MAIN_TNL: &str = "void main() {
 /// The fragment shader of `key` for `VERTEX_TNL`: `fragment`'s, with
 /// 1 / w from the host's own, and the coordinates times it and the
 /// depth from what the host interpolates with perspective correction
-/// times it.
+/// times it. Its depth is the host's own.
 pub fn fragment_tnl(key: &Key) -> String {
+    debug_assert!(!key.card_depth);
     fragment(key)
         .replacen(LINEAR, LINEAR_TNL, 1)
         .replacen(MAIN, MAIN_TNL, 1)
@@ -589,6 +611,9 @@ pub struct Key {
     /// A bit for each stage whose texture the host's own filter
     /// samples (`native`).
     pub native: u8,
+    /// The program writes the card's depth (`LINEAR_CARD`), for a run
+    /// with `gpu::Run::card_depth`.
+    pub card_depth: bool,
 }
 
 impl Key {
@@ -605,7 +630,8 @@ pub fn native(tex: &Tex, anisotropic: bool) -> bool {
 }
 
 /// The key of the program that draws `state`, for vertices that have
-/// a depth outside 0 to 1 where `outside` says so.
+/// a depth outside 0 to 1 where `outside` says so, and the card's
+/// depth where `card_depth` does (`gpu::Run::card_depth`).
 ///
 /// With the depth test on (`Step::Depth`'s `ranged`) the card leaves
 /// out a pixel whose depth is outside 0 to 1, which the program of
@@ -614,7 +640,7 @@ pub fn native(tex: &Tex, anisotropic: bool) -> bool {
 /// draw, so the vertices nearly every draw has, whose depths are all
 /// inside the range and so are those of their pixels, get the program
 /// without one.
-pub fn key(state: &DrawState, anisotropic: bool, outside: bool) -> Key {
+pub fn key(state: &DrawState, anisotropic: bool, outside: bool, card_depth: bool) -> Key {
     let mut native_stages = 0;
     for (stage, tex) in state.tex.iter().enumerate() {
         if tex.as_ref().is_some_and(|tex| native(tex, anisotropic)) {
@@ -624,6 +650,7 @@ pub fn key(state: &DrawState, anisotropic: bool, outside: bool) -> Key {
     Key {
         steps: steps_key(&state.steps, outside),
         native: native_stages,
+        card_depth,
     }
 }
 
@@ -717,7 +744,7 @@ fn fails(func: u32, value: &str, reference: &str) -> Option<String> {
 /// The fragment shader of `key`.
 pub fn fragment(key: &Key) -> String {
     let steps = &key.steps;
-    // `LINEAR`'s bits of a number, where the host has them.
+    // `LINEAR_CARD`'s bits of a number, where the host has them.
     let mut head = String::from(
         "#extension GL_ARB_shader_bit_encoding : enable
 uniform ivec4 u_factor;
@@ -730,7 +757,11 @@ in vec4 v_specular;
 in vec4 v_tex[4];
 ",
     );
-    head.push_str(LINEAR);
+    let (linear, main) = match key.card_depth {
+        true => (LINEAR_CARD, MAIN_CARD),
+        false => (LINEAR, MAIN),
+    };
+    head.push_str(linear);
     head.push_str(
         "out vec4 o_color;
 ivec4 mul(ivec4 a, ivec4 b) {
@@ -739,7 +770,7 @@ ivec4 mul(ivec4 a, ivec4 b) {
 ",
     );
     head.push_str(SAMPLING);
-    let mut body = String::from(MAIN);
+    let mut body = String::from(main);
     body.push_str(
         "    ivec4 cur = ivec4(0);
     ivec4 tmp = ivec4(0);
@@ -1152,6 +1183,7 @@ mod tests {
             fragment(&Key {
                 steps: steps_key(&steps, outside),
                 native: 0,
+                card_depth: false,
             })
         };
         assert_eq!(steps_key(&steps, false), steps_key(&steps[1..], true));
@@ -1164,11 +1196,28 @@ mod tests {
         let key = Key {
             steps: vec![Step::Colours { specular: false }],
             native: 0,
+            card_depth: false,
         };
         let (plain, tnl) = (fragment(&key), fragment_tnl(&key));
         assert!(plain.contains(LINEAR) && plain.contains(MAIN));
         assert!(!tnl.contains("noperspective"));
         assert!(tnl.contains(LINEAR_TNL) && tnl.contains(MAIN_TNL));
+    }
+
+    /// Writing the depth keeps the host from testing it early, so only
+    /// the program of vertices the card transformed does.
+    #[test]
+    fn only_the_cards_vertices_have_a_program_that_writes_the_depth() {
+        let program = |card_depth: bool| {
+            fragment(&Key {
+                steps: vec![Step::Colours { specular: false }],
+                native: 0,
+                card_depth,
+            })
+        };
+        let (host, card) = (program(false), program(true));
+        assert!(!host.contains("gl_FragDepth") && host.contains(LINEAR));
+        assert!(card.contains(LINEAR_CARD) && card.contains(MAIN_CARD));
     }
 
     #[test]
@@ -1193,6 +1242,7 @@ mod tests {
         let source = fragment(&Key {
             steps: vec![step],
             native: 0,
+            card_depth: false,
         });
         assert!(source.contains("ivec4 a = tex;"));
         assert!(source.contains("ivec4 b = ivec4((255 - dif).a);"));
