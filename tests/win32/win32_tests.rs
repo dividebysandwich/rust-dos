@@ -15046,6 +15046,79 @@ fn get_frame_gives_a_streams_frames_as_dibs() {
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
 }
 
+/// AVIStreamOpenFromFileA opens a file's stream in one call: the stream
+/// reads as AVIFileGetStream's does, and its release closes the file,
+/// whose only reference it holds. A file that isn't there gives
+/// AVIERR_FILEOPEN and no stream; a type the file has no stream of gives
+/// AVIERR_NODATA, no stream, and closes the file. Once both are done, a
+/// handle that writes the file and shares nothing opens, so no handle of
+/// it is left open. Outlaw Racers opens its films this way.
+#[test]
+fn avi_stream_open_from_file_gives_a_files_stream() {
+    let kernel32: &[&str] = &["ExitProcess", "CreateFileA"];
+    let avifil32: &[&str] = &[
+        "AVIFileInit",
+        "AVIStreamOpenFromFileA",
+        "AVIStreamLength",
+        "AVIStreamRelease",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("AVIFIL32.DLL", avifil32)];
+    let mut data = vec![0; 0x100];
+    data[..6].copy_from_slice(b"T.AVI\0");
+    data[0x10..0x16].copy_from_slice(b"N.AVI\0");
+    data[0x28..0x30].copy_from_slice(&u64::MAX.to_le_bytes());
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = avifil32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let (stream, missing, no_audio) = (l.at(0x20), l.at(0x28), l.at(0x2C));
+        const VIDS: i32 = 0x7364_6976;
+        const AUDS: i32 = 0x7364_7561;
+        const GENERIC_WRITE: i32 = 0x4000_0000;
+        const OPEN_EXISTING: i32 = 3;
+        a.xor(ebx, ebx)?;
+        a.call(f("AVIFileInit"))?;
+        push_args(a, &[stream as i32, l.at(0) as i32, VIDS, 0, 0x20, 0])?;
+        a.call(f("AVIStreamOpenFromFileA"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 0)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamLength"))?;
+        a.cmp(eax, 2)?;
+        bit_if_equal(a, 1)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamRelease"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 2)?;
+        push_args(a, &[missing as i32, l.at(0x10) as i32, 0, 0, 0x20, 0])?;
+        a.call(f("AVIStreamOpenFromFileA"))?;
+        a.cmp(eax, 0x8004_406F_u32 as i32)?;
+        bit_if_equal(a, 3)?;
+        a.cmp(dword_ptr(missing), 0)?;
+        bit_if_equal(a, 4)?;
+        push_args(a, &[no_audio as i32, l.at(0) as i32, AUDS, 0, 0x20, 0])?;
+        a.call(f("AVIStreamOpenFromFileA"))?;
+        a.cmp(eax, 0x8004_4073_u32 as i32)?;
+        bit_if_equal(a, 5)?;
+        a.cmp(dword_ptr(no_audio), 0)?;
+        bit_if_equal(a, 6)?;
+        let write = [l.at(0) as i32, GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0x80, 0];
+        push_args(a, &write)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, -1)?;
+        bit_if(a, ne, 7)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family(
+        "stream_open_from_file",
+        &[("T.EXE", program), ("T.AVI", small_avi())],
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
 /// A BITMAPINFOHEADER of `bits` bits a pixel, its image size unset.
 fn bitmap_info(width: u32, height: u32, bits: u16, compression: &[u8; 4]) -> Vec<u8> {
     let mut info = [40, width, height].map(u32::to_le_bytes).concat();
