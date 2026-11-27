@@ -505,9 +505,10 @@ pub struct ToadForceGl {
     /// The framebuffers made for `framebuffers`, each asked once
     /// whether it is complete (`attach`).
     framebuffers_made: u64,
-    /// Whether commands went to the context since it was last flushed
-    /// (`submit`) or read from, which waits for them all; and the
-    /// flushes, for the status.
+    /// Whether the card's commands went to the context since it was
+    /// last flushed (`submit`) or read from, which waits for them all;
+    /// and the flushes, for the status. The window's picture
+    /// (`composite`) doesn't count: the window's swap hands it over.
     queued: Cell<bool>,
     flushes: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
@@ -1960,6 +1961,10 @@ impl ToadForceGl {
         }
         self.presents += 1;
         let gl = Rc::clone(&self.gl);
+        // The window draws the picture and swaps its buffers next, which
+        // hands this work to the GPU: no run of the card's commands
+        // flushes it (`submit`).
+        let queued = self.queued.get();
         // SAFETY: the context is current (see the module comment), and
         // every object used is this host's.
         unsafe {
@@ -1970,7 +1975,11 @@ impl ToadForceGl {
                     gl.delete_texture(picture);
                     gl.delete_texture(staging);
                 }
-                let buffer = gl.create_framebuffer().ok()?;
+                let Ok(buffer) = gl.create_framebuffer() else {
+                    self.leave();
+                    self.queued.set(queued);
+                    return None;
+                };
                 let make = || {
                     let texture = gl.create_texture().expect("an OpenGL texture");
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -2042,6 +2051,7 @@ impl ToadForceGl {
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
             self.leave();
+            self.queued.set(queued);
             Some((picture, size))
         }
     }

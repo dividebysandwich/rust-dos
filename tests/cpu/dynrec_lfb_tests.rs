@@ -106,6 +106,8 @@ impl Host for Recorder {
         true
     }
 
+    fn submit(&mut self) {}
+
     fn forget(&mut self) {
         self.log("forget".to_string());
     }

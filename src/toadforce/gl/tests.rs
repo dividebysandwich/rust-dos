@@ -489,11 +489,13 @@ impl Bench {
 const WHITE: u32 = 0xFFFF_FFFF;
 
 /// A run of commands that drew ends with a flush, so the GPU starts on
-/// the draws while the program runs on; a run that gave the GPU nothing,
-/// or one after a read-back, which waited for every draw, has none.
+/// the draws while the program runs on. A run that gave the GPU nothing
+/// has none, and nor has one whose last host work was a read-back,
+/// which waited for every command before it.
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn a_run_that_drew_is_flushed_and_one_that_didnt_isnt() {
+    use crate::toadforce::gpu::{Clear, Host, Pages};
     bench!(bench, "toadforce flushes");
     let mut rig = Rig::new(Format::X8R8G8B8, None);
     rig.card.set_host(Some(bench.host()), &mut rig.memory);
@@ -508,11 +510,39 @@ fn a_run_that_drew_is_flushed_and_one_that_didnt_isnt() {
     // A run that only sets states queues nothing for the GPU.
     rig.states(&[(RS_CULLMODE, 1)]);
     assert_eq!(flushes(&rig), before + 1);
-    // Nor does a read-back: it waited for the draws.
-    rig.draw(&quad(8.0, 8.0, 20.0, 0xFF00_FF00, 1.0));
+    // A read-back between runs, after the draw's run was flushed, adds
+    // none either.
     rig.card.settle(&mut rig.memory, None);
     rig.states(&[(RS_CULLMODE, 1)]);
-    assert_eq!(flushes(&rig), before + 2);
+    assert_eq!(flushes(&rig), before + 1);
+
+    // On the host by itself: a read after the host's last command
+    // waited for it, so the end of the run flushes nothing, and without
+    // the read it flushes.
+    let mut host = bench.host();
+    let surface = Surface {
+        offset: 0,
+        pitch: SIZE * 4,
+        width: SIZE,
+        height: SIZE,
+        format: Format::X8R8G8B8,
+    };
+    let mut memory = vec![0; (SIZE * SIZE * 4) as usize];
+    let pages = Pages::default();
+    let all = rect(0, 0, SIZE, SIZE);
+    let clear = Clear {
+        surface,
+        rects: std::slice::from_ref(&all),
+        value: 0xFF10_2030,
+        mask: 0xFFFF_FFFF,
+    };
+    assert_eq!(host.clear(&clear, &memory, &pages), Some(surface));
+    assert!(host.read_back_rows(&surface, (0, 32), &mut memory));
+    host.submit();
+    assert_eq!(host.flushes, 0);
+    assert_eq!(host.clear(&clear, &memory, &pages), Some(surface));
+    host.submit();
+    assert_eq!(host.flushes, 1);
 }
 
 #[test]
