@@ -1493,6 +1493,50 @@ fn a_modeless_property_sheet_shows_its_page() {
     assert_eq!(r[10], 1);
 }
 
+/// A wizard of no pages keeps its dialog template's size, with Cancel
+/// inside it: Outlaw Racers' installer (Setup Factory, MFC) shows its
+/// copy progress on one, and it was a sliver 6 pixels wide.
+#[test]
+fn a_wizard_with_no_pages_keeps_its_size() {
+    use Arg::*;
+    const PSH_PROPSHEETPAGE: u32 = 0x0008;
+    const PSH_WIZARD: u32 = 0x0020;
+    const PSH_MODELESS: u32 = 0x0400;
+    const IDCANCEL: u32 = 2;
+    const HEADER: u32 = FREE;
+    const SHEET: u32 = FREE + 0x40;
+    const CANCEL: u32 = FREE + 0x50;
+    const CAPTION: u32 = FREE + 0x60;
+    let calls = [
+        call("InitCommonControls", &[]),
+        call("PropertySheetA", &[At(HEADER)]),
+        call("GetWindowRect", &[Res(1), At(SHEET)]),
+        call("GetDlgItem", &[Res(1), I(IDCANCEL)]),
+        call("GetWindowRect", &[Res(3), At(CANCEL)]),
+        call("DestroyWindow", &[Res(1)]),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    put(&mut d, CAPTION, b"Setup Wizard\0");
+    let flags = PSH_WIZARD | PSH_PROPSHEETPAGE | PSH_MODELESS;
+    let header = [40, flags, 0, 0, 0, base + CAPTION, 0, 0, 0, 0];
+    for (i, w) in header.iter().enumerate() {
+        put32(&mut d, HEADER + 4 * i as u32, *w);
+    }
+    let (cpu, at) = run("propsheet_no_pages", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert!(r[1] != 0 && r[1] != u32::MAX, "the sheet is made");
+    let rect = |at: u32| -> Vec<i32> { (0..4).map(|i| peek(&cpu, at + 4 * i) as i32).collect() };
+    let (sheet, cancel) = (rect(base + SHEET), rect(base + CANCEL));
+    assert!(sheet[2] - sheet[0] > 200, "the sheet is wide: {sheet:?}");
+    assert!(sheet[3] - sheet[1] > 100, "and high: {sheet:?}");
+    assert!(
+        cancel[0] > sheet[0] && cancel[2] < sheet[2] && cancel[3] < sheet[3],
+        "Cancel {cancel:?} is inside the sheet {sheet:?}"
+    );
+}
+
 /// MFC lays out its property pages in the font of COMCTL32's own sheet
 /// and wizard dialogs, which it reads from their resources
 /// (AfxGetPropSheetFont): Beasts and Bumpkins' setup came out with pages

@@ -1557,13 +1557,23 @@ fn adjust_wizard(cpu: &mut Cpu, sheet: &Sheet) -> Vec<Op> {
     let hwnd = sheet.hwnd;
     let line = item(cpu, hwnd, IDC_SUNKEN_LINE);
     let header = item(cpu, hwnd, IDC_SUNKEN_LINEHEADER);
-    let mut rc = map_rect(cpu, hwnd, Rect::new(0, 0, sheet.width, sheet.height));
     let line_rect = child_rect(cpu, line);
-    let (_, client_h) = client_size(cpu, hwnd);
-    rc.bottom += client_h - line_rect.top - 1;
-    let (fx, fy) = frame_size(cpu, hwnd);
-    let mut ops = vec![resize(cpu, hwnd, rc.width() + fx, rc.height() + fy)];
-    let cl = Rect::new(0, 0, rc.width(), rc.height());
+    let (client_w, client_h) = client_size(cpu, hwnd);
+    let mut ops = Vec::new();
+    // A wizard with no page keeps the size of its dialog template, where
+    // Wine shrinks it to its frame. Setup Factory's installers rely on
+    // that: they show their copy progress on a wizard of no pages, with
+    // controls of their own, which in Outlaw Racers' was a sliver 6
+    // pixels wide.
+    let cl = if sheet.pages.is_empty() {
+        Rect::new(0, 0, client_w, client_h)
+    } else {
+        let mut rc = map_rect(cpu, hwnd, Rect::new(0, 0, sheet.width, sheet.height));
+        rc.bottom += client_h - line_rect.top - 1;
+        let (fx, fy) = frame_size(cpu, hwnd);
+        ops.push(resize(cpu, hwnd, rc.width() + fx, rc.height() + fy));
+        Rect::new(0, 0, rc.width(), rc.height())
+    };
     // PROPSHEET_GetPaddingInfoWizard: from the line to the buttons.
     let measure = if sheet.has_help {
         IDHELP
