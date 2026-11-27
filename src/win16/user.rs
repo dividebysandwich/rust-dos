@@ -1106,9 +1106,9 @@ const EWX_REBOOT: u32 = 2;
 const EW_RESTARTWINDOWS: u32 = 0x42;
 const EW_REBOOTSYSTEM: u32 = 0x43;
 
-/// ExitWindows(code, reserved): the session ends when no other task's
-/// window refuses (session.rs), and the call comes back only then, with
-/// FALSE. The calling task's own windows aren't asked.
+/// ExitWindows(code, reserved): the session ends unless another task's
+/// window refuses (session.rs). The call comes back, with FALSE, only
+/// when one refused. The calling task's own windows aren't asked.
 fn exit_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let flags = match args[0] & 0xFFFF {
         EW_RESTARTWINDOWS | EW_REBOOTSYSTEM => EWX_REBOOT,
