@@ -568,6 +568,7 @@ GetTokenInformation
 OpenThreadToken
 RegeditMain
 SetThreadToken
+Regsvr32Main
 
 DLL MSVCRT.DLL
 __getmainargs

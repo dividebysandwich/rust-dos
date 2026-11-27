@@ -31,7 +31,8 @@
 //! The Windows directory, C:\WINDOWS, has the programs of Windows that
 //! are built in the same way: NOTEPAD.EXE (user32/notepad.rs), which
 //! setups run to show a readme, and REGEDIT.EXE (regedit.rs), which they
-//! run to import a registration file.
+//! run to import a registration file. The system directory has
+//! REGSVR32.EXE (regsvr32.rs), which they run to register a DLL.
 
 use super::forwarders;
 use super::loader::{self, SYSTEM_DIR, WINDOWS_DIR};
@@ -65,6 +66,10 @@ pub fn sync(bus: &mut Bus) {
         .map(|&i| (DLLS[i].name.to_string(), stubs::file(i, version).into()))
         .collect();
     if bus.win32.enabled {
+        files.push((
+            "REGSVR32.EXE".to_string(),
+            super::regsvr32::file(bus).into(),
+        ));
         files.extend(
             forwarders::FORWARDERS
                 .iter()
