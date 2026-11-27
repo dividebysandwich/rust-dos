@@ -226,9 +226,13 @@ impl Tracker {
         self.gpu.clear();
         self.buffers.clear();
         // What pages were let do went with what they had.
+        let lost = self
+            .direct
+            .iter()
+            .any(|d| d & (DIRECT_READ | DIRECT_WRITE) != 0);
         self.direct.fill(0);
         self.unstamped.clear();
-        self.generation += 1;
+        self.generation += lost as u64;
     }
 
     /// The renderer lost pages sent to it, which the recording dropped:

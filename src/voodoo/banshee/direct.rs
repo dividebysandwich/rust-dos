@@ -126,7 +126,7 @@ impl Voodoo {
     /// that goes with it done: its next writes of the page may be only
     /// the bytes if the recording has no pixel of its 3D buffers there
     /// (`mirror_memory`), as far as the tracker goes (`Tracker::grant`).
-    fn banshee_grant_write(&mut self, at: u32) {
+    pub(super) fn banshee_grant_write(&mut self, at: u32) {
         let tracker = &mut self.gpu.get_mut().tracker;
         if tracker.direct_at(at) & DIRECT_WRITE != 0 {
             return;
@@ -352,5 +352,19 @@ mod tests {
         let mut pages = Vec::new();
         v.banshee_grants(|g| pages.extend(g.take(7)));
         assert_eq!(pages, [0, 0, 0, 0, 0, DIRECT_READ, 0]);
+    }
+
+    #[test]
+    fn while_recording_a_run_of_bytes_lets_the_pages_it_wrote_go_direct() {
+        use crate::voodoo::tracker::DIRECT_READ;
+        let mut v = card();
+        v.set_mirror(true);
+        // An MMX store's 8 bytes across pages 2 and 3, as
+        // `jit_dev_write_run` writes them.
+        v.banshee_memory_write(0x2FFC, &[1; 8]);
+        let both = DIRECT_READ | DIRECT_WRITE;
+        assert_eq!(v.banshee_grant(0x2000).0, both);
+        assert_eq!(v.banshee_grant(0x3000).0, both);
+        assert_eq!(v.banshee_grant(0x4000).0, 0);
     }
 }
