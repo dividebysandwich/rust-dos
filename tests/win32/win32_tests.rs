@@ -11709,17 +11709,21 @@ fn load_image_unpacks_an_rle8_bitmap_into_a_dib_section() {
 }
 
 /// LoadImageA's LR_LOADTRANSPARENT and LR_LOADMAP3DCOLORS change the
-/// color table of the bitmap it makes, as LoadImage's documentation and
-/// Wine's have it: the first pixel's entry becomes COLOR_WINDOW, or
-/// COLOR_3DFACE with both flags, and the second flag turns 128, 192 and
-/// 223 grey into COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT. The
-/// resource keeps its colors. InstallShield 6 setups (Anachronox) load
-/// their buttons' pictures this way, which have a magenta background.
+/// color table of the bitmap it makes, as LoadImage's documentation has
+/// it: the first pixel's entry becomes COLOR_WINDOW, or COLOR_3DFACE
+/// with both flags, and the second flag turns 128, 192 and 223 grey
+/// into COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT. The resource
+/// keeps its colors. The scheme's colors differ from the greys, so
+/// each mapping shows, and its COLOR_3DFACE is the 223 grey, which the
+/// first pixel's entry keeps with both flags. InstallShield 6 setups
+/// (Anachronox) load their buttons' pictures this way, which have a
+/// magenta background.
 #[test]
 fn load_image_maps_a_bitmaps_transparent_and_3d_colors() {
     let names: &[&str] = &[
         "GetModuleHandleA",
         "LoadImageA",
+        "SetSysColors",
         "CreateCompatibleDC",
         "SelectObject",
         "GetDIBColorTable",
@@ -11727,14 +11731,24 @@ fn load_image_maps_a_bitmaps_transparent_and_3d_colors() {
     ];
     let imports: &[(&str, &[&str])] = &[
         ("KERNEL32.DLL", &names[..1]),
-        ("USER32.DLL", &names[1..2]),
-        ("GDI32.DLL", &names[2..]),
+        ("USER32.DLL", &names[1..3]),
+        ("GDI32.DLL", &names[3..]),
     ];
     const RT_BITMAP: u16 = 2;
     const LR_LOADTRANSPARENT: u32 = 0x0020;
     const LR_LOADMAP3DCOLORS: u32 = 0x1000;
     const LR_CREATEDIBSECTION: u32 = 0x2000;
     const TABLE: u32 = 0x100;
+    const SCHEME: u32 = 0x180;
+    // COLOR_WINDOW, COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT, and
+    // the colors SetSysColors gives them: red and blue alike, so a
+    // COLORREF and an RGBQUAD read the same.
+    let (window, shadow, face, light) = (0x20_4020u32, 0x50_6050, 0xDF_DFDF, 0x70_A070);
+    let mut data = vec![0u8; 0x200];
+    for (i, w) in [5u32, 16, 15, 22, window, shadow, face, light].into_iter().enumerate() {
+        let at = SCHEME as usize + 4 * i;
+        data[at..at + 4].copy_from_slice(&w.to_le_bytes());
+    }
     // A 2x1 bitmap of 4 bits with five colors, its first pixel magenta
     // (entry 1, in the byte's high half).
     let colors = [0x80_8080u32, 0xFF_00FF, 0xC0_C0C0, 0xDF_DFDF, 0x12_3456];
@@ -11746,21 +11760,21 @@ fn load_image_maps_a_bitmaps_transparent_and_3d_colors() {
         dib.extend_from_slice(&c.to_le_bytes());
     }
     dib.extend_from_slice(&[0x10, 0, 0, 0]);
-    let mut both = colors;
-    both[1] = 0xC0_C0C0;
-    both[3] = 0xC0_C0C0;
+    let both = [shadow, face, face, light, colors[4]];
     let mut transparent = colors;
-    transparent[1] = 0xFF_FFFF;
+    transparent[1] = window;
+    let map_3d = [shadow, colors[1], face, light, colors[4]];
     let cases = [
         (LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS, both),
         (LR_LOADTRANSPARENT, transparent),
+        (LR_LOADMAP3DCOLORS, map_3d),
         (0, colors),
     ];
     let main = |a: &mut CodeAssembler, l: &Layout| {
         a.xor(ebx, ebx)?;
         call_with(a, l.import(0), &[Arg::I(0)])?;
         a.mov(esi, eax)?;
-        call_with(a, l.import(2), &[Arg::I(0)])?;
+        call_with(a, l.import(3), &[Arg::I(0)])?;
         a.mov(edi, eax)?;
         // LoadImageA, and the bitmap selected into the DC in EDI.
         let load = |a: &mut CodeAssembler, flags: u32| -> Result<(), IcedError> {
@@ -11768,32 +11782,35 @@ fn load_image_maps_a_bitmaps_transparent_and_3d_colors() {
             call_with(a, l.import(1), &[&image[..], &[Arg::I(flags)]].concat())?;
             a.push(eax)?;
             a.push(edi)?;
-            a.call(l.import(3))
+            a.call(l.import(4))
         };
-        // The color tables of DIB sections.
+        // A bitmap of GDI's, in the default scheme: its first pixel is
+        // the button face's grey.
+        load(a, LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(l.import(6))?;
+        a.cmp(eax, 0xC0_C0C0)?;
+        check(a, false, 0)?;
+        let at = |offset: u32| Arg::I(l.at(offset) as u32);
+        call_with(a, l.import(2), &[Arg::I(4), at(SCHEME), at(SCHEME + 16)])?;
+        // The color tables of DIB sections, in the scheme set above.
         for (bit, (flags, want)) in cases.into_iter().enumerate() {
             load(a, flags | LR_CREATEDIBSECTION)?;
             a.push(l.at(TABLE) as i32)?;
             a.push(5)?;
             a.push(0)?;
             a.push(edi)?;
-            a.call(l.import(4))?;
+            a.call(l.import(5))?;
             let mut wrong = a.create_label();
             for (i, c) in want.into_iter().enumerate() {
                 a.cmp(dword_ptr(l.at(TABLE + 4 * i as u32)), c as i32)?;
                 a.jne(wrong)?;
             }
             a.set_label(&mut wrong)?;
-            check(a, false, bit as u32)?;
+            check(a, false, bit as u32 + 1)?;
         }
-        // A bitmap of GDI's: its first pixel is the button face's grey.
-        load(a, LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS)?;
-        a.push(0)?;
-        a.push(0)?;
-        a.push(edi)?;
-        a.call(l.import(5))?;
-        a.cmp(eax, 0xC0_C0C0)?;
-        check(a, false, 3)?;
         a.mov(eax, ebx)?;
         a.ret()
     };
@@ -11801,11 +11818,69 @@ fn load_image_maps_a_bitmaps_transparent_and_3d_colors() {
         BASE,
         None,
         imports,
-        &[0; 0x200],
+        &data,
         &[("", &main)],
         &[(RT_BITMAP, 3, 0x409, &dib)],
     );
     let (code, text) = run_files("load_image_3d_colors", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {text}", !code & 0x1F);
+}
+
+/// LoadImageA of a bitmap file takes its bits where the file header's
+/// bfOffBits says, as a GDI bitmap and as a DIB section, and from after
+/// the color table when bfOffBits is 0, as Wine's LoadImage reads it.
+/// GAP.BMP has four bytes between its table and its bits, ZERO.BMP a
+/// bfOffBits of 0. Each is one magenta pixel, entry 1 of its table;
+/// the gap's bytes and the file header's first are other entries.
+#[test]
+fn load_image_takes_a_bitmap_files_bits_at_bf_off_bits() {
+    let names: &[&str] = &["LoadImageA", "CreateCompatibleDC", "SelectObject", "GetPixel"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &names[..1]), ("GDI32.DLL", &names[1..])];
+    const LR_LOADFROMFILE: u32 = 0x0010;
+    const LR_CREATEDIBSECTION: u32 = 0x2000;
+    // A 1x1 bitmap of 8 bits, its table black and magenta.
+    let file = |offset: u32, gap: usize| {
+        let mut f = b"BM".to_vec();
+        for w in [0u32, 0, offset] {
+            f.extend_from_slice(&w.to_le_bytes());
+        }
+        for w in [40u32, 1, 1, 1 | 8 << 16, 0, 4, 0, 0, 2, 0, 0, 0xFF_00FF] {
+            f.extend_from_slice(&w.to_le_bytes());
+        }
+        f.extend(std::iter::repeat_n(0, gap));
+        f.extend_from_slice(&[1, 0, 0, 0]);
+        f
+    };
+    let gap = file(14 + 40 + 8 + 4, 4);
+    let zero = file(0, 0);
+    let mut data = vec![0u8; 0x40];
+    data[..8].copy_from_slice(b"GAP.BMP\0");
+    data[0x10..0x19].copy_from_slice(b"ZERO.BMP\0");
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        call_with(a, l.import(1), &[Arg::I(0)])?;
+        a.mov(esi, eax)?;
+        let mut bit = 0;
+        for name in [0, 0x10] {
+            for flags in [LR_LOADFROMFILE, LR_LOADFROMFILE | LR_CREATEDIBSECTION] {
+                let path = Arg::I(l.at(name) as u32);
+                let image = [Arg::I(0), path, Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(flags)];
+                call_with(a, l.import(0), &image)?;
+                a.push(eax)?;
+                a.push(esi)?;
+                a.call(l.import(2))?;
+                call_with(a, l.import(3), &[Arg::Esi, Arg::I(0), Arg::I(0)])?;
+                a.cmp(eax, 0xFF_00FF)?;
+                check(a, false, bit)?;
+                bit += 1;
+            }
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let files = [("T.EXE", exe), ("GAP.BMP", gap), ("ZERO.BMP", zero)];
+    let (code, text) = run_files("load_image_bf_off_bits", &files);
     assert_eq!(code, 0xF, "the checks that failed: {:04b} {text}", !code & 0xF);
 }
 

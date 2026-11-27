@@ -815,23 +815,26 @@ fn packed_bits(cpu: &mut Cpu, at: u32) -> Option<(bitmap::DibInfo, u32)> {
     Some((info, at + offset))
 }
 
-/// A copy of the DIB header and color table at `at`, in pages the
-/// caller frees, with the colors LoadImage's LR_LOADTRANSPARENT and
-/// LR_LOADMAP3DCOLORS ask for; None without either flag or without a
-/// color table. As LoadImage's documentation and Wine's have it:
+/// A copy of the DIB header and color table at `at`, with the colors
+/// LoadImage's LR_LOADTRANSPARENT and LR_LOADMAP3DCOLORS ask for; None
+/// without either flag or without a color table. As LoadImage's
+/// documentation has it: LR_LOADMAP3DCOLORS turns the table's
+/// RGB(128,128,128), RGB(192,192,192) and RGB(223,223,223) into
+/// COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT, and
 /// LR_LOADTRANSPARENT turns the table entry of the first pixel (in the
 /// first byte of `bits`) into COLOR_WINDOW, or COLOR_3DFACE when
-/// LR_LOADMAP3DCOLORS is given too, and LR_LOADMAP3DCOLORS turns the
-/// table's RGB(128,128,128), RGB(192,192,192) and RGB(223,223,223)
-/// into COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT. The resource
-/// itself keeps its colors.
+/// LR_LOADMAP3DCOLORS is given too. The documentation says
+/// LR_LOADTRANSPARENT takes precedence, so the first pixel's entry is
+/// set last: it ends as COLOR_3DFACE even when the scheme's face is one
+/// of the three greys, which the mapping would turn into another color
+/// if it ran after (as Wine's does). The resource keeps its colors.
 fn mapped_colors(
     cpu: &mut Cpu,
     at: u32,
     info: &bitmap::DibInfo,
     bits: u32,
     flags: u32,
-) -> Option<u32> {
+) -> Option<Vec<u8>> {
     use super::sysparams::{COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_BTNSHADOW, COLOR_WINDOW};
     let map_3d = flags & LR_LOADMAP3DCOLORS != 0;
     if flags & (LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS) == 0 || info.bpp > 8 {
@@ -851,10 +854,6 @@ fn mapped_colors(
     // An RGBQUAD or RGBTRIPLE is blue, green, red; a COLORREF red first.
     let bgr = |color: u32| [(color >> 16) as u8, (color >> 8) as u8, color as u8];
     let table = &mut data[info.header_size as usize..];
-    if let Some(first) = first.filter(|&first| first < info.table_len) {
-        let i = (first * entry) as usize;
-        table[i..i + 3].copy_from_slice(&bgr(if map_3d { face } else { window }));
-    }
     if map_3d {
         for color in table.chunks_exact_mut(entry as usize) {
             let to = match color[..3] {
@@ -866,14 +865,17 @@ fn mapped_colors(
             color[..3].copy_from_slice(&bgr(to));
         }
     }
-    let copy = kernel32::alloc_pages(cpu, len)?;
-    cpu.bus.guest_write_bytes(copy, &data);
-    Some(copy)
+    if let Some(first) = first.filter(|&first| first < info.table_len) {
+        let i = (first * entry) as usize;
+        table[i..i + 3].copy_from_slice(&bgr(if map_3d { face } else { window }));
+    }
+    Some(data)
 }
 
 /// A bitmap from the DIB whose header and color table are at `at`: one
 /// of GDI's, or a DIB section. Its bits follow the table (a packed DIB)
-/// unless `file_bits` says where they are. `flags` are LoadImage's.
+/// unless `file_bits` says where they are (a bitmap file's bfOffBits).
+/// `flags` are LoadImage's.
 fn bitmap_from_dib(cpu: &mut Cpu, at: u32, file_bits: Option<u32>, flags: u32) -> Option<u32> {
     let Some((info, packed)) = packed_bits(cpu, at) else {
         return if cpu.bus.guest_faulted() {
@@ -884,9 +886,16 @@ fn bitmap_from_dib(cpu: &mut Cpu, at: u32, file_bits: Option<u32>, flags: u32) -
     };
     let bits = file_bits.unwrap_or(packed);
     let dib_section = flags & LR_CREATEDIBSECTION != 0;
-    let Some(copy) = mapped_colors(cpu, at, &info, bits, flags) else {
+    let Some(data) = mapped_colors(cpu, at, &info, bits, flags) else {
         return bitmap_from_parts(cpu, at, &info, bits, dib_section);
     };
+    // GDI reads the header and table from the program's memory. Without
+    // room for the copy the load fails, so the program never gets the
+    // bitmap's own colors in place of the ones it asked for.
+    let Some(copy) = kernel32::alloc_pages(cpu, data.len() as u32) else {
+        return Some(0);
+    };
+    cpu.bus.guest_write_bytes(copy, &data);
     let h = match bitmap::read_info(cpu, copy, 0, 0) {
         Some(info) => bitmap_from_parts(cpu, copy, &info, bits, dib_section),
         None => Some(0),
@@ -1169,8 +1178,11 @@ pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 // A BITMAPFILEHEADER, then the packed DIB.
                 let magic = cpu.bus.guest_read_16(at);
                 if magic == 0x4D42 && size > 14 {
-                    let bits = at + cpu.bus.guest_read_32(at + 10);
-                    bitmap_from_dib(cpu, at + 14, Some(bits), flags)
+                    // bfOffBits, where 0 has the bits follow the color
+                    // table, as Wine's LoadImage reads it.
+                    let offset = cpu.bus.guest_read_32(at + 10);
+                    let bits = (offset != 0).then(|| at.wrapping_add(offset));
+                    bitmap_from_dib(cpu, at + 14, bits, flags)
                 } else {
                     Some(0)
                 }
