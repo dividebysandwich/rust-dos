@@ -261,7 +261,10 @@ pub fn let_go(cpu: &mut Cpu, kind: &Kind) {
         | Kind::TypeEnum { .. }
         | Kind::Allocator { .. }
         | Kind::MediaSample { .. }
-        | Kind::Clock { .. } => {}
+        | Kind::Clock { .. }
+        | Kind::Mapper {}
+        | Kind::Device { .. }
+        | Kind::Bag { .. } => {}
     }
 }
 
