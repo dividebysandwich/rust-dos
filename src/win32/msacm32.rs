@@ -121,7 +121,7 @@ const FIRST_STREAM: u32 = 0x0AC0_0000;
 
 /// The W32 version whose states have the installable drivers: the
 /// processes that found theirs, the drivers, those open and the streams
-/// of drivers.
+/// of drivers, and the streams of the PCM converter.
 pub const DRIVERS_SAVED: u16 = 111;
 
 /// The streams open, by handle, and the installable drivers (`drivers`):
@@ -370,13 +370,14 @@ fn adpcm_format(cpu: &mut Cpu, at: u32) -> Option<(adpcm::Format, u32)> {
 }
 
 /// Write PCM of `channels`, `rate` and `bits` at `at`, as WAVEFORMATEX
-/// with no extra bytes if `room` has space for its size.
+/// with no extra bytes if `room` has space for its size. The bytes a
+/// second wrap at 32 bits for a rate a program made that large.
 fn write_pcm(cpu: &mut Cpu, at: u32, room: u32, channels: u16, rate: u32, bits: u16) {
     let align = channels * bits / 8;
     cpu.bus.guest_write_16(at, WAVE_FORMAT_PCM);
     cpu.bus.guest_write_16(at + 2, channels);
     cpu.bus.guest_write_32(at + 4, rate);
-    cpu.bus.guest_write_32(at + 8, rate * align as u32);
+    cpu.bus.guest_write_32(at + 8, rate.wrapping_mul(u32::from(align)));
     cpu.bus.guest_write_16(at + 12, align);
     cpu.bus.guest_write_16(at + 14, bits);
     if room >= 18 {

@@ -81,11 +81,12 @@ impl Pcm {
 
 /// acmStreamSize from `from` to `to`: the bytes of `to` that `bytes` of
 /// `from` convert to, by their bytes a second, rounded up and then down
-/// to whole frames of `to`. None if that passes 4 GB.
+/// to whole frames of `to`. None if that passes 4 GB. A program's rate
+/// can be any 32-bit number, so the product takes 128 bits.
 pub fn size(from: Pcm, to: Pcm, bytes: u32) -> Option<u32> {
-    let whole = u64::from(bytes - bytes % from.frame());
-    let rate = from.per_second();
-    let converted = (whole * to.per_second()).div_ceil(rate);
+    let whole = u128::from(bytes - bytes % from.frame());
+    let rate = u128::from(from.per_second());
+    let converted = (whole * u128::from(to.per_second())).div_ceil(rate);
     let converted = u32::try_from(converted).ok()?;
     Some(converted - converted % to.frame())
 }
@@ -196,5 +197,9 @@ mod tests {
         // Up, then down to whole frames of 4 bytes: 16.54 to 17 to 16.
         assert_eq!(size(pcm(1, 8000, 8), pcm(2, 11025, 16), 3), Some(16));
         assert_eq!(size(pcm(1, 11025, 8), pcm(2, 11025, 16), u32::MAX), None);
+        // The largest rate and size: past 64 bits before the division.
+        let fastest = pcm(2, u32::MAX, 16);
+        assert_eq!(size(fastest, fastest, u32::MAX), Some(u32::MAX - 3));
+        assert_eq!(size(pcm(1, 1, 8), fastest, u32::MAX), None);
     }
 }

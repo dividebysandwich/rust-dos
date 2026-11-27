@@ -894,16 +894,17 @@ encodes 16-bit PCM to IMA ADPCM and decodes it back through
 `acmStreamOpen` and `acmStreamConvert`, and the samples match a decoder
 written from the format's definition (`tests/win32/wine_dlls.rs`, which
 runs when WINE_DLLS names the folder). It takes
-`win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
-exports and only the decoders of MS ADPCM and IMA ADPCM. MSACM32 finds
-the codec in SYSTEM.INI's `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`)
-and opens it with OpenDriver. WINMM's installable drivers are real for
-that: OpenDriver loads the DLL as LoadLibrary does, finds its alias in
+`win32_dlls_replace=msacm32`, so that Wine's DLL is what runs: the
+built-in MSACM32.DLL would decode IMA ADPCM with its own decoder and
+hand only the encoding to the codec. MSACM32 finds the codec in
+SYSTEM.INI's `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`) and opens
+it with OpenDriver. WINMM's installable drivers are real for that:
+OpenDriver loads the DLL as LoadLibrary does, finds its alias in
 SYSTEM.INI, and sends its `DriverProc` DRV_LOAD, DRV_ENABLE and
 DRV_OPEN; SendDriverMessage and CloseDriver call it as Wine's `winmm`
 does. ADVAPI32's `Reg*W` stubs return ERROR_CALL_NOT_IMPLEMENTED to
-guest code: Windows 95's return 0 with that error set, and MSACM32 takes
-0 as ERROR_SUCCESS.
+guest code: Windows 95's return 0 with that error set, and MSACM32
+takes 0 as ERROR_SUCCESS.
 
 Wine's `comctl32`, `comdlg32` and `quartz` don't run this way: their
 window classes and dialogs are written in Unicode, so they need USER32's
