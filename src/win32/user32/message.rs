@@ -454,7 +454,9 @@ fn next_timer(state: &super::State, tid: u32) -> Option<u64> {
 /// The first window of `tid` (under `hwnd`, if it isn't 0) that needs
 /// painting: parents before their children, the top of the z-order
 /// first. A WS_EX_TRANSPARENT window waits for the siblings beneath it,
-/// so that it draws over what they paint.
+/// so that it draws over what they paint, unless `hwnd` names it: its
+/// siblings are then outside the filter. (Wine looks from the desktop
+/// and, when the window it finds isn't under the filter, gives none.)
 pub fn paint_window(state: &super::State, tid: u32, hwnd: u32) -> Option<u32> {
     let root = if hwnd == 0 || hwnd == 0xFFFF_FFFF {
         DESKTOP
@@ -2352,6 +2354,44 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(order, [top, white, text]);
+    }
+
+    /// A WS_EX_TRANSPARENT child doesn't wait for a sibling beneath it of
+    /// another thread, and it stays the pick when the message filter
+    /// names it, since the siblings it would wait for are then outside
+    /// the filter.
+    #[test]
+    fn a_transparent_window_waits_only_for_siblings_the_call_can_take() {
+        use super::super::paint::PAINT_INTERNAL;
+        use super::super::window::{WS_CHILD, WS_EX_TRANSPARENT, WS_VISIBLE, Window};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let visible = Window {
+            style: WS_VISIBLE,
+            ..Window::default()
+        };
+        let parent = user(&mut cpu).new_window(visible).unwrap();
+        let child = |ex_style, tid| Window {
+            style: WS_CHILD | WS_VISIBLE,
+            ex_style,
+            tid,
+            parent,
+            paint: PAINT_INTERNAL,
+            ..Window::default()
+        };
+        let text = user(&mut cpu)
+            .new_window(child(WS_EX_TRANSPARENT, 0))
+            .unwrap();
+        let other = user(&mut cpu).new_window(child(0, 1)).unwrap();
+        let white = user(&mut cpu).new_window(child(0, 0)).unwrap();
+        if let Some(w) = user(&mut cpu).window_mut(parent) {
+            w.children = vec![text, other, white];
+        }
+        assert_eq!(paint_window(user(&mut cpu), 0, parent), Some(white));
+        assert_eq!(paint_window(user(&mut cpu), 0, text), Some(text));
+        if let Some(w) = user(&mut cpu).window_mut(white) {
+            w.paint = 0;
+        }
+        assert_eq!(paint_window(user(&mut cpu), 0, parent), Some(text));
     }
 
     /// A program that puts the cursor back in the middle after each move
