@@ -16,6 +16,7 @@ use std::collections::btree_map::Entry;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::hostfs::{self, Backend, File, Handle, Meta, Mode, OpenOptions};
 
@@ -29,6 +30,13 @@ pub trait Lower {
     /// The names in a folder, and which are folders.
     fn read_dir(&self, path: &str) -> io::Result<Vec<(OsString, bool)>>;
     fn open(&self, path: &str) -> io::Result<Box<dyn Handle>>;
+    /// A time that moves whenever the names in the folder `path` change
+    /// (`hostfs::folder_time`); None for no folder, and where it can't be
+    /// told. What never changes, as an archive's folders, may give any
+    /// time that stays the same.
+    fn folder_time(&self, _path: &str) -> Option<SystemTime> {
+        None
+    }
 }
 
 /// `path` (`A/B`) under the host folder `root`.
@@ -65,6 +73,10 @@ impl Lower for Folder {
 
     fn open(&self, path: &str) -> io::Result<Box<dyn Handle>> {
         Ok(Box::new(File::open(join(&self.0, path))?))
+    }
+
+    fn folder_time(&self, path: &str) -> Option<SystemTime> {
+        hostfs::folder_time(join(&self.0, path))
     }
 }
 
@@ -416,6 +428,28 @@ impl Backend for Overlay {
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<(OsString, bool)>> {
         self.names(&hostfs::layer_path(path))
+    }
+
+    /// The later of the two folders' times, where the folder is in both:
+    /// a change of names above or below moves its own folder's time, and
+    /// that is the time of now, later than the other's. A folder only
+    /// below (none above yet) has the time below; the guest's calls that
+    /// make it above add a name, which `disk` notes by itself. What is
+    /// hidden below changes only by the guest's calls too. Each side's
+    /// time is what its own folder gives (`hostfs::folder_time`), so an
+    /// upper folder on a backend that can't tell leaves it unknown.
+    fn folder_time(&self, path: &Path) -> Option<SystemTime> {
+        let path = hostfs::layer_path(path);
+        let above = match self.upper_meta(&path) {
+            Some(meta) if !meta.is_dir => return None,
+            Some(_) => Some(hostfs::folder_time(self.upper_path(&path)?)?),
+            None => None,
+        };
+        let below = match self.lower_meta(&path) {
+            Some(meta) if meta.is_dir => Some(self.lower.folder_time(&path)?),
+            _ => None,
+        };
+        above.max(below)
     }
 
     fn create_dir(&self, path: &Path) -> io::Result<()> {

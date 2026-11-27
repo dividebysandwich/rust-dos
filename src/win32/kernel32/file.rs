@@ -615,9 +615,9 @@ pub(super) fn set_file_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-/// The size of the open file `sft`.
+/// The size of the open file `sft` (`DiskController::file_size`).
 fn size_of(disk: &crate::disk::DiskController, sft: u16) -> u32 {
-    disk.sft_entry(sft).map_or(0, |e| e.size)
+    disk.file_size(sft).unwrap_or(0)
 }
 
 /// GetFileSize(handle, high): the size's low 32 bits, its high ones (0)
@@ -856,7 +856,7 @@ pub(crate) fn resize_locked(cpu: &Cpu, sft: u16, size: u32) -> bool {
     let disk = &cpu.bus.disk;
     disk.has_locks() && {
         let owner = crate::interrupts::int21::lock_owner(cpu);
-        let end = disk.sft_entry(sft).map_or(0, |e| e.size);
+        let end = size_of(disk, sft);
         match size.checked_sub(end) {
             Some(grow) if grow > 0 => disk.io_locked_at(sft, owner, end as u64, grow, true),
             _ => disk.io_locked_at(sft, owner, size as u64, 0, true),

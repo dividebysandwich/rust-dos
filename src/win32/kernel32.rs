@@ -960,7 +960,7 @@ pub fn seek_file(cpu: &mut Cpu, handle: u32, offset: i64, method: u32) -> Result
     let base = match method {
         0 => 0,
         1 => disk.position(open.sft).unwrap_or(0) as i64,
-        2 => disk.sft_entry(open.sft).map_or(0, |e| e.size) as i64,
+        2 => disk.file_size(open.sft).unwrap_or(0) as i64,
         _ => return Err(ERROR_INVALID_PARAMETER),
     };
     let to = base
