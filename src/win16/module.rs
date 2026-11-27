@@ -991,7 +991,7 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
         let m = &mut cpu.bus.win32.win16.modules[index];
         // The system's own modules stay; the other built-in libraries go
         // when the last user frees them, as DLLs do.
-        if m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str()) {
+        if is_system(m) {
             m.refs = m.refs.saturating_sub(1).max(1);
             continue;
         }
@@ -1005,6 +1005,23 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
             unload(cpu, index);
         }
     }
+}
+
+/// The handles of the modules `release(handle)` would take away, in the
+/// order it takes them: those whose only user is the one letting go.
+pub fn going(cpu: &Cpu, handle: u16) -> Vec<u16> {
+    let modules = &cpu.bus.win32.win16.modules;
+    users_of(cpu, handle)
+        .into_iter()
+        .map(|index| &modules[index])
+        .filter(|m| !is_system(m) && m.refs <= 1)
+        .map(|m| m.handle)
+        .collect()
+}
+
+/// Whether `m` is one of the system's own modules, which stay loaded.
+fn is_system(m: &Module16) -> bool {
+    m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str())
 }
 
 /// The W32 section's version that first counts a Win16 module's users

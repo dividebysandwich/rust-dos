@@ -31,6 +31,7 @@ mod local;
 mod lz;
 mod message;
 mod misc;
+mod notify;
 pub(crate) mod module;
 mod ole2;
 mod ole2disp;
@@ -142,6 +143,8 @@ pub struct State {
     pub universal: crate::savestate::Since<{ universal::UT_SAVED }, universal::Universal>,
     /// SETUPX's open INF files, LDIDs and copy queue (setupx.rs).
     pub setupx: crate::savestate::Since<{ setupx::SETUPX_SAVED }, setupx::Setupx>,
+    /// TOOLHELP's notification callbacks (notify.rs).
+    pub notifications: crate::savestate::Since<{ notify::NOTIFY_SAVED }, Vec<notify::Notification>>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -687,7 +690,8 @@ crate::state_fields!(State {
     comm,
     ole,
     universal,
-    setupx
+    setupx,
+    notifications
 });
 crate::state_fields!(Module16 {
     name,
