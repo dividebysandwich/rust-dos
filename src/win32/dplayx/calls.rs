@@ -144,14 +144,20 @@ fn provider_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let chars = guest::Chars::of(cpu, t.var(WIDE) != 0);
     let (callback, context) = (t.var(CALLBACK), t.var(CONTEXT));
     let name: Vec<u16> = name.encode_utf16().collect();
+    // The GUID stays where it is after the call; the scratch space
+    // holds the rest, and the GUID only in a state saved before DPLAYX
+    // had a place for it.
     let at = t.scratch;
-    guid.write(cpu, at);
+    let guid_at = super::provider_guid_at(cpu, next).unwrap_or_else(|| {
+        guid.write(cpu, at);
+        at
+    });
     if t.var(KIND) == PROVIDER_LIST {
         // (GUID, name, major version, minor version, context).
         let text = guest::str_bytes(&name, chars);
         cpu.bus.guest_write_bytes(at + 16, &text);
         let args = [
-            at,
+            guid_at,
             at + 16,
             super::PROVIDER_VERSION.0,
             super::PROVIDER_VERSION.1,
@@ -166,7 +172,7 @@ fn provider_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let name = guest::name_blob(&Some(name), &None, chars);
     name.write(cpu, name_at);
     let args = [
-        at,
+        guid_at,
         at + 16,
         address.len() as u32,
         name_at,

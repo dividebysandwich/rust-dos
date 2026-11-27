@@ -2635,6 +2635,46 @@ fn directplaycreate_makes_a_directplay_with_no_service_provider() {
     assert_eq!(peek(&cpu, data + DP_CALLED), 2, "the providers listed");
 }
 
+/// The GUID pointers DirectPlayEnumerateA's callback gets stay valid
+/// after the enumeration, one place for each provider: Sorry! keeps the
+/// one of the connection the player picks and passes it to
+/// DirectPlayCreate later.
+#[test]
+fn directplayenumerate_guids_outlive_the_enumeration() {
+    let dplayx: (&str, &[&str]) = ("DPLAYX.DLL", &["DirectPlayCreate", "DirectPlayEnumerateA"]);
+    let (program, data) = program(&[dplayx], &directplay_data(), |a, l| {
+        // (GUID, name, major, minor, context): the GUID's pointer goes
+        // to DP_SIZES, one dword for each call.
+        callback(a, l, 0, |a| {
+            a.mov(eax, dword_ptr(l.at(DP_CALLED)))?;
+            a.inc(dword_ptr(l.at(DP_CALLED)))?;
+            a.shl(eax, 2)?;
+            a.add(eax, l.at(DP_SIZES) as i32)?;
+            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(dword_ptr(eax), ecx)?;
+            a.mov(eax, 1)?;
+            a.ret_1(20)
+        })?;
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        c.api(a, l, 1, &[Arg::Val(CALLBACKS), none])?;
+        c.api(a, l, 0, &[Arg::Val(DP_SIZES), Arg::At(DD), none])?;
+        c.api(a, l, 0, &[Arg::Val(DP_SIZES + 4), Arg::At(FRONT), none])?;
+        c.com(a, l, DD, DP_RELEASE, &[])?;
+        c.com(a, l, FRONT, DP_RELEASE, &[])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("directplay_guids", None, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 5), [0, 0, 0, 0, 0]);
+    assert_eq!(peek(&cpu, data + DP_CALLED), 2, "the providers listed");
+    let guid = |at: u32| -> Vec<u32> { (0..4).map(|i| peek(&cpu, at + 4 * i)).collect() };
+    let (ipx, tcpip) = (peek(&cpu, data + DP_SIZES), peek(&cpu, data + DP_SIZES + 4));
+    assert_ne!(ipx, tcpip, "each provider's GUID has its own place");
+    assert_eq!(guid(ipx), guid(data + DP_IPX), "IPX's GUID, after the call");
+    assert_eq!(guid(tcpip), guid(data + DP_TCPIP), "TCP/IP's GUID");
+}
+
 /// DPLAY.DLL, DirectX 3's, which Bedlam imports by ordinal: 1 is
 /// DirectPlayCreate and 2 DirectPlayEnumerate, and they make and list
 /// what DPLAYX's do, though the program doesn't import DPLAYX.

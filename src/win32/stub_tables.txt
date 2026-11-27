@@ -1680,6 +1680,7 @@ NotepadWndProc
 SendMessage16
 UserYield16
 RestoreDefaultPalette
+ExitWindows16
 
 DLL GDI32.DLL
 GetStockObject
@@ -6806,6 +6807,9 @@ lc_time_c 512
 
 VARS DDRAW.DLL
 IsLostCache 4096
+
+VARS DPLAYX.DLL
+providerGuids 32
 
 VARS GLIDE3X.DLL
 context 64
