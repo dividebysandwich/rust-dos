@@ -65,6 +65,10 @@ pub fn sync(bus: &mut Bus) {
         .map(|&i| (DLLS[i].name.to_string(), stubs::file(i, version).into()))
         .collect();
     if bus.win32.enabled {
+        files.push((
+            "REGSVR32.EXE".to_string(),
+            super::regsvr32::file(bus).into(),
+        ));
         files.extend(
             forwarders::FORWARDERS
                 .iter()

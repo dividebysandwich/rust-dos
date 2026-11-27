@@ -932,3 +932,105 @@ fn an_import_msvcrt_lacks_from_msvcrt20_loads() {
     });
     assert_eq!(run("old_c_runtime_missing", None, &[], exe), 0x5A);
 }
+
+/// A DLL to register, TESTREG.DLL: its DllRegisterServer succeeds and
+/// its DllUnregisterServer fails with E_FAIL. It has no DllInstall.
+fn registered_dll() -> Vec<u8> {
+    const DLL_BASE: u32 = 0x1000_0000;
+    let mut b = Builder::dll(DLL_BASE, "TESTREG.DLL");
+    let rva = b.next_rva();
+    let mut a = CodeAssembler::new(32).unwrap();
+    let mut register = a.create_label();
+    let mut unregister = a.create_label();
+    // DllMain.
+    a.mov(eax, 1).unwrap();
+    a.ret_1(12).unwrap();
+    a.set_label(&mut register).unwrap();
+    a.xor(eax, eax).unwrap();
+    a.ret().unwrap();
+    a.set_label(&mut unregister).unwrap();
+    a.mov(eax, 0x8000_4005_u32 as i32).unwrap();
+    a.ret().unwrap();
+    let ip = (DLL_BASE + rva) as u64;
+    let assembled = a
+        .assemble_options(
+            ip,
+            iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS,
+        )
+        .unwrap();
+    let at = |label| (assembled.label_ip(&label).unwrap() - ip) as u32;
+    let (register, unregister) = (at(register), at(unregister));
+    let code = assembled.inner.code_buffer;
+    let flags = pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ;
+    assert_eq!(b.section(".text", &code, flags), rva);
+    b.export(Some("DllRegisterServer"), 1, rva + register);
+    b.export(Some("DllUnregisterServer"), 2, rva + unregister);
+    b.entry(rva);
+    b.build()
+}
+
+/// REGSVR32's command lines and the exit codes they end with.
+const REGSVR32_RUNS: &[(&str, u32)] = &[
+    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s C:\\TESTREG.DLL\0", 0),
+    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /u /s C:\\TESTREG.DLL\0", 5),
+    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s C:\\NONE.DLL\0", 3),
+    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s /n /i C:\\TESTREG.DLL\0", 4),
+    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s\0", 1),
+];
+
+/// Runs REGSVR32.EXE with each command line of `REGSVR32_RUNS` and
+/// waits for it to end; a bit of the exit code for each that ends with
+/// the exit code Windows 98's REGSVR32 gives.
+fn runs_regsvr32() -> Vec<u8> {
+    // The command lines at 0x60 apart, STARTUPINFO at 0x300 (its cb
+    // set), PROCESS_INFORMATION at 0x350 and the exit code at 0x360.
+    let mut data = vec![0u8; 0x400];
+    data[0x300] = 68;
+    for (i, (line, _)) in REGSVR32_RUNS.iter().enumerate() {
+        put(&mut data, i * 0x60, line.as_bytes());
+    }
+    let imports: &[(&str, &[&'static str])] = &[(
+        "KERNEL32.DLL",
+        &[
+            "ExitProcess",
+            "CreateProcessA",
+            "WaitForSingleObject",
+            "GetExitCodeProcess",
+        ],
+    )];
+    program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        for (i, &(_, exit)) in REGSVR32_RUNS.iter().enumerate() {
+            let (line, startup, info) = (l.at(i as u32 * 0x60), l.at(0x300), l.at(0x350));
+            call(
+                a,
+                l.import("CreateProcessA"),
+                &[0, line, 0, 0, 0, 0, 0, 0, startup, info],
+            )?;
+            a.mov(dword_ptr(l.at(0x360) as u64), 0xFF)?;
+            a.mov(esi, dword_ptr(l.at(0x350) as u64))?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(l.import("WaitForSingleObject"))?;
+            a.push(l.at(0x360) as i32)?;
+            a.push(esi)?;
+            a.call(l.import("GetExitCodeProcess"))?;
+            a.cmp(dword_ptr(l.at(0x360) as u64), exit as i32)?;
+            check(a, false, i as u32)?;
+        }
+        a.push(ebx)?;
+        a.call(l.import("ExitProcess"))
+    })
+}
+
+/// REGSVR32.EXE in the system folder registers a DLL, as Leadfoot's
+/// setup runs `regsvr32.exe /s ir50_32.dll` (#2204): it calls the DLL's
+/// DllRegisterServer, or DllUnregisterServer with /u, and ends with 0
+/// when that worked, 5 when it failed, 3 when the DLL doesn't load, 4
+/// when the function isn't there and 1 when no DLL is named.
+#[test]
+fn regsvr32_registers_a_dll() {
+    let dll = registered_dll();
+    let code = run("regsvr32", None, &[("TESTREG.DLL", &dll)], runs_regsvr32());
+    assert_eq!(code, 0x1F, "the runs that failed: {:05b}", !code & 0x1F);
+}

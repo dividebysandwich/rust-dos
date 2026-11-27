@@ -67,6 +67,7 @@ mod pif;
 mod advpack;
 pub(crate) mod realmode;
 mod regedit;
+mod regsvr32;
 pub(crate) mod registry;
 mod rpcrt4;
 mod screen;

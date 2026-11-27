@@ -90,10 +90,13 @@ static APIS: &[Api] = &[
     stdcall("RegeditMain", 0, 1, super::regedit::main),
     // Windows Installer's MSIEXEC.EXE calls it; Windows 98 fails it.
     stdcall("SetThreadToken", 296, 2, not_implemented),
+    // C:\WINDOWS\SYSTEM\REGSVR32.EXE: its work (regsvr32.rs).
+    stdcall("Regsvr32Main", 0, 2, super::regsvr32::main),
 ];
 
 /// The address of ADVAPI32's function `name` in the image a process
-/// started now gets, for a program file the system makes (REGEDIT.EXE).
+/// started now gets, for a program file the system makes (REGEDIT.EXE,
+/// REGSVR32.EXE).
 pub(super) fn address_for_new(bus: &crate::bus::Bus, name: &str) -> u32 {
     let dll = super::stubs::DLLS
         .iter()
