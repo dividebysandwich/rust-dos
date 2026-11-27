@@ -29,6 +29,7 @@ mod kernel;
 pub(crate) mod ldt;
 mod local;
 mod lz;
+mod mcidrv;
 mod message;
 mod misc;
 pub(crate) mod module;

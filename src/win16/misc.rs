@@ -8,6 +8,7 @@
 use super::builtin::{Def, register, rust, win32};
 use super::global::{HeapItem, HeapPlace};
 use super::lz;
+use super::mcidrv;
 use super::thunk;
 use super::user::{P_MISC, P_WORDS};
 use crate::cpu::Cpu;
@@ -359,9 +360,21 @@ pub static MMSYSTEM: Def = Def {
         rust("midiInReset", 311, "w", wmidi::midi_in_bad_handle),
         rust("midiInGetID", 312, "wp", wmidi::midi_in_bad_handle),
         rust("midiInMessage", 313, "wwll", wmidi::midi_in_bad_handle),
+        // For the installable MCI drivers (mcidrv.rs).
+        rust("mciSetDriverData", 707, "wl", mcidrv::mci_set_driver_data),
+        rust("mciGetDriverData", 708, "w", mcidrv::mci_get_driver_data),
+        rust("mciDriverYield", 710, "w", mcidrv::mci_driver_yield),
+        rust("mciDriverNotify", 711, "www", mcidrv::mci_driver_notify),
+        rust("DrvDefDriverProc", 1104, "lwwll", def_driver_proc),
     ],
     library: true,
 };
+
+/// DefDriverProc(id, driver, message, p1, p2), USER's and MMSYSTEM's
+/// DrvDefDriverProc: WINMM's answers.
+pub(super) fn def_driver_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::win32::winmm::driver::def_driver_proc(cpu, args)
+}
 
 /// LZEXPAND: compressed files read expanded (lz.rs).
 pub static LZEXPAND: Def = Def {
@@ -2276,6 +2289,10 @@ const MCI_BLOCK: u32 = 48;
 
 /// mciSendCommand(id, message, flags, parms).
 fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // A device of an installable driver's, or an open of one.
+    if let Some(result) = mcidrv::send_command(cpu, args) {
+        return result;
+    }
     let (id, msg, flags, segptr) = (args[0], args[1], args[2], args[3]);
     let at16 = super::linear(cpu, segptr);
     let block = thunk::scratch32(cpu, MCI_BLOCK);
