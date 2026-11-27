@@ -233,6 +233,7 @@ static APIS: &[Api] = &[
     stdcall("SafeArrayCreateVector", 411, 3, safearray::safe_array_create_vector),
     stdcall("VariantCopyInd", 11, 2, safearray::variant_copy_ind),
     stdcall("DispGetParam", 28, 5, invoke::disp_get_param),
+    stdcall("OaBuildVersion", 170, 0, oa_build_version),
 ];
 
 /// The vtables, by their places in this list. ITypeLib's and ITypeInfo's
@@ -504,6 +505,13 @@ fn byte_len(cpu: &mut Cpu, s: u32) -> u32 {
 }
 
 /// SysAllocString(text): NULL for NULL.
+/// OaBuildVersion(): Windows 98 SE's OLEAUT32.DLL, 2.40.4275, as the
+/// minor version in the high word and the build in the low one. The
+/// Visual Basic 5 runtime asks for it at start-up.
+fn oa_build_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(40 << 16 | 4275)
+}
+
 fn sys_alloc_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = args[0];
     if text == 0 {

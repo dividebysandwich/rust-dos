@@ -3568,6 +3568,7 @@ SafeArrayPtrOfIndex
 SafeArrayCreateVector
 VariantCopyInd
 DispGetParam
+OaBuildVersion
 
 DLL ADVPACK.DLL
 IsNTAdmin
