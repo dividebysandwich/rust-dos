@@ -4167,11 +4167,11 @@ fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
 fn shift_counts_poked_before_each_call_are_read_where_they_are() {
     // Witchaven's masked columns: the count of their `SHR EBX, imm8`
     // poked before each run of the loop. Here a SHR and a SAR of a
-    // register, a ROL of memory, and a SHL whose flags the code reads,
-    // with counts from 1 to 200 (masked to 5 bits, so some are 0, which
-    // leaves the operand and the flags as they were). Blocks translated
-    // once those bytes are watched read the counts where they are, and
-    // run without leaving at them.
+    // register, a ROL of memory, and a SHL whose flags the code pushes
+    // right after it, with counts made from the loop's 200 down to 1
+    // (masked to 5 bits, so some are 0, which leaves the operand and the
+    // flags as they were). Blocks translated once those bytes are watched
+    // read the counts where they are, and run without leaving at them.
     let fns = [CODE + 0x1000, CODE + 0x1100, CODE + 0x1200, CODE + 0x1300];
     let top = CODE + 0x40;
     let data = CODE + 0x3000;
@@ -4196,8 +4196,8 @@ fn shift_counts_poked_before_each_call_are_read_where_they_are() {
             a.cmp(edx, ebp)?; // 2 bytes
             a.mov(eax, edx)?; // 2 bytes
             a.shl(eax, 3)?; // C1 E0 imm8, at + 4
-            a.adc(edi, eax)?;
             a.pushfd()?;
+            a.adc(edi, eax)?;
             a.pop(eax)?;
             a.and(eax, 0x8D5)?;
             a.add(ebp, eax)?;

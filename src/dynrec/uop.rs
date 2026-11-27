@@ -26,7 +26,8 @@ pub struct Gpr {
     pub size: u8,
 }
 
-/// Where a shift by a variable count (`Uop::ShiftVar`) reads it.
+/// Where a shift by a variable count (`Uop::ShiftVar`, and
+/// `Uop::DoubleShiftVar`, which only takes CL) reads it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Count {
     /// A register: CL.

@@ -1369,9 +1369,14 @@ fn uop_gprs(u: &Uop) -> u8 {
     match *u {
         Uop::Get { r, .. } | Uop::Set { r, .. } => bit(r),
         Uop::Ea { base, index, .. } => base.map_or(0, bit) | index.map_or(0, bit),
-        Uop::ShiftVar { count: Count::Reg(count), .. } | Uop::DoubleShiftVar { count: Count::Reg(count), .. } => {
-            bit(count)
+        Uop::ShiftVar {
+            count: Count::Reg(count),
+            ..
         }
+        | Uop::DoubleShiftVar {
+            count: Count::Reg(count),
+            ..
+        } => bit(count),
         Uop::MulWide { size, .. } | Uop::DivWide { size, .. } => {
             if size == 1 {
                 1
@@ -4976,7 +4981,9 @@ impl Gen<'_> {
         let end = self.end();
         match count {
             Count::Reg(g) => self.get_into(RCX, g),
-            Count::Code(phys) => dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [r13 + phys as i32]),
+            Count::Code(phys) => {
+                dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [r13 + phys as i32])
+            }
             Count::Const(c) => dynasm!(self.ops ; .arch x64 ; mov ecx, c as i32),
         }
         if self.wanted(set) && !self.dirty {
