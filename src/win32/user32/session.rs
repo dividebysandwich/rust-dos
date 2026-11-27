@@ -8,6 +8,12 @@
 //! last, after the other processes have gone, so that a caller that ends
 //! itself on WM_ENDSESSION, as many do, doesn't leave them running.
 //!
+//! A 16-bit task's ExitWindows and ExitWindowsExec leave the calling
+//! task's own windows out: Windows 98 neither asks nor tells them, so a
+//! task whose window refuses WM_QUERYENDSESSION, as Microsoft Test's frame
+//! does while its script runs, still ends the session (#1542 has the
+//! probe). The other tasks' windows are asked as a Win32 caller's are.
+//!
 //! Windows returns TRUE from ExitWindowsEx once the shutdown has started,
 //! and ends the caller when its turn comes. That can come at any time
 //! after its WM_ENDSESSION, so a program can't count on the code after the
@@ -57,7 +63,18 @@ const WINDOWS: usize = 6;
 /// ExitWindowsEx(flags, reserved). With EWX_FORCE no window is asked or
 /// told. FALSE when a window refused.
 pub fn exit_windows_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let flags = args[0];
+    end_session(cpu, args[0], false)
+}
+
+/// ExitWindows16(flags): a 16-bit task's ExitWindows and ExitWindowsExec,
+/// with ExitWindowsEx's flags. The calling task's windows are left out.
+pub fn exit_windows16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    end_session(cpu, args[0], true)
+}
+
+/// ExitWindowsEx's task, without the calling thread's windows when
+/// `leave_caller_out`.
+fn end_session(cpu: &mut Cpu, flags: u32, leave_caller_out: bool) -> Option<u32> {
     let logoff = flags & (EWX_SHUTDOWN | EWX_REBOOT | EWX_POWEROFF) == 0;
     let lparam = if logoff { ENDSESSION_LOGOFF } else { 0 };
     let (pid, tid) = (current_pid(cpu), current_tid(cpu));
@@ -68,6 +85,7 @@ pub fn exit_windows_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         state
             .top_levels()
             .into_iter()
+            .filter(|&h| !leave_caller_out || state.window(h).is_none_or(|w| w.tid != tid))
             .partition(|&h| state.window(h).is_some_and(|w| w.pid == pid))
     };
     let restart = u32::from(flags & EWX_REBOOT != 0);

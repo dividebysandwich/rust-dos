@@ -32,7 +32,9 @@
 //! are built in the same way: NOTEPAD.EXE (user32/notepad.rs), which
 //! setups run to show a readme, and REGEDIT.EXE (regedit.rs), which they
 //! run to import a registration file. The system directory has
-//! REGSVR32.EXE (regsvr32.rs), which they run to register a DLL.
+//! REGSVR32.EXE (regsvr32.rs), which they run to register a DLL, and
+//! the files of DirectX whose work the built-in DLLs do
+//! (directx_files.rs), which DirectX's setups compare with theirs.
 
 use super::forwarders;
 use super::loader::{self, SYSTEM_DIR, WINDOWS_DIR};
@@ -79,6 +81,11 @@ pub fn sync(bus: &mut Bus) {
             let resource = super::verdll::builtin16_version(def.file, version);
             (def.file.to_string(), builtin16::file(i, &resource).into())
         }));
+        files.extend(
+            super::directx_files::files(version)
+                .into_iter()
+                .map(|(name, file)| (name, file.into())),
+        );
     }
     bus.disk.set_system_files(SYSTEM_DIR, files);
     let programs = if bus.win32.enabled {

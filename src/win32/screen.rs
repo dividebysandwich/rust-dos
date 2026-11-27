@@ -317,8 +317,8 @@ pub type GammaRamp = [u16; 3 * 256];
 /// - A ToadForce's is its `GAMMA` registers, in the card's own modes of
 ///   direct colour.
 /// - A Banshee's or Voodoo3's is the desktop lookup table, which the
-///   video processor runs 16- and 32-bit pixels through when its bypass
-///   is off, as 3dfx's driver had it.
+///   video processor runs 16-, 24- and 32-bit pixels through when its
+///   bypass is off, as 3dfx's driver had it.
 ///
 /// A mode set brings the identity back on both, so a ramp lasts until
 /// the mode changes.

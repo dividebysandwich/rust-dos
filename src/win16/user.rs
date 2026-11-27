@@ -28,8 +28,7 @@ static APIS: &[Api16] = &[
     win32("MessageBox", 1, "wppw", U, "MessageBoxA", b'w'),
     rust("InitApp", 5, "w", one),
     win32("PostQuitMessage", 6, "s", U, "PostQuitMessage", b'w'),
-    // EW_RESTARTWINDOWS and EW_REBOOTSYSTEM are EWX_REBOOT's bit and more.
-    win32("ExitWindows", 7, "lw", U, "ExitWindowsEx", b'b'),
+    rust("ExitWindows", 7, "lw", exit_windows),
     rust("SetTimer", 10, "wwwS", set_timer),
     rust("SetSystemTimer", 11, "wwwS", set_timer),
     win32("KillTimer", 12, "ww", U, "KillTimer", b'b'),
@@ -1096,13 +1095,32 @@ fn set_class_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// ExitWindowsEx's flag for a shutdown, whose WM_QUERYENDSESSION and
-/// WM_ENDSESSION have lParam 0, as Windows 3.1's have.
+/// WM_ENDSESSION have lParam 0, as Windows 3.1's and Windows 98's have
+/// for a 16-bit caller.
 const EWX_SHUTDOWN: u32 = 1;
+/// ExitWindowsEx's flag for a restart.
+const EWX_REBOOT: u32 = 2;
+
+/// ExitWindows's codes in the low word of its first argument that start
+/// Windows or the machine again. Anything else ends Windows.
+const EW_RESTARTWINDOWS: u32 = 0x42;
+const EW_REBOOTSYSTEM: u32 = 0x43;
+
+/// ExitWindows(code, reserved): the session ends unless another task's
+/// window refuses (session.rs). The call comes back, with FALSE, only
+/// when one refused. The calling task's own windows aren't asked.
+fn exit_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let flags = match args[0] & 0xFFFF {
+        EW_RESTARTWINDOWS | EW_REBOOTSYSTEM => EWX_REBOOT,
+        _ => EWX_SHUTDOWN,
+    };
+    go(cpu, "ExitWindows16", &[flags])
+}
 
 /// ExitWindowsExec(exe, params): Windows ends, as ExitWindows ends it,
 /// and then the DOS program `exe` runs with the command line `params`
-/// (boot.rs says where and when). FALSE when a window refused to end,
-/// which is the only time the call comes back.
+/// (boot.rs says where and when). FALSE when another task's window
+/// refused to end, which is the only time the call comes back.
 fn exit_windows_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = |cpu: &Cpu, at: u32| {
         if at == 0 {
@@ -1116,7 +1134,7 @@ fn exit_windows_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let line = format!("{} {}", exe, params);
         crate::win32::boot::exec_after(cpu, line.trim_end().to_string());
     }
-    go(cpu, "ExitWindowsEx", &[EWX_SHUTDOWN, 0])
+    go(cpu, "ExitWindows16", &[EWX_SHUTDOWN])
 }
 
 fn window_from_point(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

@@ -53,7 +53,7 @@ const TICK: u64 = 5_000;
 /// error at 60h and its TLS slots at 88h, as on Windows 98 SE. Before it
 /// the last error was in the thread's entry (the running thread's in its
 /// process's), and the slots were at 100h (`OLDER_TLS_ARRAY`).
-pub const TIB_98: u16 = 113;
+pub const TIB_98: u16 = 114;
 const OLDER_TLS_ARRAY: u32 = 0x100;
 
 /// What wait functions return.

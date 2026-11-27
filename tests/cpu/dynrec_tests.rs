@@ -4164,6 +4164,89 @@ fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
 }
 
 #[test]
+fn shift_counts_poked_before_each_call_are_read_where_they_are() {
+    // Witchaven's masked columns: the count of their `SHR EBX, imm8`
+    // poked before each run of the loop. Here a SHR and a SAR of a
+    // register, a ROL of memory, and a SHL whose flags the code pushes
+    // right after it, with counts made from the loop's 200 down to 1
+    // (masked to 5 bits, so some are 0, which leaves the operand and the
+    // flags as they were). Blocks translated once those bytes are watched
+    // read the counts where they are, and run without leaving at them.
+    let fns = [CODE + 0x1000, CODE + 0x1100, CODE + 0x1200, CODE + 0x1300];
+    let top = CODE + 0x40;
+    let data = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(fns[0], &asm32(fns[0], |a| {
+            a.mov(eax, edx)?; // 2 bytes
+            a.shr(eax, 3)?; // C1 E8 imm8, at + 2
+            a.add(ebx, eax)?;
+            a.ret()
+        }));
+        rig.load(fns[1], &asm32(fns[1], |a| {
+            a.mov(eax, edx)?;
+            a.sar(eax, 3)?; // C1 F8 imm8, at + 2
+            a.add(esi, eax)?;
+            a.ret()
+        }));
+        rig.load(fns[2], &asm32(fns[2], |a| {
+            a.rol(dword_ptr(data), 3)?; // C1 05 disp32 imm8
+            a.ret()
+        }));
+        rig.load(fns[3], &asm32(fns[3], |a| {
+            a.cmp(edx, ebp)?; // 2 bytes
+            a.mov(eax, edx)?; // 2 bytes
+            a.shl(eax, 3)?; // C1 E0 imm8, at + 4
+            a.pushfd()?;
+            a.adc(edi, eax)?;
+            a.pop(eax)?;
+            a.and(eax, 0x8D5)?;
+            a.add(ebp, eax)?;
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.xor(esi, esi)?;
+            a.xor(edi, edi)?;
+            a.xor(ebp, ebp)?;
+            a.mov(dword_ptr(data), 0x1234_5678)?;
+            a.mov(ecx, 200u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.imul_3(edx, ecx, 0x8765_4321u32 as i32)?;
+            a.mov(byte_ptr(fns[0] + 4), cl)?;
+            a.mov(eax, ecx)?;
+            a.xor(eax, 0x5A)?;
+            a.mov(byte_ptr(fns[1] + 4), al)?;
+            a.mov(byte_ptr(fns[2] + 6), dl)?;
+            a.mov(eax, ecx)?;
+            a.and(eax, 0x21)?;
+            a.mov(byte_ptr(fns[3] + 6), al)?;
+            for f in fns {
+                a.call(f as u64)?;
+            }
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    let (mut shr, mut sar, mut rol) = (0u32, 0u32, 0x1234_5678u32);
+    for n in (1..=200u32).rev() {
+        let v = n.wrapping_mul(0x8765_4321);
+        shr = shr.wrapping_add(v >> (n & 31));
+        sar = sar.wrapping_add(((v as i32) >> ((n ^ 0x5A) & 31)) as u32);
+        rol = rol.rotate_left(v & 31);
+    }
+    assert_eq!((b.cpu.ebx(), b.cpu.esi()), (shr, sar));
+    assert_eq!(b.cpu.bus.read_32(data as usize), rol);
+    if AVAILABLE {
+        assert!(stats.watched < 20, "left at the poked counts: {:?}", stats);
+        assert!(stats.blocks < 100, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
 fn a_displacement_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
     // The same with the address of an ADD's operand: once its bytes are
     // watched, the block reads the address where it is, rather than

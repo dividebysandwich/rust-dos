@@ -324,7 +324,7 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
         }
         0x34..=0x3D => fpu_fixup(cpu, vector, &mut ctx),
         0x20 => {
-            super::task::exit(cpu, 0);
+            super::task::exit(cpu, 0, &ctx);
             return;
         }
         // A handler a program put in the real-mode vector table, as
@@ -612,11 +612,11 @@ fn int21(cpu: &mut Cpu, ctx: &mut Context) -> bool {
     match ah {
         // Ends: the task's.
         0x00 => {
-            super::task::exit(cpu, 0);
+            super::task::exit(cpu, 0, ctx);
             return false;
         }
         0x4C | 0x31 => {
-            super::task::exit(cpu, al as u16);
+            super::task::exit(cpu, al as u16, ctx);
             return false;
         }
         // The DTA.
