@@ -488,6 +488,33 @@ impl Bench {
 
 const WHITE: u32 = 0xFFFF_FFFF;
 
+/// A run of commands that drew ends with a flush, so the GPU starts on
+/// the draws while the program runs on; a run that gave the GPU nothing,
+/// or one after a read-back, which waited for every draw, has none.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_run_that_drew_is_flushed_and_one_that_didnt_isnt() {
+    bench!(bench, "toadforce flushes");
+    let mut rig = Rig::new(Format::X8R8G8B8, None);
+    rig.card.set_host(Some(bench.host()), &mut rig.memory);
+    let flushes = |rig: &Rig| {
+        let status = rig.card.describe(Rig::live());
+        status["host"]["counts"]["flushes"].as_u64().unwrap()
+    };
+    rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+    let before = flushes(&rig);
+    rig.draw(&quad(4.0, 4.0, 40.0, 0xFFFF_0000, 1.0));
+    assert_eq!(flushes(&rig), before + 1);
+    // A run that only sets states queues nothing for the GPU.
+    rig.states(&[(RS_CULLMODE, 1)]);
+    assert_eq!(flushes(&rig), before + 1);
+    // Nor does a read-back: it waited for the draws.
+    rig.draw(&quad(8.0, 8.0, 20.0, 0xFF00_FF00, 1.0));
+    rig.card.settle(&mut rig.memory, None);
+    rig.states(&[(RS_CULLMODE, 1)]);
+    assert_eq!(flushes(&rig), before + 2);
+}
+
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn triangles_without_textures_agree() {

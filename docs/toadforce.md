@@ -1092,6 +1092,16 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   `BLT` into its texture samples what the `BLT` wrote. Nocturne copies
   some 25 textures a frame into card memory between its draws, and
   they stay in one batch.
+- **When the GPU starts.** At the end of each run of commands that gave
+  the host work, the host flushes its context (`Host::submit`,
+  `glFlush`), so the GPU draws while the program runs on. Without it
+  the driver kept the commands until a read-back asked for pixels, and
+  the read then waited for the GPU to draw the whole frame. Evil
+  Islands reads the 32 rows under its cursor out of the back buffer
+  each frame, right after drawing it, and its read now waits only for
+  what the GPU has left of the frame. A run that queued nothing for
+  the GPU, or one whose last host work was a read-back, which waited
+  for every command before it, flushes nothing.
 - **Who has the newer pixels.** A surface the host drew into is ahead
   on the host, and card memory is stale there. Before the emulator's
   own code reads that memory on the processor the card reads the

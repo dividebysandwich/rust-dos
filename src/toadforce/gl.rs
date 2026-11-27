@@ -59,7 +59,7 @@ use crate::video::shader::Glsl;
 use crate::voodoo::gl::{Locations, Program, compile};
 use glow::HasContext;
 use shader::Uniforms;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -505,6 +505,11 @@ pub struct ToadForceGl {
     /// The framebuffers made for `framebuffers`, each asked once
     /// whether it is complete (`attach`).
     framebuffers_made: u64,
+    /// Whether commands went to the context since it was last flushed
+    /// (`submit`) or read from, which waits for them all; and the
+    /// flushes, for the status.
+    queued: Cell<bool>,
+    flushes: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
     broken: bool,
@@ -606,6 +611,8 @@ impl ToadForceGl {
                 converts: 0,
                 clears: 0,
                 framebuffers_made: 0,
+                queued: Cell::new(false),
+                flushes: 0,
                 blits: 0,
                 writes: 0,
                 presents: 0,
@@ -901,6 +908,7 @@ impl ToadForceGl {
             gl.blend_func(glow::ONE, glow::ZERO);
             gl.blend_equation(glow::FUNC_ADD);
         }
+        self.queued.set(true);
     }
 
     /// Drop the copies of other surfaces that share a byte with
@@ -1038,6 +1046,8 @@ impl ToadForceGl {
             self.gl.read_pixels(0, rows.0 as i32, w, h, format, kind, data);
             self.leave();
         }
+        // The read waited for every command before it.
+        self.queued.set(false);
         if wide {
             pixels = pixels
                 .as_chunks::<4>()
@@ -2381,6 +2391,7 @@ impl Host for ToadForceGl {
             "writes": self.writes,
             "presents": self.presents,
             "framebuffers_made": self.framebuffers_made,
+            "flushes": self.flushes,
             "framebuffers": self.framebuffers.len(),
             "packed_565": self.packed,
         })
@@ -2911,6 +2922,14 @@ impl Host for ToadForceGl {
         };
         put_rows(surface, rows.0, &pixels, memory);
         true
+    }
+
+    fn submit(&mut self) {
+        if self.queued.replace(false) {
+            self.flushes += 1;
+            // SAFETY: the context is current (see the module comment).
+            unsafe { self.gl.flush() };
+        }
     }
 
     fn forget(&mut self) {

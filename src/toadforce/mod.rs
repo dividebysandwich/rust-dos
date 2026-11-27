@@ -789,8 +789,10 @@ impl ToadForce {
             }
         });
         let whole = self.run_each(words, origin, memory, fx);
-        // The draws of a run are drawn by its end.
+        // The draws of a run are drawn by its end, and the GPU starts on
+        // them while the program runs on.
         self.raster.flush(memory, &mut self.gpu);
+        self.gpu.submit();
         if let Some(mut recorder) = recorder {
             self.gpu.settle(memory, None, gpu::Cause::Other);
             let flips = (self.counts.flip - flips) as u32;
