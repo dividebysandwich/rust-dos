@@ -1628,6 +1628,28 @@ impl Ctx {
         self.sel_to(cpu, extend, e, after);
     }
 
+    /// Page Up or Page Down: as Windows 98 does, scroll the view a page
+    /// (SB_PAGEUP or SB_PAGEDOWN) and put the caret where a click at
+    /// its old place in the window would. It keeps its row and column
+    /// when it was in view. A caret above the view goes to the line just
+    /// above it, one below the view to the line just below, and the view
+    /// then follows the caret.
+    fn move_page(&mut self, cpu: &Cpu, extend: bool, down: bool) {
+        let lines = self.e.lines();
+        let after = self.e.flags & EF_AFTER_WRAP != 0;
+        let (x, y) = self.e.pos_from_char(&lines, self.e.sel_end as i32, after);
+        scroll(cpu, self, if down { SB_PAGEDOWN } else { SB_PAGEUP });
+        let lh = self.e.line_height();
+        let top = self.e.format.top;
+        let row = if y < top {
+            -1
+        } else {
+            ((y - top) / lh).min(self.e.vlc())
+        };
+        let (e, after) = self.e.char_from_pos(&lines, x, top + row * lh);
+        self.sel_to(cpu, extend, e, after);
+    }
+
     fn move_home(&mut self, cpu: &Cpu, extend: bool, ctrl: bool) {
         let e = if !ctrl && self.e.ml() {
             let lines = self.e.lines();
@@ -2379,14 +2401,19 @@ fn get_line(cpu: &mut Cpu, c: &Ctx, line: i32, dst: u32) -> u32 {
     n as u32
 }
 
-/// EM_SCROLL(action).
+/// EM_SCROLL(action), which WM_VSCROLL's line and page actions use too.
+/// A page is one line less than the lines in view, as on Windows 98, so
+/// the last line of one page is the first of the next, and an edit that
+/// shows one line doesn't scroll by pages at all. The view stops at the
+/// top and where the last line is at its bottom, and the reply has the
+/// lines it moved, or 0 if it didn't.
 fn scroll(cpu: &Cpu, c: &mut Ctx, action: u32) -> u32 {
     if !c.e.ml() {
         return 0;
     }
     let lines = c.e.lines();
     let count = lines.len() as i32;
-    let page = (c.e.format.bottom - c.e.format.top) / c.e.line_height();
+    let page = c.e.vlc() - 1;
     let y = c.e.y_offset;
     let mut dy = match action {
         SB_LINEUP if y != 0 => -1,
@@ -2400,6 +2427,9 @@ fn scroll(cpu: &Cpu, c: &mut Ctx, action: u32) -> u32 {
         let vlc = c.e.vlc();
         if y + dy > count - vlc {
             dy = (count - vlc).max(0) - y;
+        }
+        if y + dy < 0 {
+            dy = -y;
         }
         if dy != 0 {
             c.line_scroll_internal(cpu, 0, dy);
@@ -2539,7 +2569,6 @@ fn keydown(cpu: &mut Cpu, c: &mut Ctx, key: u32) {
     let readonly = c.e.style & ES_READONLY != 0;
     let dialog = c.e.flags & EF_DIALOGMODE != 0;
     let lh = c.e.line_height();
-    let page = c.e.format.bottom - c.e.format.top;
     match key {
         VK_F4 | VK_UP | VK_LEFT => {
             if key != VK_LEFT && (c.check_combo(cpu, WM_KEYDOWN, key) || key == VK_F4) {
@@ -2569,7 +2598,7 @@ fn keydown(cpu: &mut Cpu, c: &mut Ctx, key: u32) {
         VK_END => c.move_end(cpu, shift, control),
         VK_PRIOR | VK_NEXT => {
             if ml {
-                c.move_vertically(cpu, shift, if key == VK_PRIOR { -page } else { page });
+                c.move_page(cpu, shift, key == VK_NEXT);
             } else {
                 c.check_combo(cpu, WM_KEYDOWN, key);
             }
