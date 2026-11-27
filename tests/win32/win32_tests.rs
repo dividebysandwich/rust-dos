@@ -7033,8 +7033,10 @@ fn a_program_commits_and_touches_more_memory_than_the_machine_has() {
 /// A zeroed block takes no physical memory until it is touched: after
 /// GlobalAlloc(GMEM_ZEROINIT) of 8 MB, GlobalMemoryStatus has nearly as
 /// much physical memory available as before, and 8 MB less room in the
-/// page file. Touching a page takes it from the physical memory. A bit
-/// each in the exit code.
+/// page file, with a page or so more for the heap's own bytes around the
+/// block (Windows 98's header before it and end marker after it).
+/// Touching a page takes it from the physical memory. A bit each in the
+/// exit code.
 #[test]
 fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
     const GMEM_ZEROINIT: i32 = 0x40;
@@ -7062,11 +7064,16 @@ fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
             a.jae(much)?;
             a.or(ebx, 1)?;
             a.set_label(&mut much)?;
-            // dwAvailPageFile down by the block.
+            // dwAvailPageFile down by the block, and by less than 64 KB
+            // more: the pages of the heap's bytes before and after it.
             a.mov(eax, dword_ptr(l.at(0x14)))?;
             a.sub(eax, dword_ptr(l.at(0x34)))?;
-            a.cmp(eax, SIZE)?;
-            bit_if_equal(a, 1)?;
+            a.sub(eax, SIZE)?;
+            a.cmp(eax, 0x1_0000)?;
+            let mut more = a.create_label();
+            a.jae(more)?;
+            a.or(ebx, 2)?;
+            a.set_label(&mut more)?;
             // A page of it touched: a page less physical memory, a page
             // more room in the page file.
             a.mov(dword_ptr(esi + 0x4000), 1)?;
