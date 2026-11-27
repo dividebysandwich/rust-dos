@@ -5,10 +5,13 @@
 //!
 //! The built-in Windows has VWIN32's, the VxD through which Win32
 //! programs make the DOS calls that KERNEL32 has no function for: its
-//! control code 1 (VWIN32_DIOC_DOS_IOCTL) makes an INT 21h AH=44h call
-//! with the registers of a DIOC_REGISTERS structure and gives back the
-//! registers it leaves. Of those calls it has Get Drive Map Info (440Dh
-//! with CX=086Fh), which Prince of Persia 3D makes for each drive.
+//! control code 1 (VWIN32_DIOC_DOS_IOCTL) makes an INT 21h call with the
+//! registers of a DIOC_REGISTERS structure and gives back the registers
+//! it leaves. It is meant for the IOCTLs (AH=44h), but Windows 98 runs
+//! whatever function AX names (AX=3000h gives the DOS version). Of those
+//! calls the built-in one has Get Drive Map Info (440Dh with CX=086Fh),
+//! which Prince of Persia 3D makes for each drive, and gives the others
+//! Invalid Function.
 //!
 //! What Windows 98 SE gives was measured with a probe program on it,
 //! booted on an IDE hard disk with a CD-ROM drive: the opens, the drive
@@ -21,7 +24,7 @@ use super::{
     set_error,
 };
 use crate::cpu::Cpu;
-use crate::disk::{DriveKind, LASTDRIVE};
+use crate::disk::{DriveKind, FLOPPY_DRIVES, LASTDRIVE};
 use crate::win32::object::{self, Kind};
 
 const ERROR_FILE_NOT_FOUND: u32 = super::path::ERROR_FILE_NOT_FOUND;
@@ -66,9 +69,8 @@ const PROT_MODE_PHYSICAL_DRIVE: u8 = 0x02;
 const PROT_MODE_ONLY_DRIVE: u8 = 0x04;
 const PROT_MODE_EJECT: u8 = 0x08;
 
-/// The sector a hard disk's first partition starts at, as a disk
-/// partitioned by FDISK has it: the second track's.
-const PARTITION_START: u64 = 63;
+/// dmiInt13Unit of a drive with no BIOS unit.
+const NO_UNIT: u8 = 0xFF;
 
 /// CreateFileA of `name`, if it is a VxD's ("\\.\NAME"): the handle, or
 /// the error. On Windows 98 the open of VWIN32 succeeds whatever the
@@ -191,12 +193,16 @@ fn ioctl(cpu: &mut Cpu, regs: &mut [u32; 7]) -> Option<Result<u16, u16>> {
 ///
 /// A hard disk has the protected-mode drivers of the logical and the
 /// physical drive, its BIOS unit (80h for the first) and the partition's
-/// start; a CD-ROM drive also has no DOS drive and an eject, and no BIOS
-/// unit (FFh). The associated drive map is 0 for every drive, as Windows
-/// 98 SE gives it. A floppy drive is a logical and physical drive of its
-/// BIOS unit. The built-in Windows' drives held in memory (Z:) are DOS's
-/// alone, as a RAM drive of a DOS driver is: no protected-mode driver and
-/// no BIOS unit.
+/// start (the BPB's hidden sectors: 63 for a host folder, as FDISK puts
+/// the first partition on the second track); a CD-ROM drive also has no
+/// DOS drive and an eject, and no BIOS unit (FFh). The associated drive
+/// map is 0 for every drive, as Windows 98 SE gives it. A floppy drive is
+/// a logical and physical drive of its BIOS unit. The BIOS units are
+/// those INT 13h takes for the drive (`interrupts::int13::bios_drive`),
+/// so a program can read the drive through the unit it is given. The
+/// built-in Windows' drives held in memory (Z:) are DOS's alone, as a
+/// RAM drive of a DOS driver is: no protected-mode driver and no BIOS
+/// unit.
 fn drive_map_info(cpu: &mut Cpu, drive: u8, at: u32) -> Option<Result<u16, u16>> {
     let disk = &cpu.bus.disk;
     let drive = match drive {
@@ -211,15 +217,22 @@ fn drive_map_info(cpu: &mut Cpu, drive: u8, at: u32) -> Option<Result<u16, u16>>
     };
     let protected = PROT_MODE_LOGICAL_DRIVE | PROT_MODE_PHYSICAL_DRIVE;
     let (flags, unit, start) = match kind {
-        DriveKind::Floppy => (protected, drive, 0),
-        DriveKind::HardDisk => {
-            let disks_before = (0..drive)
-                .filter(|&d| disk.drive_kind(d) == Some(DriveKind::HardDisk))
-                .count() as u8;
-            (protected, 0x80 + disks_before, PARTITION_START)
+        DriveKind::Floppy => {
+            let unit = (0..FLOPPY_DRIVES).find(|&unit| disk.floppy_unit(unit) == drive);
+            (protected, unit.unwrap_or(NO_UNIT), 0)
         }
-        DriveKind::CdRom => (protected | PROT_MODE_ONLY_DRIVE | PROT_MODE_EJECT, 0xFF, 0),
-        DriveKind::Virtual => (0, 0xFF, 0),
+        DriveKind::HardDisk => {
+            let units = disk.hard_disk_units(|_| true);
+            let unit = units.iter().position(|&d| d == drive);
+            let unit = unit.map_or(NO_UNIT, |n| 0x80 + n as u8);
+            let start = disk.layout(drive).map_or(0, |l| l.hidden_sectors);
+            (protected, unit, u64::from(start))
+        }
+        DriveKind::CdRom => {
+            let flags = protected | PROT_MODE_ONLY_DRIVE | PROT_MODE_EJECT;
+            (flags, NO_UNIT, 0)
+        }
+        DriveKind::Virtual => (0, NO_UNIT, 0),
     };
     let size = cpu.bus.guest_read_8(at);
     if cpu.bus.guest_faulted() {
