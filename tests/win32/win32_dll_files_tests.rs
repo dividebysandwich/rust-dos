@@ -933,15 +933,35 @@ fn an_import_msvcrt_lacks_from_msvcrt20_loads() {
     assert_eq!(run("old_c_runtime_missing", None, &[], exe), 0x5A);
 }
 
-/// A DLL to register, TESTREG.DLL: its DllRegisterServer succeeds and
-/// its DllUnregisterServer fails with E_FAIL. It has no DllInstall.
+/// A DLL that exports Dep and nothing else, DEP.DLL.
+fn dependency_dll() -> Vec<u8> {
+    const DLL_BASE: u32 = 0x1100_0000;
+    let mut b = Builder::dll(DLL_BASE, "DEP.DLL");
+    let rva = b.next_rva();
+    // DllMain, whose code Dep shares: it returns TRUE.
+    let code = [0xB8, 1, 0, 0, 0, 0xC2, 12, 0];
+    let flags = pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ;
+    assert_eq!(b.section(".text", &code, flags), rva);
+    b.export(Some("Dep"), 1, rva);
+    b.entry(rva);
+    b.build()
+}
+
+/// A DLL to register, TESTREG.DLL, which imports from DEP.DLL in its own
+/// folder: its DllRegisterServer succeeds, its DllUnregisterServer fails
+/// with E_FAIL, and its DllInstall succeeds only for DllInstall(TRUE,
+/// L"x y").
 fn registered_dll() -> Vec<u8> {
     const DLL_BASE: u32 = 0x1000_0000;
+    const E_FAIL: i32 = 0x8000_4005_u32 as i32;
     let mut b = Builder::dll(DLL_BASE, "TESTREG.DLL");
+    b.imports(&[("DEP.DLL", &[Imp::Name("Dep")])]);
     let rva = b.next_rva();
     let mut a = CodeAssembler::new(32).unwrap();
     let mut register = a.create_label();
     let mut unregister = a.create_label();
+    let mut install = a.create_label();
+    let mut fail = a.create_label();
     // DllMain.
     a.mov(eax, 1).unwrap();
     a.ret_1(12).unwrap();
@@ -949,8 +969,22 @@ fn registered_dll() -> Vec<u8> {
     a.xor(eax, eax).unwrap();
     a.ret().unwrap();
     a.set_label(&mut unregister).unwrap();
-    a.mov(eax, 0x8000_4005_u32 as i32).unwrap();
+    a.mov(eax, E_FAIL).unwrap();
     a.ret().unwrap();
+    // DllInstall(bInstall, pszCmdLine).
+    a.set_label(&mut install).unwrap();
+    a.cmp(dword_ptr(esp + 4), 1).unwrap();
+    a.jne(fail).unwrap();
+    a.mov(ecx, dword_ptr(esp + 8)).unwrap();
+    a.cmp(dword_ptr(ecx), 0x0020_0078).unwrap();
+    a.jne(fail).unwrap();
+    a.cmp(dword_ptr(ecx + 4), 0x79).unwrap();
+    a.jne(fail).unwrap();
+    a.xor(eax, eax).unwrap();
+    a.ret_1(8).unwrap();
+    a.set_label(&mut fail).unwrap();
+    a.mov(eax, E_FAIL).unwrap();
+    a.ret_1(8).unwrap();
     let ip = (DLL_BASE + rva) as u64;
     let assembled = a
         .assemble_options(
@@ -959,23 +993,26 @@ fn registered_dll() -> Vec<u8> {
         )
         .unwrap();
     let at = |label| (assembled.label_ip(&label).unwrap() - ip) as u32;
-    let (register, unregister) = (at(register), at(unregister));
+    let (register, unregister, install) = (at(register), at(unregister), at(install));
     let code = assembled.inner.code_buffer;
     let flags = pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ;
     assert_eq!(b.section(".text", &code, flags), rva);
     b.export(Some("DllRegisterServer"), 1, rva + register);
     b.export(Some("DllUnregisterServer"), 2, rva + unregister);
+    b.export(Some("DllInstall"), 3, rva + install);
     b.entry(rva);
     b.build()
 }
 
-/// REGSVR32's command lines and the exit codes they end with.
+/// REGSVR32's arguments and the exit codes they end with.
 const REGSVR32_RUNS: &[(&str, u32)] = &[
-    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s C:\\TESTREG.DLL\0", 0),
-    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /u /s C:\\TESTREG.DLL\0", 5),
-    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s C:\\NONE.DLL\0", 3),
-    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s /n /i C:\\TESTREG.DLL\0", 4),
-    ("C:\\WINDOWS\\SYSTEM\\REGSVR32.EXE /s\0", 1),
+    (r"/s C:\REG\TESTREG.DLL", 0),
+    (r"/u /s C:\REG\TESTREG.DLL", 5),
+    (r"/s C:\NONE.DLL", 3),
+    (r"/s C:\REG\DEP.DLL", 4),
+    (r#"/s /n /i:"x y" C:\REG\TESTREG.DLL"#, 0),
+    (r#"/s /u /n /i:"x y" C:\REG\TESTREG.DLL"#, 5),
+    ("/s", 1),
 ];
 
 /// Runs REGSVR32.EXE with each command line of `REGSVR32_RUNS` and
@@ -984,9 +1021,11 @@ const REGSVR32_RUNS: &[(&str, u32)] = &[
 fn runs_regsvr32() -> Vec<u8> {
     // The command lines at 0x60 apart, STARTUPINFO at 0x300 (its cb
     // set), PROCESS_INFORMATION at 0x350 and the exit code at 0x360.
+    assert!(REGSVR32_RUNS.len() * 0x60 <= 0x300);
     let mut data = vec![0u8; 0x400];
     data[0x300] = 68;
-    for (i, (line, _)) in REGSVR32_RUNS.iter().enumerate() {
+    for (i, (args, _)) in REGSVR32_RUNS.iter().enumerate() {
+        let line = format!(r"C:\WINDOWS\SYSTEM\REGSVR32.EXE {args}") + "\0";
         put(&mut data, i * 0x60, line.as_bytes());
     }
     let imports: &[(&str, &[&'static str])] = &[(
@@ -1025,12 +1064,17 @@ fn runs_regsvr32() -> Vec<u8> {
 
 /// REGSVR32.EXE in the system folder registers a DLL, as Leadfoot's
 /// setup runs `regsvr32.exe /s ir50_32.dll` (#2204): it calls the DLL's
-/// DllRegisterServer, or DllUnregisterServer with /u, and ends with 0
-/// when that worked, 5 when it failed, 3 when the DLL doesn't load, 4
-/// when the function isn't there and 1 when no DLL is named.
+/// DllRegisterServer, or DllUnregisterServer with /u, and DllInstall
+/// with /i, and ends with 0 when that worked, 5 when it failed, 3 when
+/// the DLL doesn't load, 4 when the function isn't there and 1 when no
+/// DLL is named. The DLL loads with LOAD_WITH_ALTERED_SEARCH_PATH, so
+/// DEP.DLL next to it is found although neither REGSVR32's folder nor
+/// the current one holds it, and `/i:"x y"` gives DllInstall `x y`, as
+/// the C runtime splits a command line.
 #[test]
 fn regsvr32_registers_a_dll() {
-    let dll = registered_dll();
-    let code = run("regsvr32", None, &[("TESTREG.DLL", &dll)], runs_regsvr32());
-    assert_eq!(code, 0x1F, "the runs that failed: {:05b}", !code & 0x1F);
+    let (dll, dep) = (registered_dll(), dependency_dll());
+    let files: &[(&str, &[u8])] = &[("REG/TESTREG.DLL", &dll), ("REG/DEP.DLL", &dep)];
+    let code = run("regsvr32", None, files, runs_regsvr32());
+    assert_eq!(code, 0x7F, "the runs that failed: {:07b}", !code & 0x7F);
 }

@@ -18,10 +18,12 @@
 //! loop around Regsvr32Main, a function of ADVAPI32 that ADVAPI32
 //! doesn't export: each call takes the result of the step before and
 //! says which step the program takes next (`Step`), and the program
-//! takes it: OleInitialize, LoadLibraryA, GetProcAddress, the call of
+//! takes it: OleInitialize, LoadLibraryExA, GetProcAddress, the call of
 //! the DLL's function, the message box, FreeLibrary, OleUninitialize,
 //! and at the end ExitProcess. The DLL's code runs in the program's own
-//! process, as on Windows.
+//! process, as on Windows. The DLL loads with
+//! LOAD_WITH_ALTERED_SEARCH_PATH, as Windows' REGSVR32 loads it, so a
+//! DLL named by its path finds the DLLs it imports in its own folder.
 
 use crate::cpu::Cpu;
 use rust_dos_pe::{self as pe, Builder, Imp};
@@ -46,8 +48,10 @@ const D_ARG1: u32 = 20;
 const D_TYPE: u32 = 24;
 /// The calls still to make, DllInstall's place among them.
 const D_CALLS: u32 = 28;
+/// 1 once OleInitialize succeeded, so OleUninitialize is to be called.
+const D_OLE: u32 = 32;
 /// The DLL's name, ANSI.
-const D_PATH: u32 = 32;
+const D_PATH: u32 = 36;
 const PATH_SIZE: u32 = 260;
 /// The name of the function to call.
 const D_ENTRY: u32 = D_PATH + PATH_SIZE;
@@ -82,7 +86,8 @@ enum Step {
     /// ExitProcess with the exit code.
     Exit = 0,
     OleInitialize = 1,
-    /// LoadLibraryA of the DLL's name.
+    /// LoadLibraryExA of the DLL's name, with
+    /// LOAD_WITH_ALTERED_SEARCH_PATH.
     Load = 2,
     /// GetProcAddress of the function's name in the DLL.
     Find = 3,
@@ -114,7 +119,7 @@ pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
     b.subsystem(pe::SUBSYSTEM_GUI);
     let kernel32 = [
         Imp::Name("ExitProcess"),
-        Imp::Name("LoadLibraryA"),
+        Imp::Name("LoadLibraryExA"),
         Imp::Name("GetProcAddress"),
         Imp::Name("FreeLibrary"),
     ];
@@ -194,8 +199,12 @@ fn code(data: u32, main: u32, imp: Imports) -> Vec<u8> {
     op(&mut s, &[0xFF, 0x15], Some(imp.initialize)); // call [OleInitialize]
     steps.push((Step::OleInitialize, s));
     let mut s = Vec::new();
+    // push flags: LOAD_WITH_ALTERED_SEARCH_PATH, as Windows' REGSVR32
+    let flags = super::loader::LOAD_WITH_ALTERED_SEARCH_PATH as u8;
+    op(&mut s, &[0x6A, flags], None);
+    op(&mut s, &[0x6A, 0], None); // push 0: no file handle
     op(&mut s, &[0x68], Some(data + D_PATH)); // push path
-    op(&mut s, &[0xFF, 0x15], Some(imp.load)); // call [LoadLibraryA]
+    op(&mut s, &[0xFF, 0x15], Some(imp.load)); // call [LoadLibraryExA]
     steps.push((Step::Load, s));
     let mut s = Vec::new();
     op(&mut s, &[0x68], Some(data + D_ENTRY)); // push entry
@@ -262,9 +271,15 @@ struct Command {
 }
 
 /// The command the command line `line` gives, the program's name first.
+/// Its words are the C runtime's arguments, as REGSVR32 is a C program
+/// that reads `argv`: a quote within a word opens a quoted part too, so
+/// `/i:"a b"` is the one word `/i:a b`. The split is at ASCII bytes
+/// only, so each word of UTF-8 stays whole.
 fn parse(line: &str) -> Command {
     let mut command = Command::default();
-    for word in super::regedit::words(line).into_iter().skip(1) {
+    let words = super::msvcrt::split_command_line(line.as_bytes());
+    for word in words.into_iter().skip(1) {
+        let word = String::from_utf8_lossy(&word).into_owned();
         let Some(switch) = word.strip_prefix(['/', '-']) else {
             if command.dll.is_none() {
                 command.dll = Some(word);
@@ -407,6 +422,7 @@ pub fn main(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 let text = format!("OleInitialize failed (0x{:08x}).", result);
                 fail(cpu, &d, FAIL_OLE, &text)
             } else {
+                d.set(cpu, D_OLE, 1);
                 d.set(cpu, D_STEP, stage::LOADED);
                 Step::Load
             }
@@ -558,9 +574,8 @@ fn after_message(cpu: &mut Cpu, d: &Data) -> Step {
         d.set(cpu, D_STEP, stage::FREED);
         return Step::FreeLibrary;
     }
-    // OleInitialize came first of all, so it was called if the DLL's
-    // name was read.
-    if d.get(cpu, D_PATH) != 0 {
+    // Windows' REGSVR32 ends OLE only when OleInitialize succeeded.
+    if d.get(cpu, D_OLE) != 0 {
         d.set(cpu, D_STEP, stage::DONE);
         return Step::OleUninitialize;
     }
@@ -589,6 +604,10 @@ mod tests {
         let command = parse("regsvr32 /i:per-user x.dll");
         assert_eq!(command.install.as_deref(), Some("per-user"));
         assert_eq!(calls(&command), [Call::Register, Call::Install(true)]);
+        // A quote within a word, as the C runtime splits argv.
+        let command = parse("regsvr32 /i:\"a b\" x.dll");
+        assert_eq!(command.install.as_deref(), Some("a b"));
+        assert_eq!(command.dll.as_deref(), Some("x.dll"));
         let command = parse("regsvr32 /u /i x.dll");
         assert_eq!(calls(&command), [Call::Install(false), Call::Unregister]);
         let command = parse("regsvr32 /n /i x.dll");

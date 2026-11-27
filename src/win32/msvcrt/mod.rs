@@ -30,6 +30,7 @@ mod string;
 mod time;
 mod undname;
 
+pub(super) use startup::split_command_line;
 pub(super) use stdio::vsnprintf;
 
 use super::call::{self, Call};

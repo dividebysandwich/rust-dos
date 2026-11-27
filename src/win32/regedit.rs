@@ -117,7 +117,7 @@ struct Command {
 
 /// The words of the command line `line`, a word in quotes taken whole
 /// without them.
-pub(super) fn words(line: &str) -> Vec<String> {
+fn words(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut chars = line.chars().peekable();
     loop {

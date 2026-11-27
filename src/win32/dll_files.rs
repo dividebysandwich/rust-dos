@@ -31,7 +31,8 @@
 //! The Windows directory, C:\WINDOWS, has the programs of Windows that
 //! are built in the same way: NOTEPAD.EXE (user32/notepad.rs), which
 //! setups run to show a readme, and REGEDIT.EXE (regedit.rs), which they
-//! run to import a registration file.
+//! run to import a registration file. The system directory has
+//! REGSVR32.EXE (regsvr32.rs), which they run to register a DLL.
 
 use super::forwarders;
 use super::loader::{self, SYSTEM_DIR, WINDOWS_DIR};
