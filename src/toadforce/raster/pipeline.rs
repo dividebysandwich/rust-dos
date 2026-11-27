@@ -253,16 +253,21 @@ pub struct DrawState {
 }
 
 impl DrawState {
+    /// Whether the draw has the depth test on (`Step::Depth`'s
+    /// `ranged`): without it, the depth of its pixels is neither
+    /// tested nor written.
+    pub fn depth_on(&self) -> bool {
+        self.steps
+            .iter()
+            .any(|step| matches!(step, Step::Depth { ranged: true, .. }))
+    }
+
     /// Whether the draw tests depth with a depth bias: a difference of
     /// a step or two in its depth then decides which of its pixels are
     /// drawn, so the card transforms such a draw's vertices and the
     /// host writes the card's depth (`gpu::Run::card_depth`).
     pub fn biased_depth(&self) -> bool {
-        self.values.z_bias != 0
-            && self
-                .steps
-                .iter()
-                .any(|step| matches!(step, Step::Depth { ranged: true, .. }))
+        self.values.z_bias != 0 && self.depth_on()
     }
 }
 

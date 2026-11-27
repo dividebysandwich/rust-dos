@@ -677,11 +677,12 @@ impl Renderer {
         let colour = state.target.colour;
         if hosted {
             let vertices = first..self.host_vertices.len();
+            let card_depth = geometry.is_some() && state.depth_on();
             let run = gpu::Run {
                 state,
                 vertices,
                 geometry: None,
-                card_depth: geometry.is_some(),
+                card_depth,
             };
             if run.vertices.is_empty() {
                 return Ok(None);
@@ -896,8 +897,10 @@ impl Renderer {
             host_count,
             ..
         } = self;
+        // The card's depth goes with the vertices of a draw that tests
+        // or writes depth (`gpu::Run::card_depth`).
         let mut queue = match hosted {
-            true => Queue::Host(host_vertices, host_count, true),
+            true => Queue::Host(host_vertices, host_count, state.depth_on()),
             false => Queue::Software(prims),
         };
         let shape = &state.shape;

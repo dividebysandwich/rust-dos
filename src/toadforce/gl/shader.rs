@@ -458,11 +458,17 @@ float tf_frag_depth(float z) {
     uint bias = uint(u_depth.y);
     n = n > bias ? n - bias : 0u;
     // n / (2^bits - 1) is n / 2^bits times 1 + 2^-bits + 2^-2bits and
-    // so on: the first two terms are exact, and their sum rounds to
-    // the single-precision number nearest the quotient.
+    // so on. With the first two terms alone, a power of two n of 24
+    // bits is half a unit of `low` past it, which rounds to `low` (to
+    // the even one) where the quotient is past the half and nearer the
+    // number above, and the host turns 2^23 / 2^24 into 2^23 - 1
+    // (`LINEAR_CARD`). The third term, doubled so that `step` and it
+    // are one single-precision number, tips that, and the sum rounds
+    // to the number nearest the quotient for every n of 24 bits. Of 16
+    // bits it may be a unit off, which is far less than half a step.
     float step = bits == 16 ? 1.0 / 65536.0 : 1.0 / 16777216.0;
     float low = float(n) * step;
-    return low + low * step;
+    return low + low * (step + 2.0 * step * step);
 }
 ";
 const LINEAR_TNL: &str = "in float v_zw;
@@ -1105,7 +1111,7 @@ impl Locations for Uniforms {
             let at = |name: &str| gl.get_uniform_location(program, name);
             // The samplers read their units from now on.
             gl.use_program(Some(program));
-            // `LINEAR`'s 1, which the compiler doesn't know.
+            // `LINEAR_CARD`'s 1, which the compiler doesn't know.
             gl.uniform_1_f32(at("u_one").as_ref(), 1.0);
             for stage in 0..STAGES {
                 let tex = at(&format!("u_tex{stage}"));

@@ -778,7 +778,7 @@ smoke and particles.
 | The colour key of a cube map | the host looks the key up at its own nearest texel, from face coordinates it works out itself: a pixel on the edge of a keyed texel may be dropped by one renderer and drawn by the other |
 | Anisotropic filtering, where the host has it | the host GPU's, which reads more texels than the card's stand-in (trilinear at the level of the shorter side); compared by eye and by a mean error. Measured: a mean of 1.5 and at most 29 on the test's square going into the distance; in Giants 12% of the frame's pixels, 0.2% of the frame by more than 8 (the ground's normal map through `DOTPRODUCT3`) |
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
-| Depth | none for the vertices the card transforms, which include every draw with a depth bias and the depth test on: the fragment shader works out each pixel's depth from the card's plane of the triangle in the card's operations, takes the bias from its whole number of steps, and writes the single-precision number nearest that number over the buffer's most, which the host turns back into it (`shader::LINEAR_CARD`). Vertices the host transforms and a program's screen vertices: 1 step of a 16-bit buffer, 4 steps of a 24-bit one, as the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound, unless both have the card's depth. Giants draws its tracks 2 steps of 24 bits in front of a ground the host transforms, or the card where the ground has a texture matrix, and they go the card's way |
+| Depth | none for the vertices the card transforms from a program's untransformed ones, which include every such draw with a depth bias and the depth test on: the fragment shader works out each pixel's depth from the card's plane of the triangle in the card's operations, takes the bias from its whole number of steps, and writes the single-precision number nearest that number over the buffer's most, which the host turns back into it (`shader::LINEAR_CARD`). Vertices the host transforms and a program's screen vertices: 1 step of a 16-bit buffer, 4 steps of a 24-bit one, as the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound, unless both have the card's depth. Giants draws its tracks 2 steps of 24 bits in front of a ground the host transforms, or the card where the ground has a texture matrix, and they go the card's way |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
 | Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above (measured on lines: samples 1 in 255, depth 1 step of 16 bits and 2 of 24). `ZBIAS` moves a line's depth as a triangle's on both. A pixel of a line within half a pixel of where the line's 1 / w falls to 0, or past it, gets its own values at every corner of its square, so a mip filter picks level 0 for it and fog by w takes w as 1 where the centre has no positive 1 / w |
 | 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
@@ -867,10 +867,11 @@ directly, at the points where the software renderer would draw them
   coordinates (`WRAP0` to `WRAP7`), flat shading, lines and points,
   and the draws with a depth bias and the depth test on
   (`DrawState::biased_depth`): for those the host gets screen vertices
-  after the card's transform, lighting, clipping and culling, with the
-  card's depth of each primitive (`gpu::Run::card_depth`). It keeps no copies of the vertex buffers in
-  card memory. Under `--deterministic` the software renderer draws, so
-  the card transforms everything there.
+  after the card's transform, lighting, clipping and culling, and
+  where the depth test is on, the card's depth of each primitive
+  (`gpu::Run::card_depth`). It keeps no copies of the vertex buffers
+  in card memory. Under `--deterministic` the software renderer
+  draws, so the card transforms everything there.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
   the write counters of the pages each image covers. A write to a page

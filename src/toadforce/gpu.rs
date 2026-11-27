@@ -332,13 +332,16 @@ pub struct Run {
     /// `Shape::cull` names.
     pub geometry: Option<Geometry>,
     /// The card transformed the vertices, from the program's
-    /// untransformed ones, and each has the card's depth of its
-    /// primitive (`Vertex::depth`), which the host writes. The host
+    /// untransformed ones, the draw has the depth test on
+    /// (`DrawState::depth_on`), and each vertex has the card's depth of
+    /// its primitive (`Vertex::depth`), which the host writes. The host
     /// takes the vertices of most such draws itself, but none with a
     /// depth bias (`DrawState::biased_depth`), whose depth decides
     /// which pixels of a mark on a surface are drawn: a surface the
     /// card transforms has to have the card's depth for those to go
-    /// its way. A program's screen vertices have the host's depth.
+    /// its way. A program's screen vertices, and a draw without the
+    /// depth test, whose depth is neither tested nor written, have the
+    /// host's depth.
     pub card_depth: bool,
 }
 
