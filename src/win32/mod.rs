@@ -27,6 +27,7 @@ mod ddraw;
 pub use ddraw::is_lost_cache;
 mod dinput;
 pub(crate) mod directories;
+mod directx_files;
 pub mod dll_files;
 mod forwarders;
 mod dmusic;
