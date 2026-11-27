@@ -1195,7 +1195,9 @@ const STREAM_NO_FORMATS: &[i32] = &[OUT, 0, 0, 0, 0, 0, 0, 0];
 
 /// What MSACM32's code answers without drivers, read from the code of
 /// Windows 98 SE's 4.03.1998; MAX_SIZE_FORMAT is the size on a Windows
-/// with its codecs, so programs that size a buffer by it run.
+/// with its codecs, so programs that size a buffer by it run. A PCM to
+/// PCM stream opens, as the PCM converter Windows installs with MSACM32
+/// opens it, and its handle is the output.
 const ACM_CALLS: &[AcmCall] = &[
     AcmCall("acmMetrics", &[0, 50, OUT], 0, Some(50)),
     AcmCall("acmMetrics", &[0, 51, OUT], 512, Some(0)),
@@ -1208,8 +1210,8 @@ const ACM_CALLS: &[AcmCall] = &[
     AcmCall("acmMetrics", &[0, 7, 0], 8, None),
     AcmCall("acmMetrics", &[0, 50, 0], 11, None),
     AcmCall("acmMetrics", &[0, 50, UNMAPPED], 11, None),
-    AcmCall("acmStreamOpen", STREAM, 512, Some(0)),
-    AcmCall("acmStreamOpen", STREAM_QUERY, 512, None),
+    AcmCall("acmStreamOpen", STREAM, 0, None),
+    AcmCall("acmStreamOpen", STREAM_QUERY, 0, None),
     AcmCall("acmStreamOpen", STREAM_OF_DRIVER, 5, Some(0)),
     AcmCall("acmStreamOpen", STREAM_NO_OUT, 11, None),
     AcmCall("acmStreamOpen", STREAM_BAD_OUT, 11, None),
