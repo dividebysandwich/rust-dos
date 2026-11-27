@@ -49,6 +49,13 @@ const SLICE: u64 = 20_000;
 /// main thread polled DirectInput (#1802).
 const TICK: u64 = 5_000;
 
+/// The W32 section's version from which a thread's TIB has its last
+/// error at 60h and its TLS slots at 88h, as on Windows 98 SE. Before it
+/// the last error was in the thread's entry (the running thread's in its
+/// process's), and the slots were at 100h (`OLDER_TLS_ARRAY`).
+pub const TIB_98: u16 = 113;
+const OLDER_TLS_ARRAY: u32 = 0x100;
+
 /// What wait functions return.
 pub const WAIT_OBJECT_0: u32 = 0;
 pub const WAIT_ABANDONED_0: u32 = 0x80;
@@ -128,7 +135,9 @@ pub struct Thread {
     /// Its debug registers while it doesn't run, as a CONTEXT has them:
     /// each thread has its own breakpoints.
     pub dr: seh::DebugRegs,
-    pub last_error: u32,
+    /// Its last error in a state saved before its TIB held it (`TIB_98`),
+    /// which the load puts there.
+    pub older_last_error: crate::savestate::Lost<TIB_98, u32>,
     /// How many times it is suspended; it runs at 0.
     pub suspended: u32,
     pub priority: i32,
@@ -256,7 +265,8 @@ pub fn find(win32: &Win32, id: u32) -> Option<At> {
 }
 
 /// Keep the running thread's state in its entry: the context `ctx` (the
-/// processor's, or the one an interrupt left), the FPU's, its last error.
+/// processor's, or the one an interrupt left) and the FPU's. Its last
+/// error stays in its TIB.
 fn save(cpu: &mut Cpu, ctx: Context) {
     let fpu = control::save_image(cpu).to_vec();
     let sse = cpu.model.has_sse().then_some((cpu.sse.xmm, cpu.sse.mxcsr));
@@ -265,13 +275,11 @@ fn save(cpu: &mut Cpu, ctx: Context) {
     let Some(process) = win32.processes.get_mut(win32.running) else {
         return;
     };
-    let last_error = process.last_error;
     if let Some(thread) = process.current_thread_mut() {
         thread.ctx = ctx;
         thread.fpu = fpu;
         thread.sse = sse;
         thread.dr = dr;
-        thread.last_error = last_error;
     }
 }
 
@@ -299,15 +307,13 @@ fn run(cpu: &mut Cpu, (p, t): At, used: u64) {
     let process = &mut win32.processes[p];
     process.current = Some(t);
     let thread = &process.threads[t];
-    let (ctx, fpu, sse, dr, last_error, tib) = (
+    let (ctx, fpu, sse, dr, tib) = (
         thread.ctx,
         thread.fpu_image(),
         thread.sse,
         thread.dr,
-        thread.last_error,
         thread.tib,
     );
-    process.last_error = last_error;
     process.tib = tib;
     control::load_image(cpu, &fpu);
     if cpu.model.has_sse() {
@@ -1030,6 +1036,42 @@ crate::state_fields!(Wait {
     section,
     queue
 });
+/// Move the TIB fields of a state saved before `TIB_98` to where the TIB
+/// has them now: each thread's TLS slots from 100h to 88h, with
+/// `fs:[2Ch]` pointing at them there, and its last error from its entry
+/// (the running thread's from its process's) into the TIB. Programs read
+/// the slots through `fs:[2Ch]` and the last error through GetLastError,
+/// so they find the same values after the load.
+pub(crate) fn mend_tibs(bus: &mut Bus) {
+    use super::loader::{TIB_LAST_ERROR, TIB_TLS_ARRAY, TLS_ARRAY, TLS_SLOTS};
+    let size = 4 * TLS_SLOTS;
+    for i in 0..bus.win32.processes.len() {
+        let mut process = std::mem::take(&mut bus.win32.processes[i]);
+        if let Some(running) = process.older_last_error.0.take() {
+            let (memory, current) = (&process.memory, process.current);
+            for (t, thread) in process.threads.iter_mut().enumerate() {
+                let older = thread.older_last_error.0.take().unwrap_or(0);
+                let tib = thread.tib;
+                if tib == 0 {
+                    continue;
+                }
+                let mut slots = vec![0; size as usize];
+                if memory.read(bus, tib + OLDER_TLS_ARRAY, &mut slots).is_some() {
+                    // The old array's end, past the new one's.
+                    let past = TLS_ARRAY + size;
+                    let gone = vec![0; (OLDER_TLS_ARRAY + size - past) as usize];
+                    memory.write(bus, tib + past, &gone);
+                    memory.write(bus, tib + TLS_ARRAY, &slots);
+                }
+                memory.write_32(bus, tib + TIB_TLS_ARRAY, tib + TLS_ARRAY);
+                let last_error = if current == Some(t) { running } else { older };
+                memory.write_32(bus, tib + TIB_LAST_ERROR, last_error);
+            }
+        }
+        bus.win32.processes[i] = process;
+    }
+}
+
 crate::state_fields!(Thread {
     id,
     object,
@@ -1040,7 +1082,7 @@ crate::state_fields!(Thread {
     fpu,
     sse,
     dr,
-    last_error,
+    older_last_error,
     suspended,
     priority,
     exit_code,

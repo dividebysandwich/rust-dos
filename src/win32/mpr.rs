@@ -2,7 +2,6 @@
 //! WNetGetConnectionA to ask whether the drive it installs to is a
 //! network share; on the built-in Windows no drive is one.
 
-use super::process;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -72,6 +71,6 @@ fn wnet_get_connection_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         ERROR_NOT_CONNECTED
     };
-    process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
     Some(code)
 }

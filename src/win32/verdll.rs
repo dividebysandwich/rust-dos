@@ -21,7 +21,7 @@
 
 use super::stubs::{Api, Conv, Dll};
 use super::version::WindowsVersion;
-use super::{kernel32, process};
+use super::kernel32;
 use crate::cpu::Cpu;
 
 pub static DLL: Dll = Dll {
@@ -79,7 +79,7 @@ const ERROR_BAD_PATHNAME: u32 = 161;
 const ERROR_RESOURCE_DATA_NOT_FOUND: u32 = 1812;
 
 fn set_error(cpu: &mut Cpu, code: u32) {
-    process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
 }
 
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {

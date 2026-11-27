@@ -1080,7 +1080,7 @@ pub(super) fn open_file_16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         };
         let handle = open_hfile(cpu, &full, access, disposition);
         if handle == HFILE_ERROR {
-            Err(crate::win32::process(cpu).last_error)
+            Err(crate::win32::last_error(cpu))
         } else if style & OF_EXIST != 0 {
             object::close(cpu, handle);
             Ok(1)

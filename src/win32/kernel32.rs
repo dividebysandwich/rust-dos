@@ -107,15 +107,27 @@ static APIS: &[Api] = &[
     stdcall("GetCommandLineA", 329, 0, get_command_line),
     stdcall("GetVersion", 476, 0, get_version),
     stdcall("GetModuleHandleA", 397, 1, get_module_handle),
-    stdcall("GetLastError", 385, 0, get_last_error),
-    stdcall("SetLastError", 724, 1, set_last_error),
+    code("GetLastError", 385, 0, GET_LAST_ERROR, get_last_error),
+    code("SetLastError", 724, 1, SET_LAST_ERROR, set_last_error),
     stdcall("GetTickCount", 470, 0, get_tick_count),
     stdcall("GetEnvironmentVariableA", 365, 3, get_environment_variable),
     stdcall("SetEnvironmentVariableA", 711, 2, set_environment_variable),
     stdcall("TlsAlloc", 770, 0, memory::tls_alloc),
     stdcall("TlsFree", 772, 1, memory::tls_free),
-    stdcall("TlsGetValue", 774, 1, memory::tls_get_value),
-    stdcall("TlsSetValue", 775, 2, memory::tls_set_value),
+    code(
+        "TlsGetValue",
+        774,
+        1,
+        memory::TLS_GET_VALUE,
+        memory::tls_get_value,
+    ),
+    code(
+        "TlsSetValue",
+        775,
+        2,
+        memory::TLS_SET_VALUE,
+        memory::tls_set_value,
+    ),
     stdcall("GetProcessHeap", 422, 0, memory::get_process_heap),
     stdcall("HeapAlloc", 509, 3, memory::heap_alloc),
     stdcall("HeapFree", 513, 3, memory::heap_free),
@@ -1377,7 +1389,7 @@ const ERROR_PROC_NOT_FOUND: u32 = 127;
 const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 
 fn set_error(cpu: &mut Cpu, code: u32) {
-    super::process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
 }
 
 /// A function Windows 95 has only as a stub that fails: most of the
@@ -1419,11 +1431,10 @@ fn exit_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE (-10, -11
 /// and -12): handles of DOS's handles 0, 1 and 2.
 fn get_std_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let process = super::process(cpu);
     match args[0] as i32 {
-        n @ -12..=-10 => Some(process.std[(-10 - n) as usize]),
+        n @ -12..=-10 => Some(super::process(cpu).std[(-10 - n) as usize]),
         _ => {
-            process.last_error = ERROR_INVALID_HANDLE;
+            set_error(cpu, ERROR_INVALID_HANDLE);
             Some(INVALID_HANDLE_VALUE)
         }
     }
@@ -1456,22 +1467,40 @@ fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    let process = super::process(cpu);
-    match process.module(&name) {
+    match super::process(cpu).module(&name) {
         Some(base) => Some(base),
         None => {
-            process.last_error = ERROR_MOD_NOT_FOUND;
+            set_error(cpu, ERROR_MOD_NOT_FOUND);
             Some(0)
         }
     }
 }
 
+// GetLastError and SetLastError are x86 code that reads and writes the
+// last error in the TIB, as Windows 98's do, with no trap. The handlers
+// below are for states saved when they were traps.
+
+/// GetLastError(): the running thread's last error.
+const GET_LAST_ERROR: &[u8] = &[
+    0x64, 0x8B, 0x15, 0x18, 0x00, 0x00, 0x00, // mov edx, fs:[18h]
+    0x8B, 0x42, 0x60, //                         mov eax, [edx+60h]
+    0xC3, //                                     ret
+];
+
+/// SetLastError(code).
+const SET_LAST_ERROR: &[u8] = &[
+    0x8B, 0x44, 0x24, 0x04, //                   mov eax, [esp+4]
+    0x64, 0x8B, 0x15, 0x18, 0x00, 0x00, 0x00, // mov edx, fs:[18h]
+    0x89, 0x42, 0x60, //                         mov [edx+60h], eax
+    0xC2, 0x04, 0x00, //                         ret 4
+];
+
 fn get_last_error(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(super::process(cpu).last_error)
+    Some(super::last_error(cpu))
 }
 
 fn set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    super::process(cpu).last_error = args[0];
+    super::set_last_error(cpu, args[0]);
     Some(0)
 }
 
@@ -1523,7 +1552,7 @@ fn get_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = string_at(cpu, name)?;
     let process = super::process(cpu);
     let Some(value) = super::variable_value(&process.environment, &name) else {
-        process.last_error = ERROR_ENVVAR_NOT_FOUND;
+        set_error(cpu, ERROR_ENVVAR_NOT_FOUND);
         return Some(0);
     };
     let mut bytes = crate::dosstr::to_bytes(value);
