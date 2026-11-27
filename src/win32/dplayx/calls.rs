@@ -3,7 +3,8 @@
 //! sessions EnumSessions found, and the players and groups of
 //! EnumPlayers and its kind, one callback after another until the list
 //! ends or the callback returns FALSE. What each callback gets is written
-//! to the task's scratch space.
+//! to the task's scratch space, but for a provider's GUID, which stays in
+//! DPLAYX's variables after the call (`provider_guid_at`).
 //!
 //! The same task makes a method that waits (a sync EnumSessions, an Open
 //! that joins) wait: its thread sleeps a while and then calls the method

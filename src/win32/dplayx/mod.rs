@@ -669,12 +669,16 @@ const PROVIDERS: &[(Guid, &str)] = &[
     (DPSPGUID_IPX, "IPX Connection For DirectPlay"),
     (DPSPGUID_TCPIP, "Internet TCP/IP Connection For DirectPlay"),
 ];
+
 /// Where the GUID of the provider `index` is for the program: in
-/// DPLAYX's variables, which stay while the DLL is mapped, as the GUIDs
-/// of the list Windows' DPLAYX keeps do. Sorry! keeps the pointer its
-/// DirectPlayEnumerate callback got and passes it to DirectPlayCreate
-/// when the player picks a connection. None in a process whose DPLAYX
-/// is from a state saved before the DLL had variables.
+/// DPLAYX's variables, which stay while the DLL is mapped. Sorry! keeps
+/// the pointer its DirectPlayEnumerate callback got and passes it to
+/// DirectPlayCreate when the player picks a connection, which works on
+/// Windows 98, so the GUID outlives the callback there. None in a
+/// process whose DPLAYX is from a state saved before the DLL had
+/// variables, and where the variable's page can't be written: a DPLAYX
+/// freed and loaded again after such a state loads keeps the older,
+/// shorter region, though its module has the size of the image now.
 fn provider_guid_at(cpu: &mut Cpu, index: usize) -> Option<u32> {
     let at = super::stubs::var_address(dll_index(), 0) + 16 * index as u32;
     let mapped = super::running(cpu)?
@@ -684,8 +688,7 @@ fn provider_guid_at(cpu: &mut Cpu, index: usize) -> Option<u32> {
     if !mapped {
         return None;
     }
-    PROVIDERS.get(index)?.0.write(cpu, at);
-    Some(at)
+    PROVIDERS.get(index)?.0.write(cpu, at).then_some(at)
 }
 
 /// The version DirectPlayEnumerate gives each provider: DirectX 6's.
