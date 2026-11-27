@@ -2898,7 +2898,7 @@ pub fn set_surface_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if desc.flags & !allowed != 0 || desc.flags & DDSD_LPSURFACE == 0 || desc.surface == 0 {
         return Some(DDERR_INVALIDPARAMS);
     }
-    if s.memory != MEM_SYSTEM || s.root != 0 || !s.children.is_empty() {
+    if s.memory != MEM_SYSTEM {
         return Some(DDERR_INVALIDPARAMS);
     }
     let format = if desc.flags & DDSD_PIXELFORMAT != 0 {
@@ -2917,6 +2917,15 @@ pub fn set_surface_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         s.height
     };
     if width == 0 || height == 0 || width > 0x4000 || height > 0x4000 {
+        return Some(DDERR_INVALIDPARAMS);
+    }
+    // A surface of a complex surface, a mipmap's level among them, takes
+    // the program's memory for pixels of its own size and format: games
+    // fill each level of a system memory mipmap this way before Load
+    // (Demolition Racer's track). Its size or format can't change, as
+    // Wine has it, since the other surfaces depend on them.
+    let complex = s.root != 0 || !s.children.is_empty();
+    if complex && (width, height, format) != (s.width, s.height, s.format) {
         return Some(DDERR_INVALIDPARAMS);
     }
     let pitch = if desc.flags & DDSD_PITCH != 0 {

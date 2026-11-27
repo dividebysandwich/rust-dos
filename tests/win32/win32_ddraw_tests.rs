@@ -4871,3 +4871,82 @@ fn create_surface_makes_a_surface_over_the_programs_memory() {
     assert_eq!(r[11], DDERR_INVALIDCAPS, "complex mipmap");
     assert_eq!(r[12], 0, "DXT1 with DDSD_PITCH 0");
 }
+
+const S4_SET_SURFACE_DESC: u32 = 39;
+/// The DDSURFACEDESC2s SetSurfaceDesc is given: the program's memory
+/// alone, and the memory with a width and pitch other than the level's.
+const SET_MEMORY: u32 = DESC;
+const SET_WIDER: u32 = ENTRIES;
+/// The mipmap's top level through IDirectDrawSurface4.
+const TOP4: u32 = CLIPPER;
+
+/// IDirectDrawSurface4's SetSurfaceDesc on the levels of a 4x4 system
+/// memory mipmap of two levels: the second level and the top level
+/// given the program's memory, the second level given a width it
+/// hasn't got, and the second level locked.
+fn mipmap_user_memory_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    mipmap_desc(&mut d, DDSCAPS_SYSTEMMEMORY, 4, 2);
+    put32(&mut d, SET_MEMORY, 124);
+    put32(&mut d, SET_MEMORY + 0x04, DDSD_LPSURFACE);
+    put32(&mut d, SET_WIDER, 124);
+    put32(
+        &mut d,
+        SET_WIDER + 0x04,
+        DDSD_LPSURFACE | DDSD_WIDTH | DDSD_PITCH,
+    );
+    put32(&mut d, SET_WIDER + 0x0C, 4);
+    put32(&mut d, SET_WIDER + 0x10, 8);
+    put32(&mut d, LOCKED, 124);
+    put(&mut d, KEY, &IID_IDIRECTDRAWSURFACE4);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        for offset in [SET_MEMORY, SET_WIDER] {
+            a.mov(dword_ptr(l.at(offset + 0x24)), l.at(PIXELS) as u32)?;
+        }
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let create = [Arg::At(FX), Arg::At(SOURCE), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &create)?;
+        let attached = [Arg::At(LEVEL_CAPS), Arg::At(OFFSCREEN)];
+        c.com(a, l, SOURCE, S_GET_ATTACHED_SURFACE, &attached)?;
+        for (from, to) in [(OFFSCREEN, QUERIED), (SOURCE, TOP4)] {
+            c.com(a, l, from, S_QUERY_INTERFACE, &[Arg::At(KEY), Arg::At(to)])?;
+        }
+        for (surface, desc) in [
+            (QUERIED, SET_MEMORY),
+            (TOP4, SET_MEMORY),
+            (QUERIED, SET_WIDER),
+        ] {
+            let set = [Arg::At(desc), Arg::I(0)];
+            c.com(a, l, surface, S4_SET_SURFACE_DESC, &set)?;
+        }
+        let lock = [Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)];
+        c.com(a, l, QUERIED, S_LOCK, &lock)?;
+        c.com(a, l, QUERIED, S_UNLOCK, &[Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+/// A level of a system memory mipmap takes the program's memory as it
+/// is, as Demolition Racer has its track's textures' levels take
+/// theirs before it loads them into video memory; a size other than
+/// the level's is turned down, as Wine does.
+#[test]
+fn set_surface_desc_gives_a_mipmap_level_the_programs_memory() {
+    let (program, data) = mipmap_user_memory_program();
+    let mut cpu = machine("mipmap_user_memory", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 12);
+    assert_eq!(r[2..6], [0; 4], "SetCooperativeLevel to QueryInterface");
+    assert_eq!(r[6], 0, "QueryInterface of the top level");
+    assert_eq!(r[7], 0, "the second level's memory");
+    assert_eq!(r[8], 0, "the top level's memory");
+    assert_eq!(r[9], DDERR_INVALIDPARAMS, "a width other than the level's");
+    assert_eq!(r[10..12], [0; 2], "Lock and Unlock");
+    // The second level keeps its 2x2 size and has the program's pixels.
+    assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x08), 2);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x0C), 2);
+}
