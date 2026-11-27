@@ -830,8 +830,10 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
 /// play sound. Calling `wake` here as well polled the devices and copied
 /// every thread's wait at each SetEvent and ReleaseMutex, which made
 /// ReleaseMutex cost the host as much as two other calls (#1222).
-pub fn object_changed(win32: &mut Win32, id: u32) {
+/// Whether it ended a wait.
+pub fn object_changed(win32: &mut Win32, id: u32) -> bool {
     let running = current(win32);
+    let mut ended = false;
     for p in 0..win32.processes.len() {
         for t in 0..win32.processes[p].threads.len() {
             if running == Some((p, t)) {
@@ -843,9 +845,11 @@ pub fn object_changed(win32: &mut Win32, id: u32) {
             };
             if let Some(result) = try_wait(&mut win32.objects, thread.id, wait) {
                 end_wait(win32, (p, t), result);
+                ended = true;
             }
         }
     }
+    ended
 }
 
 /// End the waits that can end now. The threads whose waits timed out.
