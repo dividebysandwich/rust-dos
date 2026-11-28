@@ -1396,6 +1396,21 @@ fn release_factory(cpu: &mut Cpu, factory: u32, value: u32, ctx: &mut Context) -
     None
 }
 
+/// Whether `module` is a built-in system module whose export `name` the
+/// built-in Windows doesn't have (`builtin::Run::Missing`).
+fn builtin_lacks(cpu: &Cpu, module: u16, name: &str) -> bool {
+    let Some(i) = super::module_index(cpu, module) else {
+        return false;
+    };
+    let Some(b) = cpu.bus.win32.win16.modules[i].builtin else {
+        return false;
+    };
+    super::builtin::MODULES[b as usize]
+        .apis
+        .iter()
+        .any(|a| a.name == name && matches!(a.run, super::builtin::Run::Missing))
+}
+
 /// `SERVER_INITS` of `then_server`, or its first step, called by the
 /// function itself (`direct`) with its caller's context.
 fn server_inits(cpu: &mut Cpu, data: &[u32], ctx: &mut Context, direct: bool) -> Option<u32> {
@@ -1409,6 +1424,21 @@ fn server_inits(cpu: &mut Cpu, data: &[u32], ctx: &mut Context, direct: bool) ->
         return None;
     }
     let module = module as u16;
+    if builtin_lacks(cpu, module, "DllGetClassObject") {
+        // A built-in module named as a server, as Windows registers OLE
+        // 2's own classes with OLE2.DLL, whose DllGetClassObject the
+        // built-in Windows doesn't have: the class stays unknown, as it
+        // was before COMPOBJ loaded servers, rather than the call of the
+        // missing function ending the program.
+        let name = super::module_index(cpu, module)
+            .map(|i| cpu.bus.win32.win16.modules[i].name.clone())
+            .unwrap_or_default();
+        cpu.bus.log_string(&format!(
+            "[W16] COMPOBJ: the built-in {name} serves no classes"
+        ));
+        super::module::release(cpu, module);
+        return reply(ctx, direct, REGDB_E_CLASSNOTREG);
+    }
     let target = super::module::ordinal_of(cpu, module, "DllGetClassObject")
         .map_or(0, |o| super::module::entry_point(cpu, module, o));
     if target == 0 {

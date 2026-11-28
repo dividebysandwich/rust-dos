@@ -1156,7 +1156,8 @@ fn expect_es(code: &mut Code, at: u16, value: u16, fail: u8) {
 /// DllGetClassObject called. The task holds the DLL once, however often
 /// it was asked; CoFreeUnusedLibraries frees it when DllCanUnloadNow
 /// says S_OK, and the last CoUninitialize whatever it says. A class
-/// with no server in the registry is REGDB_E_CLASSNOTREG.
+/// with no server in the registry is REGDB_E_CLASSNOTREG, and so is one
+/// whose server is a built-in module without DllGetClassObject.
 #[test]
 fn co_create_instance_starts_an_inproc_server() {
     const CO_INITIALIZE: u16 = 2;
@@ -1176,6 +1177,8 @@ fn co_create_instance_starts_an_inproc_server() {
     const IID_ICLASSFACTORY: u16 = 0x80;
     const IID_IUNKNOWN_AT: u16 = 0x90;
     const OTHER: u16 = 0xA0;
+    const KEY2: u16 = 0xB0;
+    const OLE2_DLL: u16 = 0xF0;
 
     // {0BADC0DE-1234-5678-9ABC-DEF012345678}, and one no server has.
     const GUID: [u8; 16] = [
@@ -1204,6 +1207,12 @@ fn co_create_instance_starts_an_inproc_server() {
     );
     put_text(&mut code, DLL, b"srv.dll");
     put_text(&mut code, NAME, b"SRV");
+    put_text(
+        &mut code,
+        KEY2,
+        b"CLSID\\{0BADC0DE-1234-5678-9ABC-DEF012345679}\\InprocServer",
+    );
+    put_text(&mut code, OLE2_DLL, b"ole2.dll");
 
     // RegSetValue(HKEY_CLASSES_ROOT, key, REG_SZ, "srv.dll", 7): the
     // server registered, as AVIFILE's entry point registers itself.
@@ -1274,6 +1283,22 @@ fn co_create_instance_starts_an_inproc_server() {
     push_ds(&mut code, OUT);
     code.call("COMPOBJ", CO_CREATE_INSTANCE);
     expect_dx_ax(&mut code, 0x8004_0154, 13);
+
+    // A class served by a built-in module whose DllGetClassObject the
+    // built-in Windows lacks, as Windows registers OLE 2's own classes
+    // with OLE2.DLL: still REGDB_E_CLASSNOTREG, the program going on.
+    code.push(0).push(1);
+    push_ds(&mut code, KEY2);
+    code.push(0).push(1);
+    push_ds(&mut code, OLE2_DLL);
+    code.push(0).push(8).call("SHELL", REG_SET_VALUE);
+    expect_dx_ax(&mut code, 0, 16);
+    push_ds(&mut code, OTHER);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0x8004_0154, 17);
 
     // The server loaded again, and freed by the last CoUninitialize
     // though DllCanUnloadNow says S_FALSE, as CoFreeAllLibraries frees
