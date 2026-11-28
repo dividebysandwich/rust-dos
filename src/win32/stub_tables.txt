@@ -1682,6 +1682,7 @@ SendMessage16
 UserYield16
 RestoreDefaultPalette
 ExitWindows16
+WinHelpMain
 
 DLL GDI32.DLL
 GetStockObject

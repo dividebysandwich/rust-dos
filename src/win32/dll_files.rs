@@ -30,11 +30,13 @@
 //!
 //! The Windows directory, C:\WINDOWS, has the programs of Windows that
 //! are built in the same way: NOTEPAD.EXE (user32/notepad.rs), which
-//! setups run to show a readme, and REGEDIT.EXE (regedit.rs), which they
-//! run to import a registration file. The system directory has
-//! REGSVR32.EXE (regsvr32.rs), which they run to register a DLL, and
-//! the files of DirectX whose work the built-in DLLs do
-//! (directx_files.rs), which DirectX's setups compare with theirs.
+//! setups run to show a readme, REGEDIT.EXE (regedit.rs), which they
+//! run to import a registration file, and WINHELP.EXE and WINHLP32.EXE
+//! (user32/winhelp/program.rs), which a shortcut runs to open a help
+//! file. The system directory has REGSVR32.EXE (regsvr32.rs), which
+//! they run to register a DLL, and the files of DirectX whose work the
+//! built-in DLLs do (directx_files.rs), which DirectX's setups compare
+//! with theirs.
 
 use super::forwarders;
 use super::loader::{self, SYSTEM_DIR, WINDOWS_DIR};
@@ -89,13 +91,20 @@ pub fn sync(bus: &mut Bus) {
     }
     bus.disk.set_system_files(SYSTEM_DIR, files);
     let programs = if bus.win32.enabled {
-        vec![
+        let mut programs = vec![
             (
                 "NOTEPAD.EXE".to_string(),
                 super::user32::notepad::file(bus).into(),
             ),
             ("REGEDIT.EXE".to_string(), super::regedit::file(bus).into()),
-        ]
+        ];
+        let help = super::user32::winhelp::program::file(bus);
+        programs.extend(
+            super::user32::winhelp::program::FILES
+                .iter()
+                .map(|name| (name.to_string(), help.clone().into())),
+        );
+        programs
     } else {
         Vec::new()
     };

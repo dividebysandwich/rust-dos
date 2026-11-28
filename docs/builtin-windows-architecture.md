@@ -393,6 +393,10 @@ against that DLL's results in `undname_vc6.txt`).
   window, a multi-line edit control with the file's text. Started by
   WinExec or CreateProcessA, it is a process of its own and stays open
   after the program that started it ends, as on Windows 98.
+  `WINHELP.EXE` and `WINHLP32.EXE` are the same message loop around
+  WinHelpMain (`user32/winhelp/program.rs`), which opens the help file
+  the command line names in WinHelpA's viewer; closing the viewer ends
+  the program.
 - The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for
   Win32, as Windows 98 SE's does (`wnaspi32.rs`). Copy protections read
   their discs that way: SafeDisc 2 loads it to check the CD. On Windows
