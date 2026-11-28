@@ -73,7 +73,9 @@ impl Machine {
         if !config.warnings.is_empty() {
             return Err(format!("configuration: {}", config.warnings.join("; ")));
         }
-        let settings = Settings::from_config(&config);
+        let mut settings = Settings::from_config(&config);
+        // The host's fonts never change a golden picture.
+        settings.win32_fonts = config::Win32Fonts::Liberation;
         let CpuSpeed::Fixed(cycles) = settings.cycles else {
             return Err(format!("the speed must be fixed, not {:?}", settings.cycles));
         };

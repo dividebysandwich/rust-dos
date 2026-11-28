@@ -3,7 +3,7 @@
 use super::types::parse_bool;
 use super::{
     AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, RunLockSetting, Section,
-    Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
+    Win32Fonts, Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
@@ -397,6 +397,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 "invalid win32_locale '{}' (one of {})",
                                 value,
                                 Win32Locale::ALL.map(Win32Locale::name).join(", ")
+                            )),
+                        },
+                        "win32_fonts" => match Win32Fonts::parse(value, base_dir, home) {
+                            Some(fonts) => config.win32_fonts = Some(fonts),
+                            None => warn(format!(
+                                "invalid win32_fonts '{}' (auto, liberation or a folder)",
+                                value
                             )),
                         },
                         "win32_shims" => match crate::win32::shims::by_name(value) {

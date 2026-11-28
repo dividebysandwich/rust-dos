@@ -22,6 +22,7 @@ pub mod font;
 mod fot;
 mod gamma;
 pub mod metafile;
+pub mod outlines;
 pub mod palette;
 pub mod region;
 pub mod rgn;

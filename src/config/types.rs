@@ -312,6 +312,54 @@ impl DesktopDepth {
     }
 }
 
+/// Where the built-in Windows reads the outlines of Arial, Times New
+/// Roman and Courier New from (`win32_fonts`). A file that isn't found
+/// there, or can't be read, is drawn from the bundled Liberation font
+/// of its style.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum Win32Fonts {
+    /// The emulated C:'s `C:\WINDOWS\FONTS`, then the host's fonts
+    /// folder on Windows and macOS.
+    #[default]
+    Auto,
+    /// The Liberation fonts alone.
+    Liberation,
+    /// The fonts of this host folder.
+    Folder(PathBuf),
+}
+
+impl Win32Fonts {
+    /// "auto", "liberation" (in any case) or a host folder's path, with
+    /// "~/" for the folder `home` and a relative path from `base_dir`,
+    /// the configuration file's folder, as a drive's. None for an empty
+    /// value.
+    pub fn parse(s: &str, base_dir: &Path, home: Option<&Path>) -> Option<Self> {
+        let s = s.trim().trim_matches('"');
+        if s.eq_ignore_ascii_case("auto") {
+            Some(Self::Auto)
+        } else if s.eq_ignore_ascii_case("liberation") {
+            Some(Self::Liberation)
+        } else if s.is_empty() {
+            None
+        } else {
+            Some(Self::Folder(match (s.strip_prefix("~/"), home) {
+                (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
+                _ => base_dir.join(s),
+            }))
+        }
+    }
+
+    /// The value as a configuration file has it, with a folder under
+    /// `home` as "~/...".
+    pub fn name(&self, home: Option<&Path>) -> String {
+        match self {
+            Self::Auto => "auto".to_string(),
+            Self::Liberation => "liberation".to_string(),
+            Self::Folder(p) => crate::mount::contract_home(p, home),
+        }
+    }
+}
+
 /// The size of the built-in Windows' desktop (`win32_desktop`), as the
 /// Display Properties of Windows set it: 640x480 (the default), 800x600
 /// or 1024x768.

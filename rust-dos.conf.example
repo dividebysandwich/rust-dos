@@ -277,6 +277,12 @@
 # on Windows: 640x480 (the default), 800x600 or 1024x768. Programs that
 # say they need 800x600 or more, such as Fields of Fire, need 800x600.
 #win32_desktop=640x480
+# Where the built-in Windows reads Arial, Times New Roman and Courier New:
+# auto (the default), Windows' own files in the emulated C:\WINDOWS\FONTS,
+# then the computer's fonts folder on Windows and macOS; liberation, the
+# Liberation fonts rust-dos comes with; or a folder of the font files.
+# Each font not found is drawn from Liberation.
+#win32_fonts=auto
 # Which calls of the built-in Windows' functions the log gets a line for:
 # all, every call; collapsed (the default), the first few calls from each
 # place in a program a second and a count of the rest; or off.

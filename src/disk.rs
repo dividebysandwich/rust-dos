@@ -876,6 +876,16 @@ impl FileData {
             }
         }
     }
+
+    /// The file's size in bytes, without reading it.
+    pub fn size(&self) -> std::io::Result<u64> {
+        match self {
+            FileData::Host(path) => hostfs::metadata(path).map(|m| m.len),
+            FileData::Memory(data) => Ok(data.len() as u64),
+            FileData::Image(_, extent) => Ok(extent.size as u64),
+            FileData::Fat(_, entry) => Ok(entry.size as u64),
+        }
+    }
 }
 
 impl FileData {

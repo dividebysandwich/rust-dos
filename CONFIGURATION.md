@@ -2111,6 +2111,38 @@ order.
   still change the size with ChangeDisplaySettings while it runs; its
   end gives this size back. Like `win32_depth`, a change takes effect
   for the next program that starts when none runs.
+* `win32_fonts` is where the built-in Windows reads the outlines of
+  Arial, Times New Roman and Courier New, each regular, bold, italic and
+  bold italic. `auto` (the default) reads Windows' own font files where
+  it finds them: first in the emulated `C:\WINDOWS\FONTS`, where a game
+  or you may have put them, then, on Windows and macOS, in the
+  computer's fonts folder (`%WINDIR%\Fonts`, or
+  `/System/Library/Fonts/Supplemental` and `/Library/Fonts`).
+  `liberation` draws them from the Liberation fonts that come with
+  rust-dos. A folder's path, such as `D:\w98fonts` or `~/fonts`, reads
+  the files there; a relative path is from the configuration file's
+  folder. The files have the names Windows gives them (`arial.ttf`,
+  `arialbd.ttf`, `ariali.ttf`, `arialbi.ttf`, `times.ttf`, `timesbd.ttf`,
+  `timesi.ttf`, `timesbi.ttf`, `cour.ttf`, `courbd.ttf`, `couri.ttf`,
+  `courbi.ttf`), in any case. In a folder of the computer they may also
+  have the names macOS gives them (`Arial Bold.ttf`). Each font missing
+  from the folders, or whose file isn't that font, is drawn from
+  Liberation: a folder with only `arial.ttf` gives the regular Arial and
+  nothing else. Windows 98's own files draw close to what Windows 98
+  drew, a few pixels a line apart where the hinting rounds otherwise; a
+  newer Windows' Arial differs from them in a few characters, and
+  Liberation in the shapes of most, by a pixel or two. Whatever draws
+  them, each character takes the width it has on Windows 98, so text
+  takes the same room. The files are read the first time a program
+  draws or measures text in one of these faces, or lists the fonts, so
+  DOS programs, and a Windows installed on the emulated machine, never
+  read them. A font drawn from Liberation for want of a file is looked
+  for again by the next program, which finds a file a setup copied to
+  `C:\WINDOWS\FONTS`. A `--deterministic` run doesn't read the
+  computer's fonts folder, so its pictures are the same on every
+  machine; the emulated C: and a folder named here are read as usual.
+  The log names the file each font is drawn from. A change takes effect
+  for the text drawn after it.
 
 #### DOS
 
