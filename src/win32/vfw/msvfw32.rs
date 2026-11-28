@@ -979,7 +979,7 @@ fn from_rgb24(
     use msvideo1::Output;
     let nearest = match layout {
         Output::Indexes => nearest_table(colours),
-        _ => Vec::new(),
+        _ => std::rc::Rc::from([]),
     };
     let (w, h) = (width as usize, height as usize);
     let from = crate::win32::gdi32::surface::dib_stride(width as i32, 24);
@@ -1012,9 +1012,29 @@ fn from_rgb24(
     out
 }
 
+thread_local! {
+    /// The colours `nearest_table` last made a table for, and the table.
+    /// A film's frames go to one DIB, whose colours stay from frame to
+    /// frame, and a table takes 4096 times as many sums as there are
+    /// colours: about a million for 256.
+    static NEAREST: std::cell::RefCell<(Vec<[u8; 3]>, std::rc::Rc<[u8]>)> =
+        std::cell::RefCell::new((Vec::new(), std::rc::Rc::from([0; 4096])));
+}
+
 /// For each colour of 4 bits a channel (red, green and blue, from the
 /// high bits), the index of the nearest of `colours` to its middle.
-fn nearest_table(colours: &[[u8; 3]]) -> Vec<u8> {
+fn nearest_table(colours: &[[u8; 3]]) -> std::rc::Rc<[u8]> {
+    NEAREST.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.0 != colours {
+            *last = (colours.to_vec(), make_nearest_table(colours).into());
+        }
+        last.1.clone()
+    })
+}
+
+/// `nearest_table`'s table of `colours`, made.
+fn make_nearest_table(colours: &[[u8; 3]]) -> Vec<u8> {
     let mut table = vec![0; 4096];
     for (key, slot) in table.iter_mut().enumerate() {
         let channel = |shift: usize| ((key >> shift) & 15) as i32 * 17;
