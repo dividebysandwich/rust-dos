@@ -377,13 +377,31 @@ const ICERR_BADPARAM: u32 = -6i32 as u32;
 
 /// ICSendMessage(hic, msg, dw1, dw2): the message to MSVFW32's codec,
 /// its parameters' 16:16 pointers made flat and the structures they
-/// point to converted.
+/// point to converted. Those of the other messages go as they are: dw1
+/// is a window or -1 for ICM_ABOUT and ICM_CONFIGURE, a number for
+/// ICM_SETQUALITY, and MSVFW32's codecs answer none of them.
 fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [hic, msg, dw1, dw2] = args[..] else {
         unreachable!()
     };
-    let first = super::linear(cpu, dw1);
+    let first = if points_to_a_structure(msg) {
+        super::linear(cpu, dw1)
+    } else {
+        dw1
+    };
     Some(send(cpu, hic, msg, first, dw2))
+}
+
+/// Whether the first parameter of `msg` is a pointer `send` converts.
+fn points_to_a_structure(msg: u32) -> bool {
+    matches!(
+        msg,
+        ICM_GETINFO
+            | ICM_DECOMPRESS
+            | ICM_DECOMPRESSEX_BEGIN
+            | ICM_DECOMPRESSEX_QUERY
+            | ICM_DECOMPRESSEX
+    ) || TWO_FORMATS.contains(&msg)
 }
 
 /// _ICMessage(hic, msg, cb, ...): the `cb` bytes of arguments after
