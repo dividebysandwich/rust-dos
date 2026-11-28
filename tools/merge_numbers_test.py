@@ -37,7 +37,7 @@ THUNK = """\
 /// The thens, by their place. Append only.
 pub static THENS: &[Then] = &[
     then_keep,
-    then_proc,
+    {proc},
 {entries}];
 
 // As in the real tables, the constants are a few lines below the
@@ -61,15 +61,22 @@ def state(version, missing, loads, layouts):
                         for v, h, what in layouts))
 
 
-def thunk(entries, consts):
+def thunk(entries, consts, proc="then_proc"):
     return THUNK.format(
-        entries="".join(f"    {e},\n" for e in entries),
+        proc=proc, entries="".join(f"    {e},\n" for e in entries),
         consts="".join(f"pub const {name}: u16 = {n};\n"
                        for name, n in consts))
 
 
 def fields(name, *names):
     return (f"crate::state_fields!({name} {{ {', '.join(names)} }});\n")
+
+
+# The tests' git, and the script's, read no configuration but the
+# repository's own: a conflict style, hooks or line endings set for the
+# user would change what the merges leave.
+ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+       "GIT_CONFIG_NOSYSTEM": "1"}
 
 
 class Repo:
@@ -82,7 +89,7 @@ class Repo:
 
     def git(self, *args, check=True):
         return subprocess.run(["git", "-C", self.root, *args], check=check,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=ENV)
 
     def write(self, path, text):
         full = os.path.join(self.root, path)
@@ -108,7 +115,7 @@ class Repo:
 
     def run_script(self):
         return subprocess.run([sys.executable, "-I", SCRIPT, self.root],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=ENV)
 
 
 BASE_FILES = {
@@ -126,9 +133,10 @@ class Test(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
-    def start(self, extra=()):
+    def start(self, extra=(), main_entries=("main_then",)):
         """A base at version 2, then main at 3 with its own field and
-        place 2 of THENS. Returns main's hash of version 3."""
+        place 2 of THENS (and any other `main_entries` after it, with no
+        constants). Returns main's hash of version 3."""
         repo = self.repo
         repo.write("src/bus/state.rs", "")
         for path, text in BASE_FILES.items():
@@ -148,16 +156,16 @@ class Test(unittest.TestCase):
                 (2, h2, "two"),
                 (3, h3, "main's"),
             ]),
-            "src/win16/thunk.rs": thunk(["main_then"],
+            "src/win16/thunk.rs": thunk(list(main_entries),
                                         [("THEN_MAIN", 2)]),
             **dict(extra),
         }, "main")
         repo.git("checkout", "-q", "topic")
         return h2, h3
 
-    def topic(self, h2, layouts, gates=True):
+    def topic(self, h2, layouts, gates=True, proc="then_proc"):
         """The topic branch at version 3 with its own field, a gate on
-        it and places 2 and 3 of THENS."""
+        it and places 2 and 3 of THENS, its place 1 named `proc`."""
         repo = self.repo
         files = {
             "src/win16/topic.rs": fields("Topic", "t")
@@ -174,7 +182,7 @@ class Test(unittest.TestCase):
         ])
         files["src/win16/thunk.rs"] = thunk(
             ["topic_then", "topic_other"],
-            [("THEN_TOPIC", 2), ("THEN_OTHER", 3)])
+            [("THEN_TOPIC", 2), ("THEN_OTHER", 3)], proc=proc)
         repo.commit(files, "topic")
 
     def merge(self):
@@ -214,9 +222,72 @@ class Test(unittest.TestCase):
                       "pub const THEN_TOPIC: u16 = 3;\n"
                       "pub const THEN_OTHER: u16 = 4;\n", thunk_rs)
 
-        # Everything resolved is staged, so the merge can be committed.
+        # Everything resolved is staged, the moved gates of a file with
+        # no conflict too, so the merge can be committed.
         status = self.repo.git("diff", "--name-only", "--diff-filter=U")
         self.assertEqual(status.stdout, "")
+        unstaged = self.repo.git("diff", "--name-only")
+        self.assertEqual(unstaged.stdout, "")
+
+    def test_crlf_line_endings_are_kept(self):
+        # A checkout on Windows may have CRLF endings.
+        h2, h3 = self.start()
+        self.topic(h2, [(3, None, "topic's")])
+        self.merge()
+        path = os.path.join(self.repo.root, "src", "bus", "state.rs")
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text.replace("\n", "\r\n"))
+        out = self.repo.run_script()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+        self.assertNotIn("<<<<<<<", text)
+        self.assertEqual(text.count("\n"), text.count("\r\n"))
+        self.assertIn("const WIN32_LOADS: [u16; 4] = [\r\n    1,\r\n"
+                      "    2,\r\n    3,\r\n    WIN32_VERSION,\r\n];", text)
+
+    def test_places_move_past_main_entries_with_no_constant(self):
+        # Main's second entry has no constant: the branch's still follow
+        # both of main's, at 4 and 5.
+        h2, _ = self.start(main_entries=("main_then", "main_bare"))
+        self.topic(h2, [(3, None, "topic's")])
+        self.merge()
+        out = self.repo.run_script()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        thunk_rs = self.repo.read("src/win16/thunk.rs")
+        self.assertIn("    main_then,\n    main_bare,\n    topic_then,\n"
+                      "    topic_other,\n];", thunk_rs)
+        self.assertIn("pub const THEN_MAIN: u16 = 2;\n"
+                      "pub const THEN_TOPIC: u16 = 4;\n"
+                      "pub const THEN_OTHER: u16 = 5;\n", thunk_rs)
+
+    def test_a_changed_entry_is_left(self):
+        # The branch renamed an entry as well as appending: its side of
+        # the conflict isn't only new entries, so the table is left.
+        h2, _ = self.start()
+        self.topic(h2, [(3, None, "topic's")], proc="then_renamed")
+        self.merge()
+        out = self.repo.run_script()
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("still in conflict: src/win16/thunk.rs", out.stdout)
+        thunk_rs = self.repo.read("src/win16/thunk.rs")
+        self.assertIn("<<<<<<<", thunk_rs)
+        self.assertIn("pub const THEN_TOPIC: u16 = 2;", thunk_rs)
+
+    def test_a_conflict_with_no_markers_is_left_unstaged(self):
+        # Git writes no markers into a binary file: staging it would take
+        # the branch's side.
+        h2, _ = self.start({"tests/data.bin": "\0main\0"})
+        self.repo.commit({"tests/data.bin": "\0topic\0"}, "data")
+        self.topic(h2, [(3, None, "topic's")])
+        self.merge()
+        out = self.repo.run_script()
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("left unstaged", out.stdout)
+        status = self.repo.git("diff", "--name-only", "--diff-filter=U")
+        self.assertEqual(status.stdout, "tests/data.bin\n")
 
     def test_a_gate_main_has_too_is_left(self):
         # Main's own gate on its version 3 isn't among the branch's

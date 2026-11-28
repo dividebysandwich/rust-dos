@@ -20,11 +20,15 @@ free one", so two branches that each take one clash on it:
   name its places. Main's entries keep their places, and the branch's
   follow them in the same order, their constants renumbered to match.
 
-Only conflicts of these shapes are touched; the rest stay as they are
-for a person to resolve, and the script lists the files that still
-have them. It stages the files it left with no conflict. It handles a
-branch that added one W32 version; for more it changes nothing and
-says so. The checkout defaults to the one the script is in.
+Only conflicts of these shapes are touched, and a table's only when
+both sides appended to it; the rest stay as they are for a person to
+resolve. The script stages the files it resolved and those whose gates
+it moved, and lists every other file in conflict, unstaged: those with
+markers left, and those git gave none (a binary file, one a side
+deleted, one already resolved by hand), which `git add` would otherwise
+take as they are. It handles a branch that added one W32 version; for
+more it changes nothing and says so. The checkout defaults to the one
+the script is in.
 """
 
 import importlib.util
@@ -158,27 +162,75 @@ def has_append_only_table(lines):
                for i, line in enumerate(lines))
 
 
-def resolve_tables(path, parts):
+def place_of(before):
+    """The place in its table of an entry after the lines `before`, which
+    end inside the table, or None if an entry there isn't one line."""
+    for at in range(len(before) - 1, -1, -1):
+        if STATIC.search(before[at]):
+            entries = [e for e in meaningful(before[at + 1:])
+                       if not e.strip().startswith("//")]
+            if all(e.rstrip().endswith(",") for e in entries):
+                return len(entries)
+            return None
+    return None
+
+
+def base_lines(root, path):
+    """The stripped lines of the merge base's `path` (stage 1), or None
+    if it has none: both sides added the file."""
+    result = subprocess.run(["git", "-C", root, "show", f":1:{path}"],
+                            capture_output=True, text=True, encoding="utf-8")
+    if result.returncode != 0:
+        return None
+    return {line.strip() for line in result.stdout.split("\n")}
+
+
+def appended(part, base):
+    """Whether both sides of `part` only added lines: no line of either
+    is in the base, as an entry a side changed or removed would be."""
+    return base is not None and not any(
+        line.strip() in base for line in meaningful(part.ours + part.theirs))
+
+
+def resolve_tables(root, path, parts):
     """Resolve the conflicts of append-only tables and their constants in
     one file. Returns what was done, a line for each."""
     done = []
     plain = text_before(parts, len(parts))
     if not has_append_only_table(plain):
         return done
+    base = base_lines(root, path)
+    # The places each resolved table conflict gave the branch's entries:
+    # (main's first, main's count, the branch's count).
+    tables = []
     for index, part in enumerate(parts):
         if not isinstance(part, Conflict):
             continue
+        before = text_before(parts, index)
         if (is_entries(part.ours) and is_entries(part.theirs)
-                and in_append_only_table(text_before(parts, index))):
+                and in_append_only_table(before) and appended(part, base)):
             # Main's entries keep their places; the branch's follow.
             part.resolved = part.theirs + part.ours
+            tables.append((place_of(before), len(meaningful(part.theirs)),
+                           len(meaningful(part.ours))))
             done.append(f"{path}: the branch's {len(meaningful(part.ours))} "
                         f"table entries put after main's")
+    for part in parts:
+        if not isinstance(part, Conflict) or part.resolved is not None:
             continue
         ours, theirs = numbers(part.ours), numbers(part.theirs)
         if ours is None or theirs is None or ours[0] != theirs[0]:
             continue
-        shift = theirs[-1] + 1 - ours[0]
+        # The branch's places move past main's entries, which may have
+        # no constant each: the shift is the count of the table conflict
+        # that starts at the same place, and there must be one.
+        start = ours[0]
+        matches = [(m, b) for first, m, b in tables if first == start]
+        if len(matches) != 1 or not appended(part, base):
+            continue
+        shift, count = matches[0]
+        if theirs[-1] >= start + shift or ours[-1] >= start + count:
+            continue
         moved = []
         for line in part.ours:
             m = CONST.match(line)
@@ -237,9 +289,14 @@ def merged_clauses(ours, theirs, old, new):
     mine, main = doc_text(meaningful(ours)), doc_text(meaningful(theirs))
     if not mine.endswith(".") or not main.endswith("."):
         return None
-    at_mine, at_main = mine.rfind(", and "), main.rfind(", and ")
-    if at_mine < 0 or at_main < 0:
+    # The last ", and " that starts a version's clause: one inside a
+    # clause ("X, and Y") isn't where the clause starts.
+    last = re.compile(r", and (?=\d+'s )")
+    at_mine = [m.start() for m in last.finditer(mine)]
+    at_main = [m.start() for m in last.finditer(main)]
+    if not at_mine or not at_main:
         return None
+    at_mine, at_main = at_mine[-1], at_main[-1]
     clause = mine[at_mine + len(", and "):-1]
     # "71's to 117's" becomes "71's to 118's" (or "117's" alone).
     clause, n = re.subn(rf"\b{old - 1}'s\b", f"{new - 1}'s", clause, count=1)
@@ -266,6 +323,8 @@ def branch_gates(root, base, old):
 
 
 def move_gates(root, gates, old, new):
+    """Move the gates `branch_gates` found. Returns what was done and the
+    files written."""
     done = []
     pattern = re.compile(rf"(_SAVED: u16 = ){old}(;)|\b(Since|Until)<{old},")
 
@@ -287,33 +346,39 @@ def move_gates(root, gates, old, new):
         with open(full, "w", encoding="utf-8", newline="") as f:
             f.write("".join(lines))
         done.append(f"{path}: {count} gate(s) moved from {old} to {new}")
-    return done
+    return done, list(gates)
 
 
 def add_to_loads(text, version):
     """Main's version among those WIN32_LOADS lists, before
     WIN32_VERSION, and the array's length to match."""
-    m = re.search(r"const WIN32_LOADS: \[u16; (\d+)\] = \[\n(.*?)\];", text,
-                  re.S)
+    m = re.search(r"const WIN32_LOADS: \[u16; (\d+)\] = \[(\r?\n)(.*?)\];",
+                  text, re.S)
     if m is None:
-        sys.exit("src/bus/state.rs has no WIN32_LOADS")
-    entries = m.group(2).split("\n")
+        sys.exit("src/bus/state.rs has no WIN32_LOADS. Nothing changed.")
+    # A checkout on Windows may have CRLF line endings: keep the file's.
+    ending = m.group(2)
+    entries = m.group(3).split(ending)
     listed = [int(e.strip().rstrip(",")) for e in entries
               if e.strip().rstrip(",").isdigit()]
     if version not in listed:
-        at = next(i for i, e in enumerate(entries)
-                  if e.strip() == "WIN32_VERSION,")
+        at = next((i for i, e in enumerate(entries)
+                   if e.strip() == "WIN32_VERSION,"), None)
+        if at is None:
+            sys.exit("WIN32_LOADS doesn't end with WIN32_VERSION. Nothing "
+                     "changed.")
         indent = entries[at][:len(entries[at]) - len(entries[at].lstrip())]
         entries.insert(at, f"{indent}{version},")
-    body = "\n".join(entries)
+    body = ending.join(entries)
     count = sum(1 for e in entries if e.strip())
-    return (text[:m.start()] + f"const WIN32_LOADS: [u16; {count}] = [\n"
-            + body + "];" + text[m.end():])
+    return (text[:m.start()] + f"const WIN32_LOADS: [u16; {count}] = ["
+            + ending + body + "];" + text[m.end():])
 
 
 def resolve_version(root, base):
     """Resolve the W32 version clash in src/bus/state.rs. Returns what was
-    done, or None if the file has no clash of that shape."""
+    done, the new version and the other files written (those of the
+    gates), or None if the file has no clash of that shape."""
     path = os.path.join(root, "src", "bus", "state.rs")
     with open(path, encoding="utf-8", newline="") as f:
         parts = split(f.read().splitlines(keepends=True))
@@ -364,9 +429,12 @@ def resolve_version(root, base):
         done.append("src/bus/state.rs: a conflict there isn't one this "
                     "script knows; the comment above WIN32_LOADS may be "
                     "among them")
+    written = []
     if old != new:
-        done += move_gates(root, branch_gates(root, base, old), old, new)
-    return done, new
+        steps, written = move_gates(root, branch_gates(root, base, old), old,
+                                    new)
+        done += steps
+    return done, new, written
 
 
 def set_hash(root, new):
@@ -400,6 +468,8 @@ def git(root, *args):
 
 
 def has_markers(path):
+    if not os.path.isfile(path):
+        return False
     with open(path, encoding="utf-8", newline="") as f:
         return any(line.startswith((OURS, THEIRS)) for line in f)
 
@@ -417,42 +487,55 @@ def main():
     # The version first: it refuses before anything is written.
     done = []
     new = None
+    # The files this script resolved or changed. Only these are staged: a
+    # conflicted file git left no markers in (a binary file, or one a
+    # side deleted) isn't resolved, and `git add` would take it as it is.
+    written = set()
     if "src/bus/state.rs" in conflicted:
         result = resolve_version(root, base)
         if result is not None:
-            steps, new = result
+            steps, new, gates = result
             done += steps
+            written.add("src/bus/state.rs")
+            written.update(gates)
 
     for path in conflicted:
-        if not path.endswith(".rs"):
-            continue
         full = os.path.join(root, path)
+        if not path.endswith(".rs") or not os.path.isfile(full):
+            continue
         with open(full, encoding="utf-8", newline="") as f:
             parts = split(f.read().splitlines(keepends=True))
-        steps = resolve_tables(path, parts)
+        steps = resolve_tables(root, path, parts)
         if steps:
             with open(full, "w", encoding="utf-8", newline="") as f:
                 f.write(join(parts))
             done += steps
+            written.add(path)
 
-    left = [p for p in conflicted if has_markers(os.path.join(root, p))]
+    marked = [p for p in conflicted if has_markers(os.path.join(root, p))]
+    unmarked = [p for p in conflicted if p not in marked and p not in written]
     if new is not None:
         done.append(set_hash(root, new))
-        if any(p.startswith(("src/win32/", "src/win16/")) for p in left):
+        if any(p.startswith(("src/win32/", "src/win16/"))
+               for p in marked + unmarked):
             done.append("conflicts are left in src/win32 or src/win16: once "
                         "they are resolved, run tools/win32_layout.py, which "
                         "says if the hash has to change again")
     for line in done:
         print(line)
-    resolved = [p for p in conflicted if p not in left]
+    resolved = sorted(p for p in written if p not in marked)
     if resolved:
         git(root, "add", "--", *resolved)
-    if left:
-        print("still in conflict: " + ", ".join(left))
+    if marked:
+        print("still in conflict: " + ", ".join(marked))
+    if unmarked:
+        print("in conflict with no markers, left unstaged (a binary file, "
+              "one a side deleted, or one resolved by hand; check it, then "
+              "git add or git rm it): " + ", ".join(unmarked))
+    if marked or unmarked:
         sys.exit(1)
     if not done:
         print("nothing to resolve")
-
 
 if __name__ == "__main__":
     main()
