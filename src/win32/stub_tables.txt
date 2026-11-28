@@ -517,6 +517,7 @@ EnumResourceTypesW
 EnumResourceNamesW
 EnumResourceLanguagesA
 EnumResourceLanguagesW
+DeviceIoControl
 
 DLL ADVAPI32.DLL
 InitializeSecurityDescriptor
@@ -6816,6 +6817,9 @@ lc_time_c 512
 
 VARS DDRAW.DLL
 IsLostCache 4096
+
+VARS DPLAYX.DLL
+providerGuids 32
 
 VARS GLIDE3X.DLL
 context 64

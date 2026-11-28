@@ -5,6 +5,7 @@ pub(super) mod atom;
 pub(super) mod change;
 pub(crate) mod comm;
 mod console;
+mod device;
 mod disk;
 mod env;
 mod file;
@@ -858,6 +859,8 @@ static APIS: &[Api] = &[
         5,
         module::enum_resource_languages_w,
     ),
+    // VxD handles: VWIN32's DOS calls (Prince of Persia 3D).
+    stdcall("DeviceIoControl", 218, 8, device::device_io_control),
 ];
 
 /// DebugBreak: Windows 98's is an INT 3, whose breakpoint exception goes

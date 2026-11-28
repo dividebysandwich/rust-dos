@@ -530,7 +530,7 @@ const IID_IDIRECT_INPUT_8W: Guid = Guid::new(
 /// The W32 section's version that saves an object's Unicode interface
 /// (`Object::wide`). An older state's objects load without one, and
 /// make it when the program first asks for it.
-pub const WIDE_SAVED: u16 = 115;
+pub const WIDE_SAVED: u16 = 116;
 
 /// The one version of DirectInput DirectInput8Create takes.
 const VERSION_8: u32 = 0x800;
