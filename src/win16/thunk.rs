@@ -123,6 +123,7 @@ pub static THENS: &[Then] = &[
     super::ole2::then_blocks,
     super::misc::then_io_proc,
     super::ole2::then_server,
+    super::mcidrv::then,
 ];
 
 // Place 0 is then_keep, and 13 then_block, which no call names now.
@@ -146,6 +147,7 @@ pub const THEN_NOTIFY_EXIT: u16 = 18;
 pub const THEN_OLE_BLOCKS: u16 = 19;
 pub const THEN_IO_PROC: u16 = 20;
 pub const THEN_OLE_SERVER: u16 = 21;
+pub const THEN_MCI_DRIVER: u16 = 22;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)

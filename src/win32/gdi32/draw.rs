@@ -1383,6 +1383,23 @@ pub struct Source {
     pub bk_color: u32,
     /// Where its device origin is.
     pub origin: (i32, i32),
+    /// For an RLE DIB, which of the surface's pixels its codes set, a row
+    /// of its width at a time (`bitmap::read_dib_drawn`): the blit leaves
+    /// the destination as it is where they skipped one.
+    pub drawn: Option<Vec<bool>>,
+}
+
+impl Source {
+    /// Whether the blit leaves the destination where it reads the
+    /// surface's pixel (`x`, `y`), which is loaded: the RLE codes
+    /// skipped it.
+    #[inline]
+    fn skips(&self, x: i32, y: i32) -> bool {
+        self.drawn.as_ref().is_some_and(|d| {
+            let w = self.surface.width as usize;
+            !d.get(y as usize * w + x as usize).copied().unwrap_or(false)
+        })
+    }
 }
 
 /// The blit's work: `dst` is x, y, width and height in the destination
@@ -1427,6 +1444,7 @@ pub fn blit(
                     surface,
                     bk_color,
                     origin: (ox, oy),
+                    drawn: None,
                 },
                 (sx0, sy0, sx1, sy1),
             ))
@@ -1667,6 +1685,17 @@ pub fn blit_from(
                 for v in values.iter_mut() {
                     *v = t.get(&src.surface, *v, &c.surface);
                 }
+                if src.drawn.is_some() {
+                    for (x, &s) in (area.left..area.right).zip(&values) {
+                        if src.skips(x + dx, y + dy) {
+                            continue;
+                        }
+                        if let Some(v) = op.apply(x, y, s, c.surface.get(x, y)) {
+                            c.surface.put(x, y, v);
+                        }
+                    }
+                    continue;
+                }
                 if rop3 == 0xCC {
                     // SRCCOPY: the source's values, a row at a time.
                     for v in values.iter_mut() {
@@ -1692,7 +1721,7 @@ pub fn blit_from(
                 let s = match &source {
                     Some((src, (sx0, _, sx1, _))) => {
                         let sx = scale(x - ox, x0, x1, *sx0, *sx1) + src.origin.0;
-                        if !src.surface.has(sx, sy) {
+                        if !src.surface.has(sx, sy) || src.skips(sx, sy) {
                             continue;
                         }
                         let v = src.surface.get(sx, sy);

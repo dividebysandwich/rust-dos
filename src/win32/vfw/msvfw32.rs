@@ -1470,6 +1470,7 @@ fn draw_cinepak_8(
         surface,
         bk_color: 0xFF_FFFF,
         origin: (0, 0),
+        drawn: None,
     };
     let old = palette::select_palette(cpu, &[hdc, hpal, background as u32]).filter(|&o| o != 0);
     palette::realize_posted(cpu, hdc);

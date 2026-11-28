@@ -1306,6 +1306,7 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
         surface,
         bk_color: 0xFF_FFFF,
         origin: (0, 0),
+        drawn: None,
     };
     if blacken && to.is_none() {
         let (cw, ch) = user32::user(cpu)

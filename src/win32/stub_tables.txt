@@ -6348,6 +6348,11 @@ waveOutGetPitch
 waveOutSetPitch
 waveOutGetPlaybackRate
 waveOutSetPlaybackRate
+mciSetDriverData
+mciGetDriverData
+mciDriverYield
+mciDriverNotify
+DrvDefDriverProc
 
 MODULE LZEXPAND
 LZCopy

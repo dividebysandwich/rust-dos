@@ -1084,3 +1084,66 @@ fn drawdib_dithers_as_windows_98_does() {
     assert_eq!(draw_grey(4, 4, 8, 8), expected(8));
     assert_eq!(draw_grey(8, 8, 8, 6), expected(6));
 }
+
+/// A memory DC on a top-down DIB section of `game_colors` filled with
+/// index 5, and an RLE8 DIB of 4x2 at `info` with the same colors. Its
+/// bottom row is 9, 9, skipped, 9 (a delta passes over the third pixel),
+/// and its top row is skipped whole: the codes end the bitmap there.
+fn rle_case() -> (Box<Cpu>, u32, u32, u32) {
+    let colors = game_colors();
+    let (mut cpu, _) = machine(DesktopDepth::Palette, &colors);
+    let mem = dib_dc(&mut cpu, BITS, &colors, true, |_, _| 5);
+    let codes = [2, 9, 0, 2, 1, 0, 1, 9, 0, 0, 0, 1];
+    let info = SCRATCH + 0x1000;
+    let header = [40, 4, 2, 1 | 8 << 16, 1, codes.len() as u32, 0, 0, 0, 0];
+    for (i, &w) in header.iter().enumerate() {
+        cpu.bus.guest_write_32(info + 4 * i as u32, w);
+    }
+    // RGBQUADs: blue in the low byte, where a COLORREF has red.
+    for (i, &c) in colors.iter().enumerate() {
+        let quad = (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16 & 0xFF);
+        cpu.bus.guest_write_32(info + 40 + 4 * i as u32, quad);
+    }
+    let bits = SCRATCH + 0x2000;
+    cpu.bus.guest_write_bytes(bits, &codes);
+    (cpu, mem, info, bits)
+}
+
+/// The DIB section's rows `y` from `x`, `w` pixels wide each.
+fn section_rows(cpu: &mut Cpu, x: u32, y: std::ops::Range<u32>, w: usize) -> Vec<Vec<u8>> {
+    y.map(|y| {
+        let mut row = vec![0; w];
+        cpu.bus.guest_read_bytes(BITS + y * 640 + x, &mut row);
+        row
+    })
+    .collect()
+}
+
+/// SetDIBitsToDevice of an RLE DIB leaves the pixels its codes skip as
+/// they were, as Windows does: Autodesk's AAPLAY draws each frame of a
+/// film as an RLE DIB of what changed (Outpost's introduction).
+#[test]
+fn an_rle_dib_leaves_the_pixels_it_skips() {
+    let (mut cpu, mem, info, bits) = rle_case();
+    let args = [mem, 10, 20, 4, 2, 0, 0, 0, 2, bits, info, 0];
+    assert_eq!(bitmap::set_di_bits_to_device(&mut cpu, &args), Some(2));
+    assert_eq!(
+        section_rows(&mut cpu, 10, 20..22, 4),
+        [vec![5, 5, 5, 5], vec![9, 9, 5, 9]]
+    );
+}
+
+/// StretchDIBits of an RLE DIB to twice its size leaves the pixels
+/// where it would have drawn the skipped ones as they were.
+#[test]
+fn a_stretched_rle_dib_leaves_the_pixels_it_skips() {
+    let (mut cpu, mem, info, bits) = rle_case();
+    let args = [mem, 10, 20, 8, 4, 0, 0, 4, 2, bits, info, 0, SRCCOPY];
+    assert_eq!(bitmap::stretch_di_bits(&mut cpu, &args), Some(2));
+    let top = vec![5; 8];
+    let bottom = vec![9, 9, 9, 9, 5, 5, 9, 9];
+    assert_eq!(
+        section_rows(&mut cpu, 10, 20..24, 8),
+        [top.clone(), top, bottom.clone(), bottom]
+    );
+}
