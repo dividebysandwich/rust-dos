@@ -16,10 +16,11 @@
 //! options (`-n`, `-k` and the others) aren't read: a line that has one
 //! names no file the viewer can open.
 
-use super::super::{current_pid, message, notepad, string_at, user};
+use super::super::{message, notepad, string_at, user};
 use super::{HELP_CONTENTS, win_help};
 use crate::cpu::Cpu;
 use crate::win32::kernel32;
+use crate::win32::loader::WINDOWS_DIR;
 
 /// The names of the program's files in the Windows directory.
 pub const FILES: [&str; 2] = ["WINHELP.EXE", "WINHLP32.EXE"];
@@ -51,14 +52,24 @@ pub fn main(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         // The open viewer shows the file; this program has nothing to
         // wait for, and its loop ends at the WM_QUIT.
         message::post_quit_message(cpu, &[0]);
-    } else {
-        user(cpu).help.program = current_pid(cpu);
     }
     // WinHelpA reads the name before it returns or starts its task.
     let result = win_help(cpu, &[0, at, HELP_CONTENTS, 0]);
     kernel32::free_pages(cpu, at);
-    if result == Some(0) && !open {
-        user(cpu).help.program = 0;
-    }
     result
+}
+
+/// The viewer's window is being destroyed, on the thread that made it,
+/// as DestroyWindow refuses any other. If that is this program's, the
+/// program ends. It goes by the process's path, which save states keep,
+/// and not by what the viewer keeps, which they don't: a viewer open in
+/// a state that is loaded ends the program as well when it is closed.
+pub fn closed(cpu: &mut Cpu) {
+    let path = crate::win32::running(cpu).map_or("", |p| p.path.as_str());
+    let ours = path.rsplit_once('\\').is_some_and(|(dir, file)| {
+        dir.eq_ignore_ascii_case(WINDOWS_DIR) && FILES.iter().any(|f| f.eq_ignore_ascii_case(file))
+    });
+    if ours {
+        message::post_quit_message(cpu, &[0]);
+    }
 }

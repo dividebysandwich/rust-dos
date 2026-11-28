@@ -162,9 +162,6 @@ pub struct Help {
     pub viewer: Option<Viewer>,
     /// Where HELP_SETPOPUP_POS put the next popup, on the screen.
     popup_at: Option<(i32, i32)>,
-    /// The process of WINHELP.EXE whose viewer is open, which ends when
-    /// the viewer is closed, or 0.
-    program: u32,
 }
 
 /// The open viewer.
@@ -1085,13 +1082,15 @@ pub fn frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 None => task::start(cpu, task::WINHELP, vec![K_FOCUS, topic], 0),
             }
         }
-        WM_DESTROY if ours => {
+        WM_DESTROY => {
+            // WINHELP.EXE's viewer ends the program, also as an empty
+            // window after a state is loaded, which isn't `ours`.
+            program::closed(cpu);
+            if !ours {
+                return defwnd::def_window_proc(cpu, args);
+            }
             if let Some(v) = user(cpu).help.viewer.take() {
                 free(cpu, v);
-            }
-            let program = std::mem::take(&mut user(cpu).help.program);
-            if program != 0 && program == super::current_pid(cpu) {
-                return super::message::post_quit_message(cpu, &[0]);
             }
             Some(0)
         }
