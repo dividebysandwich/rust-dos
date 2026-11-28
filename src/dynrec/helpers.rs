@@ -206,7 +206,7 @@ pub struct JitCtx {
     /// For a write into a page with `PAGE_COUNT`: a ToadForce's counts
     /// of the writes to each page, the generation and the first page's
     /// (null without its host renderer), and the surfaces ahead on the
-    /// host whose written bytes the code notes (`PAGE_NOTE`).
+    /// host whose written bytes the code notes (`PAGE_NOTE_SHIFT`).
     pub card_generation: *mut u64,
     pub card_counts: *mut u64,
     pub card_notes: [NoteSlot; NOTES],
@@ -358,17 +358,21 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
             // bus's.
             counted_pages(&mut ctx.card_map, direct.counted, PAGE_SHOWN);
             ctx.card_notes = [NO_SLOT; NOTES];
-            for (i, note) in direct.notes[..direct.ahead].iter().enumerate() {
-                if let Some(slot) = ctx.card_notes.get_mut(i) {
-                    *slot = NoteSlot {
-                        start: note.start,
-                        len: note.end.saturating_sub(note.start),
+            // The surfaces with a slot, and the others without.
+            let noted = direct.ahead.min(NOTES);
+            let slotted = direct.notes[..noted].iter().map(|n| (n.start, n.end, Some(n)));
+            let rest = direct.rest[..direct.ahead - noted].iter().map(|&(s, e)| (s, e, None));
+            for (i, (start, end, note)) in slotted.chain(rest).enumerate() {
+                if let Some(note) = note {
+                    ctx.card_notes[i] = NoteSlot {
+                        start,
+                        len: end.saturating_sub(start),
                         bits: note.bits,
                         any: note.any,
                         _pad: 0,
                     };
                 }
-                let Some((first, last)) = page_span(note.start, note.end, ctx.card_map.len()) else {
+                let Some((first, last)) = page_span(start, end, ctx.card_map.len()) else {
                     continue;
                 };
                 for page in &mut ctx.card_map[first..=last] {
@@ -376,16 +380,13 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
                     // write is noted where one surface with a slot has
                     // the page and its bits are there.
                     *page &= !PAGE_READ;
-                    if i >= NOTES {
-                        // Its bytes are noted by the bus.
-                        *page &= !PAGE_WRITE;
-                    } else if note.bits.is_null() {
+                    match note {
+                        // Without a slot, the bus notes its bytes.
+                        None => *page &= !PAGE_WRITE,
                         // The bus's first write there makes them.
-                        *page = *page & !PAGE_WRITE | PAGE_RETRY;
-                    } else if *page >> PAGE_NOTE_SHIFT & 7 != 0 {
-                        *page &= !PAGE_WRITE;
-                    } else {
-                        *page |= (i as u8 + 1) << PAGE_NOTE_SHIFT;
+                        Some(n) if n.bits.is_null() => *page = *page & !PAGE_WRITE | PAGE_RETRY,
+                        Some(_) if *page >> PAGE_NOTE_SHIFT & 7 != 0 => *page &= !PAGE_WRITE,
+                        Some(_) => *page |= (i as u8 + 1) << PAGE_NOTE_SHIFT,
                     }
                 }
             }

@@ -390,9 +390,25 @@ fn more(count: u32) -> Vec<Surface> {
         .collect()
 }
 
-/// Dwords into every byte of `surfaces`.
+/// The rows of `count` surfaces like `AHEAD`, which `fill_program`
+/// reads a dword of each of.
+fn rows(count: u32) -> u32 {
+    count * AHEAD.height
+}
+
+/// A dword of each row of `surfaces`, which lie one after the other,
+/// read into EBX, and then dwords into every byte of them.
 fn fill_program(surfaces: &[Surface]) -> Vec<u8> {
     asm32(CODE, |a| {
+        let mut reads = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.mov(esi, MEMORY + surfaces[0].offset)?;
+        a.mov(ecx, rows(surfaces.len() as u32))?;
+        a.set_label(&mut reads)?;
+        a.add(ebx, dword_ptr(esi))?;
+        a.add(esi, AHEAD.pitch)?;
+        a.dec(ecx)?;
+        a.jnz(reads)?;
         for s in surfaces {
             let mut dwords = a.create_label();
             a.mov(edi, MEMORY + s.offset)?;
@@ -408,10 +424,11 @@ fn fill_program(surfaces: &[Surface]) -> Vec<u8> {
 }
 
 /// Nine surfaces ahead on the host, as a game with three buffers, depth
-/// buffers and render targets on it has: the code notes its writes into
-/// the first seven by itself and leaves those into the others to the
-/// bus, which notes them, and the host gets the same pixels as from the
-/// interpreter.
+/// buffers and render targets on it has: the code reads all of them
+/// through the bus, which answers with the host's pixels, notes its
+/// writes into the first seven by itself and leaves those into the
+/// others to the bus, which notes them, and the host gets the same
+/// pixels as from the interpreter.
 #[test]
 fn the_code_writes_seven_surfaces_ahead_and_leaves_the_rest_to_the_bus() {
     let extra = more(7);
@@ -422,6 +439,11 @@ fn the_code_writes_seven_surfaces_ahead_and_leaves_the_rest_to_the_bus() {
     a.run_batched_to_halt();
     b.run_batched_to_halt();
     let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+    // Every dword read is the host's, which `Recorder` reads back as
+    // 5Ah bytes.
+    let reads = rows(all.len() as u32);
+    assert_eq!(a.cpu.ebx(), 0x5A5A_5A5Au32.wrapping_mul(reads));
+    assert_eq!(b.cpu.ebx(), a.cpu.ebx());
     for rig in [&mut a, &mut b] {
         // The card draws again: the host gets what was written first.
         let mut words = Vec::new();
@@ -452,9 +474,9 @@ fn the_code_writes_seven_surfaces_ahead_and_leaves_the_rest_to_the_bus() {
         log_b.borrow()
     );
     if AVAILABLE && cfg!(target_arch = "x86_64") {
-        // The 2 x 2000h dwords into the last two surfaces, and the
-        // first into each of the others, which makes its bits.
-        let bus = 2 * 0x2000;
-        assert!((bus..bus + 64).contains(&calls), "{calls} calls");
+        // The reads, the 2 x 2000h dwords into the last two surfaces,
+        // and the first into each of the others, which makes its bits.
+        let bus = u64::from(reads) + 2 * 0x2000;
+        assert!((bus - 64..bus + 64).contains(&calls), "{calls} calls");
     }
 }

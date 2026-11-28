@@ -52,11 +52,13 @@ pub struct LfbDirect {
     /// count (`gpu::Pages::counters`). Null without a host.
     pub generation: *mut u64,
     pub counts: *mut u64,
-    /// The surfaces ahead on the host (`gpu::Gpu::notes`), the first
-    /// `ahead` of them. Their bytes are read through the bus, which
-    /// answers with the host's pixels, and so are the writes into those
-    /// past the first `NOTES`.
-    pub notes: [Note; AHEAD],
+    /// The surfaces ahead on the host (`gpu::Gpu::notes`), `ahead` of
+    /// them: the first `NOTES`, whose written bytes the code notes, and
+    /// the bytes (start, end) of the others in `rest`, whose writes are
+    /// the bus's. The bytes of all of them are read through the bus,
+    /// which answers with the host's pixels.
+    pub notes: [Note; NOTES],
+    pub rest: [(u32, u32); AHEAD - NOTES],
     pub ahead: usize,
 }
 
@@ -129,7 +131,8 @@ impl Bus {
             counted: clip(counted, len),
             generation: std::ptr::null_mut(),
             counts: std::ptr::null_mut(),
-            notes: [NO_NOTE; AHEAD],
+            notes: [NO_NOTE; NOTES],
+            rest: [(0, 0); AHEAD - NOTES],
             ahead: 0,
         };
         if let Some(card) = self.toadforce.as_deref_mut() {
@@ -138,10 +141,11 @@ impl Bus {
                 (direct.generation, direct.counts) = (generation, counts);
             }
             for note in notes {
-                if direct.ahead == AHEAD {
-                    return None;
+                match direct.ahead {
+                    i if i < NOTES => direct.notes[i] = note,
+                    i if i < AHEAD => direct.rest[i - NOTES] = (note.start, note.end),
+                    _ => return None,
                 }
-                direct.notes[direct.ahead] = note;
                 direct.ahead += 1;
             }
         }
