@@ -632,7 +632,7 @@ fn stream_info(cpu: &mut Cpu, slot: usize, n: usize, wide: bool) -> Vec<u8> {
 }
 
 /// Write `info` at `at`, as much of it as `size` bytes hold.
-fn give_info(cpu: &mut Cpu, at: u32, size: u32, info: &[u8]) -> u32 {
+pub(crate) fn give_info(cpu: &mut Cpu, at: u32, size: u32, info: &[u8]) -> u32 {
     if (size as i32) < 0 {
         return AVIERR_BADSIZE;
     }
@@ -642,6 +642,14 @@ fn give_info(cpu: &mut Cpu, at: u32, size: u32, info: &[u8]) -> u32 {
     }
     cpu.bus.guest_write_bytes(at, &info[..n]);
     AVIERR_OK
+}
+
+/// The AVISTREAMINFOA of the stream `this`, or AVIERR_BADHANDLE for
+/// what isn't one; the 16-bit AVIFILE.DLL (win16/vfw.rs) gives it in
+/// its own layout.
+pub(crate) fn stream_info_ansi(cpu: &mut Cpu, this: u32) -> Result<Vec<u8>, u32> {
+    let (slot, n) = stream(cpu, this).ok_or(AVIERR_BADHANDLE)?;
+    Ok(stream_info(cpu, slot, n, false))
 }
 
 /// AVIStreamInfoA(stream, info, size).

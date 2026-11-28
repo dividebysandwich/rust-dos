@@ -2085,24 +2085,49 @@ fn mmio_keep_buffer(cpu: &mut Cpu, hmmio: u32, entry: Option<[u32; 4]>) {
     }
 }
 
-/// A flat pointer into the file's buffer as a 16:16 one.
-fn mmio_to16(buffer: Option<[u32; 4]>, flat: u32) -> u32 {
-    match buffer {
-        Some([_, segptr, base, _]) if flat >= base && flat - base <= 0xFFFF => {
-            segptr + (flat - base)
-        }
-        _ => 0,
-    }
+/// How many 64 KB tiles the buffer at the 16:16 `segptr` reaches from
+/// its selector: those its limit covers, up to the most a block has, and
+/// one for a selector that isn't there. Each selector of a huge block
+/// has a limit to the block's end, so this holds for a buffer in any
+/// tile of one, a global block's or not.
+fn mmio_tiles(cpu: &Cpu, segptr: u32) -> u32 {
+    super::selector_base(cpu, (segptr >> 16) as u16)
+        .map_or(1, |(_, limit, _)| (limit >> 16) + 1)
+        .min(u32::from(super::ldt::tiles(u32::MAX)))
 }
 
-/// A 16:16 pointer into the file's buffer as a flat one.
-fn mmio_to32(cpu: &Cpu, buffer: Option<[u32; 4]>, segptr: u32) -> u32 {
-    match buffer {
-        Some([_, seg, base, _]) if segptr >> 16 == seg >> 16 => {
-            base + (segptr & 0xFFFF) - (seg & 0xFFFF)
-        }
-        _ => super::linear(cpu, segptr),
+/// A flat pointer into the file's buffer as a 16:16 one. A buffer past
+/// 64 KB is a huge block, so a pointer into its later tiles, or just past
+/// its end as pchEndRead and pchEndWrite are for a full buffer, has the
+/// selector `__AHINCR` on for each 64 KB, as 16-bit MMSYSTEM's huge
+/// pointer arithmetic gives.
+fn mmio_to16(cpu: &Cpu, buffer: Option<[u32; 4]>, flat: u32) -> u32 {
+    let Some([_, segptr, base, _]) = buffer else {
+        return 0;
+    };
+    let Some(delta) = flat.checked_sub(base) else {
+        return 0;
+    };
+    let at = (segptr & 0xFFFF).saturating_add(delta);
+    if at > mmio_tiles(cpu, segptr) << 16 {
+        return 0;
     }
+    let sel = (segptr >> 16) + (at >> 16) * u32::from(super::ldt::AHINCR);
+    ((sel & 0xFFFF) << 16) | (at & 0xFFFF)
+}
+
+/// A 16:16 pointer into the file's buffer, in any of its tiles or just
+/// past its last one (the selector after them at offset 0), as a flat
+/// one: the bounds `mmio_to16` gives pointers in.
+fn mmio_to32(cpu: &Cpu, buffer: Option<[u32; 4]>, segptr: u32) -> u32 {
+    if let Some([_, seg, base, _]) = buffer {
+        let step = ((segptr >> 16) as u16).wrapping_sub((seg >> 16) as u16);
+        let at = (u32::from(step / super::ldt::AHINCR) << 16) | (segptr & 0xFFFF);
+        if step.is_multiple_of(super::ldt::AHINCR) && at <= mmio_tiles(cpu, seg) << 16 {
+            return base.wrapping_add(at).wrapping_sub(seg & 0xFFFF);
+        }
+    }
+    super::linear(cpu, segptr)
 }
 
 /// Write the MMIOINFO at `at` as the MMIOINFO16 at `at16`: dwFlags,
@@ -2119,10 +2144,10 @@ fn mmio_info16(cpu: &mut Cpu, hmmio: u32, at: u32, at16: u32) {
         io_proc,
         f(3) & 0xFFFF,
         f(5),
-        mmio_to16(buffer, f(6)),
-        mmio_to16(buffer, f(7)),
-        mmio_to16(buffer, f(8)),
-        mmio_to16(buffer, f(9)),
+        mmio_to16(cpu, buffer, f(6)),
+        mmio_to16(cpu, buffer, f(7)),
+        mmio_to16(cpu, buffer, f(8)),
+        mmio_to16(cpu, buffer, f(9)),
         f(10),
         f(11),
         f(12),

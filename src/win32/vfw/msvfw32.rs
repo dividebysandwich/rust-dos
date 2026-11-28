@@ -95,7 +95,7 @@ const ICVERSION: u32 = 0x0104;
 /// handler, dwVersionICM and the driver's file, with no name or
 /// description (ICGetInfo's). Age of Empires asks for `iv41`, Indeo 4,
 /// before it plays its films.
-fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[kind, handler, info] = args else {
         unreachable!()
     };
@@ -245,7 +245,7 @@ fn ic_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// MMSYSERR_INVALPARAM, as Wine's ICGetInfo gives. Actua Soccer 2 asks
 /// for its intro film's Microsoft Video 1 decoder's after ICLocate,
 /// before it decompresses, and stops without it.
-fn ic_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn ic_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hic, info, size] = args else {
         unreachable!()
     };
@@ -408,10 +408,12 @@ fn decodes(fourcc: u32, compression: u32) -> bool {
 /// The formats of a decompression by the codec `fourcc` other than
 /// Microsoft Video 1, as `ms_video_1_formats` gives them: the stream is
 /// one of the codec's that codec.rs decodes, and the output an
-/// uncompressed DIB of its size of 16, 24 or 32 bits. codec.rs gives a
-/// picture of 24 bits, which is written in the output's format.
-/// Cinepak's 8 bits, in iccvid.dll's own palette, aren't given here
-/// (#2202), though iccvid.dll gives them.
+/// uncompressed DIB of its size of 16, 24 or 32 bits, or of 8 bits
+/// with a colour table that can be read (`output_colours`). codec.rs
+/// gives a picture of 24 bits, which is written in the output's format,
+/// in 8 bits as the nearest of the DIB's colours. iccvid.dll gives 8
+/// bits dithered to a palette of its own, or the one
+/// ICM_DECOMPRESS_SET_PALETTE gives (#2202, #2325).
 fn codec_formats(
     cpu: &mut Cpu,
     fourcc: u32,
@@ -427,12 +429,40 @@ fn codec_formats(
     }
     match output_layout(cpu, output)? {
         (layout, size)
-            if size == (source.width, source.height) && layout.0 != msvideo1::Output::Indexes =>
+            if size == (source.width, source.height)
+                && (layout.0 != msvideo1::Output::Indexes
+                    || output_colours(cpu, output).is_some()) =>
         {
             Ok((source, Some(layout)))
         }
         _ => Err(ICERR_BADFORMAT),
     }
+}
+
+/// The colours of the 8-bit DIB whose BITMAPINFO is at `output`, red,
+/// green and blue: biClrUsed of them, or 256 for 0. A picture these
+/// codecs decode goes out in 8 bits as the nearest of them
+/// (`from_rgb24`). None for a DIB whose colours can't be read.
+fn output_colours(cpu: &mut Cpu, output: u32) -> Option<Vec<[u8; 3]>> {
+    let info = read_info(cpu, output)?;
+    let count = match info.clr_used {
+        0 => 256,
+        n => n.min(256),
+    };
+    let at = output.wrapping_add(info.size);
+    if !allows(cpu, at, 4 * count, false) {
+        return None;
+    }
+    let mut quads = vec![0; 4 * count as usize];
+    cpu.bus.guest_read_bytes(at, &mut quads);
+    Some(
+        quads
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|q| [q[2], q[1], q[0]])
+            .collect(),
+    )
 }
 
 /// The formats of a decompression by the codec `fourcc`.
@@ -496,7 +526,7 @@ fn ic_locate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// here answers ICM_GETINFO and the decompression messages, those of
 /// ICDecompressEx too, and ICERR_UNSUPPORTED to the others; a handle
 /// that isn't open gets ICERR_BADHANDLE.
-fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hic, msg, dw1, dw2] = args else {
         unreachable!()
     };
@@ -538,7 +568,7 @@ fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ICDecompress(hic, dwFlags, lpbiFormat, lpData, lpbi, lpBits), which
 /// sends the codec ICM_DECOMPRESS: ICERR_OK, or an error.
-fn ic_decompress(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn ic_decompress(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hic, flags, input, data, output, bits] = args else {
         unreachable!()
     };
@@ -678,8 +708,9 @@ fn ex_place(cpu: &mut Cpu, fourcc: u32, ex: &DecompressEx) -> Result<Place, u32>
     };
     let fits =
         |at: i32, size: i32, out: u32| at >= 0 && i64::from(at) + i64::from(size) <= i64::from(out);
-    if !fits(left, w, out_width) || !fits(top, h, out_height) || layout == msvideo1::Output::Indexes
-    {
+    let no_colours =
+        layout == msvideo1::Output::Indexes && output_colours(cpu, ex.output).is_none();
+    if !fits(left, w, out_width) || !fits(top, h, out_height) || no_colours {
         return Err(ICERR_BADFORMAT);
     }
     Ok(Place {
@@ -901,7 +932,11 @@ fn decompress_picture(
         2 => (zoom_by_two(&picture, width, height), 2 * width, 2 * height),
         _ => (picture, width, height),
     };
-    let pixels = from_rgb24(&picture, width, height, layout, top_down);
+    let colours = match layout {
+        msvideo1::Output::Indexes => output_colours(cpu, output).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let pixels = from_rgb24(&picture, width, height, layout, top_down, &colours);
     if (left, top) == (0, 0) && out_size == (width, height) {
         cpu.bus.guest_write_bytes(bits, &pixels);
         return ICERR_OK;
@@ -938,16 +973,23 @@ fn zoom_by_two(picture: &[u8], width: u32, height: u32) -> Vec<u8> {
     out
 }
 
-/// A bottom-up 24-bit DIB of `width` by `height` in `layout` (16, 24 or
-/// 32 bits), its rows from the top when `top_down`.
+/// A bottom-up 24-bit DIB of `width` by `height` in `layout`, its rows
+/// from the top when `top_down`. In 8 bits each pixel is the index of
+/// the nearest of `colours` (red, green and blue), found for its colour
+/// at 4 bits a channel.
 fn from_rgb24(
     picture: &[u8],
     width: u32,
     height: u32,
     layout: msvideo1::Output,
     top_down: bool,
+    colours: &[[u8; 3]],
 ) -> Vec<u8> {
     use msvideo1::Output;
+    let nearest = match layout {
+        Output::Indexes => nearest_table(colours),
+        _ => std::rc::Rc::from([]),
+    };
     let (w, h) = (width as usize, height as usize);
     let from = crate::win32::gdi32::surface::dib_stride(width as i32, 24);
     let to = crate::win32::gdi32::surface::dib_stride(width as i32, u32::from(layout.bits()));
@@ -969,11 +1011,57 @@ fn from_rgb24(
                     o.copy_from_slice(&word.to_le_bytes());
                 }
                 Output::Rgb24 | Output::Rgb32 => o[..3].copy_from_slice(&[b, g, r]),
-                Output::Indexes => unreachable!("no picture goes out in 8 bits"),
+                Output::Indexes => {
+                    let [r, g, b] = [r, g, b].map(|c| usize::from(c >> 4));
+                    o[0] = nearest[r << 8 | g << 4 | b];
+                }
             }
         }
     }
     out
+}
+
+thread_local! {
+    /// The colours `nearest_table` last made a table for, and the table.
+    /// A film's frames go to one DIB, whose colours stay from frame to
+    /// frame, and a table takes 4096 times as many sums as there are
+    /// colours: about a million for 256.
+    static NEAREST: std::cell::RefCell<Nearest> =
+        std::cell::RefCell::new((Vec::new(), std::rc::Rc::from([0; 4096])));
+}
+
+/// Colours, and the table of the nearest of them (`nearest_table`).
+type Nearest = (Vec<[u8; 3]>, std::rc::Rc<[u8]>);
+
+/// For each colour of 4 bits a channel (red, green and blue, from the
+/// high bits), the index of the nearest of `colours` to the colour each
+/// channel's 4 bits stand for: 17 times them, so that black is 0 and
+/// white 255 in every channel.
+fn nearest_table(colours: &[[u8; 3]]) -> std::rc::Rc<[u8]> {
+    NEAREST.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.0 != colours {
+            *last = (colours.to_vec(), make_nearest_table(colours).into());
+        }
+        last.1.clone()
+    })
+}
+
+/// `nearest_table`'s table of `colours`, made.
+fn make_nearest_table(colours: &[[u8; 3]]) -> Vec<u8> {
+    let mut table = vec![0; 4096];
+    for (key, slot) in table.iter_mut().enumerate() {
+        let channel = |shift: usize| ((key >> shift) & 15) as i32 * 17;
+        let (r, g, b) = (channel(8), channel(4), channel(0));
+        let distance = |c: &[u8; 3]| {
+            let [dr, dg, db] = [c[0] as i32 - r, c[1] as i32 - g, c[2] as i32 - b];
+            dr * dr + dg * dg + db * db
+        };
+        *slot = (0..colours.len())
+            .min_by_key(|&i| distance(&colours[i]))
+            .unwrap_or(0) as u8;
+    }
+    table
 }
 
 /// DrawDibDraw's flags.
