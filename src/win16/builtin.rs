@@ -197,6 +197,8 @@ pub static MODULES: &[&Def] = &[
     &super::ole2disp::OLE2DISP,
     &super::typelib::TYPELIB,
     &super::universal::WIN32S16,
+    &super::vfw::AVIFILE,
+    &super::vfw::MSVIDEO,
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",
@@ -814,6 +816,14 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             handler(cpu, &args)
         }
         Run::Win32(dll, function, ret) => {
+            if !super::task::map_dll(cpu, dll) {
+                crate::win32::fatal(
+                    cpu,
+                    &format!("{}.{} goes on to {}, which isn't there", def.name, api.name, dll),
+                    None,
+                );
+                return;
+            }
             match win32_address(cpu, dll, function) {
                 Some(target) => {
                     auto_thunk(cpu, target, api.args, &raw, ret);
