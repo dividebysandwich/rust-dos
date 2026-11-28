@@ -1,10 +1,10 @@
 //! The 16-bit OLE 2 modules Windows 95 and 98 have in their SYSTEM
 //! directory: COMPOBJ (the component object library: initialization,
-//! the task allocator, class objects, GUIDs as text), STORAGE (compound
-//! files), OLE2 (linking and embedding, drag and drop, the clipboard)
-//! and OLE2NLS (locales); OLE2DISP (automation) has ole2disp.rs. A
-//! program made with Visual Basic 4's 16-bit edition imports all of
-//! them through VB40016.DLL.
+//! the task allocator, class objects and the in-process servers that
+//! give them, GUIDs as text), STORAGE (compound files), OLE2 (linking
+//! and embedding, drag and drop, the clipboard) and OLE2NLS (locales);
+//! OLE2DISP (automation) has ole2disp.rs. A program made with Visual
+//! Basic 4's 16-bit edition imports all of them through VB40016.DLL.
 //!
 //! The ordinals and names are those of the modules of Windows 98 SE, as
 //! Wine's compobj.dll16, storage.dll16, ole2.dll16 and ole2nls.dll16
@@ -1324,7 +1324,8 @@ fn start_server(
 ///   with none left, the server's module is the task's, kept once, and
 ///   its DllGetClassObject (Pascal's) is called: for CoGetClassObject
 ///   with the caller's interface and `out`, for CoCreateInstance with
-///   IClassFactory's and a place on the stack below the caller's.
+///   IClassFactory's and a place on the stack below the caller's. A
+///   module without the function is freed again (CO_E_ERRORINDLL).
 /// - `SERVER_GOT`: CoGetClassObject's DllGetClassObject returned.
 /// - `SERVER_FACTORY` [outer, riid, out, place]: CoCreateInstance's
 ///   returned, and the factory, at `place`, makes the object
@@ -1359,24 +1360,15 @@ pub(super) fn then_server(
             }
             let target = method_address(cpu, factory, 3);
             if target == 0 {
-                return dx_ax(ctx, E_NOINTERFACE);
+                // The reference DllGetClassObject gave still goes.
+                return release_factory(cpu, factory, E_NOINTERFACE, ctx);
             }
             let words = cdecl_words(factory, &[outer, riid, out], "lll");
             let data = vec![SERVER_MADE, factory];
             thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_SERVER, data);
             None
         }
-        SERVER_MADE => {
-            let factory = data[1];
-            let target = method_address(cpu, factory, 2);
-            if target == 0 {
-                return dx_ax(ctx, value);
-            }
-            let words = [(factory >> 16) as u16, factory as u16];
-            let data = vec![1, value];
-            thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_METHOD, data);
-            None
-        }
+        SERVER_MADE => release_factory(cpu, data[1], value, ctx),
         SERVER_UNLOAD => {
             let module = data[1] as u16;
             if value == S_OK {
@@ -1389,6 +1381,19 @@ pub(super) fn then_server(
         }
         _ => dx_ax(ctx, E_INVALIDARG),
     }
+}
+
+/// Release the class factory `factory` CoCreateInstance got from a
+/// server's DllGetClassObject, then return `value` to its caller.
+fn release_factory(cpu: &mut Cpu, factory: u32, value: u32, ctx: &mut Context) -> Option<u32> {
+    let target = method_address(cpu, factory, 2);
+    if target == 0 {
+        return dx_ax(ctx, value);
+    }
+    let words = [(factory >> 16) as u16, factory as u16];
+    let data = vec![1, value];
+    thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_METHOD, data);
+    None
 }
 
 /// `SERVER_INITS` of `then_server`, or its first step, called by the
@@ -1404,6 +1409,15 @@ fn server_inits(cpu: &mut Cpu, data: &[u32], ctx: &mut Context, direct: bool) ->
         return None;
     }
     let module = module as u16;
+    let target = super::module::ordinal_of(cpu, module, "DllGetClassObject")
+        .map_or(0, |o| super::module::entry_point(cpu, module, o));
+    if target == 0 {
+        // No server: the load goes again, so that a DLL without the
+        // function, which CoFreeUnusedLibraries can't ask either,
+        // doesn't stay loaded until the last CoUninitialize.
+        super::module::release(cpu, module);
+        return reply(ctx, direct, CO_E_ERRORINDLL);
+    }
     // The task holds one load of each server, however many classes it
     // asked it for.
     let t = this_task_or_new(cpu);
@@ -1411,11 +1425,6 @@ fn server_inits(cpu: &mut Cpu, data: &[u32], ctx: &mut Context, direct: bool) ->
         super::module::release(cpu, module);
     } else {
         t.libraries.push(module);
-    }
-    let target = super::module::ordinal_of(cpu, module, "DllGetClassObject")
-        .map_or(0, |o| super::module::entry_point(cpu, module, o));
-    if target == 0 {
-        return reply(ctx, direct, CO_E_ERRORINDLL);
     }
     let far = |p: u32| [(p >> 16) as u16, p as u16];
     if create == 0 {
