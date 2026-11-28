@@ -763,7 +763,7 @@ pub(super) mod tests {
             p.quad_to(c[0].0, c[0].1, c[1].0, c[1].1);
         }
         p.close();
-        let (rows, offset) = p.fill(1.0, 14, 18);
+        let (rows, offset, _) = p.fill(1.0, 14, 18);
         let drawn: Vec<String> = rows[4..14]
             .iter()
             .map(|r| {
@@ -794,7 +794,7 @@ pub(super) mod tests {
             p.line_to(x, 10.0);
             p.close();
         }
-        let (rows, offset) = p.fill(1.0, 12, 14);
+        let (rows, offset, _) = p.fill(1.0, 12, 14);
         assert_eq!(offset, 0);
         assert!(rows[..2].iter().chain(&rows[12..]).all(|&r| r == 0));
         assert!(rows[2..12].iter().all(|&r| r == 0x3FF), "{rows:x?}");
