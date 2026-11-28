@@ -433,7 +433,10 @@ All output goes through the emulated video hardware (`screen.rs`):
   characters, code page 1252's other letters and its Spanish and French
   punctuation, the Central European and Baltic letters with a stroke, and
   the Latin letters with accents built from them. A letter that code page
-  1252 lacks is as wide as its glyph there. The characters code page 437
+  1252 lacks is as wide as its glyph there. The System font's 16-pixel
+  size, VGASYS.FON's, is drawn with the glyphs of Wine's System font
+  (`gdi32/system16.rs`, from `tools/gen_system_glyphs.py`), which has
+  VGASYS.FON's widths. The characters code page 437
   lacks (Central European, Cyrillic, Greek, Turkish and Baltic letters) are
   drawn from FreeDOS's CPIDOS fonts in the same three sizes, which
   `tools/gen_cpi_glyphs.py` extracts into `video/assets/CPIDOS_glyphs.bin`.
