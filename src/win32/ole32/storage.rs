@@ -431,6 +431,25 @@ fn object_of(cpu: &mut Cpu, this: u32, kind: u32) -> Option<u32> {
     Some(id)
 }
 
+/// Whether `this` is an IStorage, IStream or IEnumSTATSTG of a docfile
+/// that the program still holds: false once its last Release freed it.
+/// The 16-bit STORAGE (win16/storage.rs) frees its own object of one
+/// then.
+pub fn is_object(cpu: &mut Cpu, this: u32) -> bool {
+    [STORAGE, STREAM, ENUM]
+        .into_iter()
+        .any(|kind| object_of(cpu, this, kind).is_some())
+}
+
+/// Whether `this` is a docfile's IStream whose element is still there:
+/// S_OK, or the HRESULT its methods fail with.
+pub fn stream_state(cpu: &mut Cpu, this: u32) -> u32 {
+    match live(cpu, this, STREAM) {
+        Ok(_) => S_OK,
+        Err(e) => e,
+    }
+}
+
 /// The object of `this` of `kind` whose element is still there: its id,
 /// or the HRESULT to fail with.
 fn live(cpu: &mut Cpu, this: u32, kind: u32) -> Result<u32, u32> {

@@ -58,7 +58,7 @@ mod ntdll;
 pub(crate) mod object;
 #[cfg(test)]
 mod ordinals;
-mod ole32;
+pub(crate) mod ole32;
 pub(crate) mod oleaut32;
 mod oledlg;
 mod olepro32;
