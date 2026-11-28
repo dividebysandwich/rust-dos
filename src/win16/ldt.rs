@@ -1,6 +1,10 @@
 //! Selectors: the entries of the Win16 process's LDT that 16-bit code
 //! uses for its segments, given out from `FIRST` on as Windows 3.1 gave
-//! them out. A block of more than 64 KB has a selector for each 64 KB of
+//! them out. A single selector freed is given out again before the others,
+//! the last one freed first, as Windows 98's free list gives them: a
+//! program started again after it ended then gets other selectors than
+//! it had, which a probe on Windows 98 SE showed (#2280). A block of more
+//! than 64 KB has a selector for each 64 KB of
 //! it, `__AHINCR` (8) apart, so that huge pointers step through it: the
 //! first selector's base is the block's and its limit the whole block's,
 //! and each next one starts 64 KB further with a limit 64 KB smaller, as
@@ -52,10 +56,17 @@ pub fn index(selector: u16) -> u16 {
     selector >> 3
 }
 
-/// Which LDT entries are taken, a bit each.
+/// The W32 version whose states keep the entries freed (`Ldt::freed`).
+pub const FREED_SAVED: u16 = 117;
+
+/// Which LDT entries are taken, a bit each, and the order the free ones
+/// were freed in.
 #[derive(Clone, Debug, Default)]
 pub struct Ldt {
     used: Vec<u64>,
+    /// The entries freed, the last one at the end. One taken again since
+    /// stays in it until `alloc` comes to it.
+    freed: crate::savestate::Since<FREED_SAVED, Vec<u16>>,
 }
 
 impl Ldt {
@@ -88,9 +99,24 @@ impl Ldt {
         }
     }
 
-    /// Take `count` entries in a row; the first one's selector.
+    /// Take `count` entries in a row; the first one's selector. A single
+    /// entry is the one freed last that is still free, if there is one,
+    /// and otherwise, as a run is, the first free one from `FIRST`.
+    ///
+    /// Windows 98 keeps its free selectors in a list and takes the one
+    /// freed last. MCLIB.DLL, Memphis Math's library, caches its client's
+    /// data by the client's SS, and a MATHPATH.EXE started after another
+    /// ended found the first one's SS again and its freed data with it.
     pub fn alloc(&mut self, count: u16) -> Option<u16> {
         let count = count.max(1);
+        if count == 1 {
+            while let Some(i) = self.freed.pop() {
+                if !self.taken(i) {
+                    self.set(i, true);
+                    return Some(selector(i));
+                }
+            }
+        }
         let end = crate::win32::system::LDT_ENTRIES as u16;
         // More than the table holds, which would also wrap `start + count`.
         if count > end {
@@ -115,7 +141,24 @@ impl Ldt {
     pub fn free(&mut self, selector: u16, count: u16) {
         let first = index(selector);
         for i in first..first.saturating_add(count.max(1)) {
-            self.set(i, false);
+            if self.taken(i) {
+                self.set(i, false);
+                self.freed.push(i);
+            }
+        }
+        // Entries taken again by a run, and freed again, would be in the
+        // list twice: keep it no longer than the table.
+        if self.freed.len() > crate::win32::system::LDT_ENTRIES as usize {
+            let mut seen = Ldt::default();
+            let mut kept: Vec<u16> = Vec::new();
+            for &i in self.freed.iter().rev() {
+                if !self.taken(i) && !seen.taken(i) {
+                    seen.set(i, true);
+                    kept.push(i);
+                }
+            }
+            kept.reverse();
+            *self.freed = kept;
         }
     }
 
@@ -254,7 +297,7 @@ pub fn limit_of(desc: u64) -> u32 {
     crate::cpu::Descriptor(desc).limit()
 }
 
-crate::state_fields!(Ldt { used });
+crate::state_fields!(Ldt { used, freed });
 
 #[cfg(test)]
 mod tests {
@@ -275,5 +318,36 @@ mod tests {
         ldt.reserve(3);
         assert_eq!(ldt.alloc(1), Some(selector(FIRST + 3)));
         assert!(!ldt.is_allocated(selector(FIRST + 4)));
+    }
+
+    #[test]
+    fn the_selector_freed_last_comes_back_first() {
+        // As Windows 98 SE gives them: six blocks, the 2nd and the 4th
+        // freed, then two allocated get the 4th and then the 2nd.
+        let mut ldt = Ldt::default();
+        let six: Vec<u16> = (0..6).map(|_| ldt.alloc(1).unwrap()).collect();
+        ldt.free(six[1], 1);
+        ldt.free(six[3], 1);
+        assert_eq!(ldt.alloc(1), Some(six[3]));
+        assert_eq!(ldt.alloc(1), Some(six[1]));
+        // With none freed, the first free entry.
+        assert_eq!(ldt.alloc(1), Some(selector(FIRST + 6)));
+    }
+
+    #[test]
+    fn a_run_takes_the_first_free_entries() {
+        let mut ldt = Ldt::default();
+        let a = ldt.alloc(1).unwrap();
+        let b = ldt.alloc(1).unwrap();
+        ldt.free(a, 1);
+        // A run of two doesn't fit in the one entry freed.
+        assert_eq!(ldt.alloc(2), Some(selector(FIRST + 2)));
+        // The entry freed is still given out singly.
+        assert_eq!(ldt.alloc(1), Some(a));
+        // An entry freed and then taken by a run isn't given out again.
+        ldt.free(b, 1);
+        ldt.free(selector(FIRST + 2), 2);
+        assert_eq!(ldt.alloc(3), Some(b));
+        assert_eq!(ldt.alloc(1), Some(selector(FIRST + 4)));
     }
 }
