@@ -306,6 +306,31 @@ def merged_clauses(ours, theirs, old, new):
             + ", and " + clause + ".")
 
 
+def merge_comment(parts, index, old, new):
+    """Resolve the conflict at `parts[index]` if it is the end of the
+    comment above WIN32_LOADS. When the two sides agree up to inside the
+    last clause ("..., and 71's to" on a line of both), git's conflict
+    starts there, so the `///` lines just above it, which both sides
+    share, are taken in one at a time until the clauses can be told
+    apart, and rewritten with it."""
+    conflict = parts[index]
+    shared = []
+    at = index
+    while True:
+        lines = shared + conflict.ours, shared + conflict.theirs
+        text = merged_clauses(*lines, old, new)
+        if text is not None:
+            break
+        at -= 1
+        if (len(shared) == 20 or at < 0 or isinstance(parts[at], Conflict)
+                or not parts[at].strip().startswith("///")):
+            return
+        shared.insert(0, parts[at])
+    for taken in range(at, index):
+        parts[taken] = ""
+    conflict.resolved = rewrap(meaningful(lines[1]), text)
+
+
 def branch_gates(root, base, old):
     """The lines the branch added that gate on its version `old`, by file:
     `*_SAVED: u16 = old`, `Since<old, ...>` and `Until<old, ...>`."""
@@ -413,9 +438,7 @@ def resolve_version(root, base):
         if VERSION.search(joined) and len(meaningful(other.ours)) == 1:
             other.resolved = other.ours
             continue
-        text = merged_clauses(other.ours, other.theirs, old, new)
-        if text is not None:
-            other.resolved = rewrap(meaningful(other.theirs), text)
+        merge_comment(parts, parts.index(other), old, new)
 
     text = join(parts)
     text = VERSION.sub(lambda v: f"{v.group(1)}{new}{v.group(3)}", text,

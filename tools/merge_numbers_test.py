@@ -22,7 +22,7 @@ LAYOUT = os.path.join(TOOLS, "win32_layout.py")
 STATE = """\
 const WIN32_VERSION: u16 = {version};
 /// The W32 versions this rust-dos loads: its own, and those an older one
-/// saved. 71's keeps less, and 71's to {last}'s no {missing}.
+/// saved. 71's keeps less, and 71's to{split}{last}'s no {missing}.
 const WIN32_LOADS: [u16; {count}] = [
 {loads}    WIN32_VERSION,
 ];
@@ -52,9 +52,13 @@ fn after() {{}}
 """
 
 
-def state(version, missing, loads, layouts):
+def state(version, missing, loads, layouts, split=False):
+    """The state file at `version`. With `split`, the comment's last
+    clause starts on a line of its own after "..., and 71's to", which
+    every version then shares, as the real file's often does."""
     return STATE.format(
         version=version, last=version - 1, missing=missing,
+        split="\n/// " if split else " ",
         count=len(loads) + 1,
         loads="".join(f"    {v},\n" for v in loads),
         layouts="".join(f"        ({v}, {h}), // {what}\n"
@@ -126,6 +130,10 @@ BASE_FILES = {
 
 
 class Test(unittest.TestCase):
+    # Whether the comment above WIN32_LOADS breaks before the last
+    # clause's version (`state`'s `split`).
+    split = False
+
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.repo = Repo(self.dir.name)
@@ -145,7 +153,7 @@ class Test(unittest.TestCase):
         repo.commit({"src/bus/state.rs": state(2, "base", [1], [
             (1, "0x0000_0000_0000_0001", "one"),
             (2, h2, "two"),
-        ])}, "base")
+        ], split=self.split)}, "base")
         repo.git("branch", "main")
         repo.git("checkout", "-q", "main")
         repo.write("src/win32/main.rs", fields("Main", "m"))
@@ -155,7 +163,7 @@ class Test(unittest.TestCase):
                 (1, "0x0000_0000_0000_0001", "one"),
                 (2, h2, "two"),
                 (3, h3, "main's"),
-            ]),
+            ], split=self.split),
             "src/win16/thunk.rs": thunk(list(main_entries),
                                         [("THEN_MAIN", 2)]),
             **dict(extra),
@@ -179,7 +187,7 @@ class Test(unittest.TestCase):
             (1, "0x0000_0000_0000_0001", "one"),
             (2, h2, "two"),
             *[(v, h3 if h is None else h, what) for v, h, what in layouts],
-        ])
+        ], split=self.split)
         files["src/win16/thunk.rs"] = thunk(
             ["topic_then", "topic_other"],
             [("THEN_TOPIC", 2), ("THEN_OTHER", 3)], proc=proc)
@@ -228,6 +236,26 @@ class Test(unittest.TestCase):
         self.assertEqual(status.stdout, "")
         unstaged = self.repo.git("diff", "--name-only")
         self.assertEqual(unstaged.stdout, "")
+
+    def test_a_clause_split_across_shared_lines_is_merged(self):
+        # Both sides agree up to "..., and 71's to" on a line of its
+        # own, so git's conflict starts inside the last clause.
+        self.split = True
+        h2, _ = self.start()
+        self.topic(h2, [(3, None, "topic's")])
+        self.merge()
+        conflicted = self.repo.read("src/bus/state.rs")
+        self.assertIn("and 71's to\n<<<<<<<", conflicted)
+        out = self.repo.run_script()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        state_rs = self.repo.read("src/bus/state.rs")
+        self.assertNotIn("<<<<<<<", state_rs)
+        comment = " ".join(line.removeprefix("/// ")
+                           for line in state_rs.split("\n")
+                           if line.startswith("///"))
+        self.assertIn("saved. 71's keeps less, 71's to 2's no main's, and "
+                      "71's to 3's no topic's. ", comment + " ")
+        self.assertEqual(comment.count("keeps less"), 1)
 
     def test_crlf_line_endings_are_kept(self):
         # A checkout on Windows may have CRLF endings.
