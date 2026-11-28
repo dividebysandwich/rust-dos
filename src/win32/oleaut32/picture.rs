@@ -120,6 +120,11 @@ pub struct Picture {
     /// IConnectionPointContainer, and the connection point.
     pub ifaces: Vec<u32>,
     pub sinks: Vec<u32>,
+    /// The file Load read the picture from, which SaveAsFile and Save
+    /// write back while the picture hasn't changed since (`dirty`, which
+    /// PictureChanged sets).
+    pub data: Vec<u8>,
+    pub dirty: bool,
 }
 
 crate::state_fields!(Picture {
@@ -139,7 +144,9 @@ crate::state_fields!(Picture {
     cur_dc,
     stock_bitmap,
     ifaces,
-    sinks
+    sinks,
+    data,
+    dirty
 });
 
 /// The interfaces' places in `Picture::ifaces`.
@@ -449,8 +456,9 @@ const STEP_HEADER: u16 = 2;
 const STEP_ALL: u16 = 3;
 const STEP_SIZED: u16 = 4;
 
-/// IStream's Read and Stat.
+/// IStream's Read, Write and Stat.
 const READ: u32 = 3;
+const WRITE: u32 = 4;
 const STAT: u32 = 12;
 const STATFLAG_NONAME: u32 = 1;
 
@@ -658,7 +666,15 @@ fn decoded(cpu: &mut Cpu, t: &mut Task) -> Next {
             get(cpu, id).kind = PICTYPE_NONE;
             S_OK
         }
-        Some(id) => decode(cpu, id, block, len),
+        Some(id) => {
+            let hr = decode(cpu, id, block, len);
+            let mut data = vec![0u8; len as usize];
+            cpu.bus.guest_read_bytes(block, &mut data);
+            let o = get(cpu, id);
+            o.data = if hr == S_OK { data } else { Vec::new() };
+            o.dirty = false;
+            hr
+        }
         None => E_FAIL,
     };
     task_free(cpu, block);
@@ -723,10 +739,10 @@ fn decode(cpu: &mut Cpu, id: usize, at: u32, len: u32) -> u32 {
 }
 
 /// A picture decoded: its size and its pixels, RGBA, the rows top first.
-struct Rgba {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
+pub(super) struct Rgba {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
 }
 
 fn decode_jpeg(data: &[u8]) -> Result<Rgba, String> {
@@ -768,7 +784,7 @@ fn decode_jpeg(data: &[u8]) -> Result<Rgba, String> {
 
 /// A GIF's first picture on its logical screen; what the picture doesn't
 /// cover, and its transparent color, transparent.
-fn decode_gif(data: &[u8]) -> Result<Rgba, String> {
+pub(super) fn decode_gif(data: &[u8]) -> Result<Rgba, String> {
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::RGBA);
     let mut decoder = options
@@ -1285,14 +1301,91 @@ pub fn picture_changed(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(id) = object(cpu, args[0]) else {
         return Some(E_INVALIDARG);
     };
+    get(cpu, id).dirty = true;
     changed(cpu, id, DISPID_PICT_HANDLE)
 }
 
-/// SaveAsFile(this, stream, save_copy, size): writing the picture as a
-/// file isn't written yet; the call does what a call of a missing
-/// function does.
-pub fn save_as_file(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    crate::win32::not_written(cpu, super::DLL.name, "IPicture::SaveAsFile", E_NOTIMPL)
+/// The file of the picture `id` that SaveAsFile and Save write: the one
+/// Load read, while the picture is as it made it. Ok(None) for no
+/// picture; Err(E_NOTIMPL), with a log line, for a picture made from a
+/// handle or changed since, whose file would be made from the handle,
+/// which isn't written yet.
+fn file_of(cpu: &mut Cpu, id: usize, what: &str) -> Result<Option<Vec<u8>>, u32> {
+    let o = get(cpu, id);
+    if o.kind == PICTYPE_NONE {
+        return Ok(None);
+    }
+    if !o.data.is_empty() && !o.dirty {
+        return Ok(Some(o.data.clone()));
+    }
+    let kind = o.kind;
+    cpu.bus.log_string(&format!(
+        "[W32] OLEAUT32: {what} of a picture (type {kind}) made from a handle, or changed \
+         since it was loaded, isn't written yet: E_NOTIMPL"
+    ));
+    Err(E_NOTIMPL)
+}
+
+/// Start SAVE: `bytes` written to the stream with IStream::Write, the
+/// count written to `size` if it isn't 0.
+fn write_task(cpu: &mut Cpu, stream: u32, bytes: &[u8], size: u32) -> Option<u32> {
+    let block = task_alloc(cpu, bytes.len().max(1) as u32);
+    if block == 0 {
+        return Some(E_OUTOFMEMORY);
+    }
+    cpu.bus.guest_write_bytes(block, bytes);
+    let vars = vec![super::PICTURE_SAVE, stream, block, bytes.len() as u32, size];
+    task::start(cpu, task::OLEAUT32_OBJECTS, vars, 4)
+}
+
+/// SAVE: the bytes written, the block freed, and the count given.
+pub fn save_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let s = t.scratch;
+    let (stream, block, len, size) = (t.var(1), t.var(2), t.var(3), t.var(4));
+    match t.step {
+        0 => {
+            cpu.bus.guest_write_32(s, 0);
+            let write = crate::win32::ole32::method(cpu, stream, WRITE).unwrap_or(0);
+            Next::call(write, &[stream, block, len, s], 1)
+        }
+        _ => {
+            task_free(cpu, block);
+            if value == S_OK && size != 0 && cpu.bus.guest_probe(size, 4, true) {
+                let written = cpu.bus.guest_read_32(s);
+                cpu.bus.guest_write_32(size, written);
+            }
+            Next::Done(value)
+        }
+    }
+}
+
+/// SaveAsFile(this, stream, save_copy, size): the picture's file written
+/// to the stream, as Wine does (and its tests of Windows check): nothing
+/// for no picture, and E_FAIL without `save_copy` for a picture made
+/// from a handle. A picture loaded from a file writes that file back
+/// whatever `save_copy` is, which Visual Basic's runtime counts on: it
+/// asks whether the original format is kept and then saves the form's
+/// icon without the flag.
+pub fn save_as_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[this, stream, save_copy, size] = args else {
+        unreachable!()
+    };
+    let Some(id) = object(cpu, this) else {
+        return Some(E_INVALIDARG);
+    };
+    if stream == 0 {
+        return Some(E_POINTER);
+    }
+    let o = get(cpu, id);
+    let kept = !o.data.is_empty() && !o.dirty;
+    if o.kind != PICTYPE_NONE && !kept && save_copy == 0 {
+        return Some(E_FAIL);
+    }
+    match file_of(cpu, id, "IPicture::SaveAsFile") {
+        Ok(None) => Some(S_OK),
+        Ok(Some(bytes)) => write_task(cpu, stream, &bytes, size),
+        Err(e) => Some(e),
+    }
 }
 
 pub fn get_attributes(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1436,25 +1529,45 @@ pub fn is_dirty(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(E_NOTIMPL)
 }
 
-/// Save(this, stream, clear_dirty): writing the picture to a stream isn't
-/// written yet; the call does what a call of a missing function does.
-pub fn save(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    crate::win32::not_written(
-        cpu,
-        super::DLL.name,
-        "IPicture's IPersistStream::Save",
-        E_NOTIMPL,
-    )
+/// Save(this, stream, clear_dirty): the "lt" header, which Load takes,
+/// with the length of the picture's file, and the file (none for no
+/// picture).
+pub fn save(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[this, stream, _clear_dirty] = args else {
+        unreachable!()
+    };
+    let Some(id) = object(cpu, this) else {
+        return Some(E_INVALIDARG);
+    };
+    if stream == 0 {
+        return Some(E_POINTER);
+    }
+    let file = match file_of(cpu, id, "IPersistStream::Save") {
+        Ok(file) => file.unwrap_or_default(),
+        Err(e) => return Some(e),
+    };
+    let mut bytes = b"lt\0\0".to_vec();
+    bytes.extend_from_slice(&(file.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&file);
+    write_task(cpu, stream, &bytes, 0)
 }
 
-/// GetSizeMax: as Save.
-pub fn get_size_max(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    crate::win32::not_written(
-        cpu,
-        super::DLL.name,
-        "IPicture's IPersistStream::GetSizeMax",
-        E_NOTIMPL,
-    )
+/// GetSizeMax(this, size): what Save writes, the header and the file.
+pub fn get_size_max(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[this, size] = args else { unreachable!() };
+    let Some(id) = object(cpu, this) else {
+        return Some(E_INVALIDARG);
+    };
+    if size == 0 || !cpu.bus.guest_probe(size, 8, true) {
+        return Some(E_INVALIDARG);
+    }
+    let len = match file_of(cpu, id, "IPersistStream::GetSizeMax") {
+        Ok(file) => file.map_or(0, |f| f.len()),
+        Err(e) => return Some(e),
+    };
+    cpu.bus.guest_write_32(size, 8 + len as u32);
+    cpu.bus.guest_write_32(size + 4, 0);
+    Some(S_OK)
 }
 
 // IConnectionPointContainer.

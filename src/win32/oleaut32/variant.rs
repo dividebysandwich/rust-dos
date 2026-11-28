@@ -515,17 +515,9 @@ pub fn var_ui4_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if text == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(E_INVALIDARG);
     }
-    let mut units = Vec::new();
-    loop {
-        let at = text.wrapping_add(2 * units.len() as u32);
-        if !cpu.bus.guest_probe(at, 2, false) {
-            return Some(E_INVALIDARG);
-        }
-        match cpu.bus.guest_read_16(at) {
-            0 => break,
-            c => units.push(c),
-        }
-    }
+    let Some(units) = wide_z(cpu, text) else {
+        return Some(E_INVALIDARG);
+    };
     match ui4(&units) {
         Ok(n) => {
             cpu.bus.guest_write_32(out, n);
@@ -538,6 +530,175 @@ pub fn var_ui4_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn ui4(units: &[u16]) -> Result<u32, u32> {
     let n = parse_number(units).ok_or(DISP_E_TYPEMISMATCH)?;
     Ok(integer(n, 0, u32::MAX as i128)? as u32)
+}
+
+/// The Unicode string at `text` up to its zero, or None if it can't be
+/// read.
+fn wide_z(cpu: &mut Cpu, text: u32) -> Option<Vec<u16>> {
+    let mut units = Vec::new();
+    loop {
+        let at = text.wrapping_add(2 * units.len() as u32);
+        if !cpu.bus.guest_probe(at, 2, false) {
+            return None;
+        }
+        match cpu.bus.guest_read_16(at) {
+            0 => return Some(units),
+            c => units.push(c),
+        }
+    }
+}
+
+/// Put the value `v` changed to `vt` at `out`, `size` bytes of it: the
+/// Var<type>From<type> functions' work. `out` is left alone on an error.
+fn convert_to(cpu: &mut Cpu, v: &Val, vt: u16, flags: u32, out: u32, size: usize) -> u32 {
+    if !cpu.bus.guest_probe(out, size, true) {
+        return E_INVALIDARG;
+    }
+    match change(v, vt, flags) {
+        Ok(Out::Bits(_, b)) => {
+            cpu.bus.guest_write_bytes(out, &b.to_le_bytes()[..size]);
+            S_OK
+        }
+        Ok(_) => DISP_E_TYPEMISMATCH,
+        Err(e) => e,
+    }
+}
+
+/// Var<type>FromStr(text, lcid, flags, out): the string read as
+/// VarParseNumFromStr reads a number (in English (United States)'s
+/// formats, whatever the locale) and changed as VariantChangeType does.
+fn from_str(cpu: &mut Cpu, args: &[u32], vt: u16, size: usize) -> Option<u32> {
+    let &[text, _lcid, flags, out] = args else {
+        unreachable!()
+    };
+    if text == 0 {
+        return Some(E_INVALIDARG);
+    }
+    let Some(units) = wide_z(cpu, text) else {
+        return Some(E_INVALIDARG);
+    };
+    Some(convert_to(
+        cpu,
+        &Val::Str(units),
+        vt,
+        flags & 0xFFFF,
+        out,
+        size,
+    ))
+}
+
+/// VarI2FromStr(text, lcid, flags, out).
+pub fn var_i2_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    from_str(cpu, args, VT_I2, 2)
+}
+
+/// VarI4FromStr(text, lcid, flags, out).
+pub fn var_i4_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    from_str(cpu, args, VT_I4, 4)
+}
+
+/// VarR4FromStr(text, lcid, flags, out).
+pub fn var_r4_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    from_str(cpu, args, VT_R4, 4)
+}
+
+/// VarR8FromStr(text, lcid, flags, out).
+pub fn var_r8_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    from_str(cpu, args, VT_R8, 8)
+}
+
+/// VarCyFromStr(text, lcid, flags, out).
+pub fn var_cy_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    from_str(cpu, args, VT_CY, 8)
+}
+
+/// VarCyFromI4(value, out): the value times 10000, which always fits.
+pub fn var_cy_from_i4(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[value, out] = args else { unreachable!() };
+    Some(convert_to(
+        cpu,
+        &Val::Int(value as i32 as i64),
+        VT_CY,
+        0,
+        out,
+        8,
+    ))
+}
+
+/// VarI4FromR8(value, out): rounded half to even, DISP_E_OVERFLOW
+/// outside the range of a LONG.
+pub fn var_i4_from_r8(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[lo, hi, out] = args else { unreachable!() };
+    let f = f64::from_bits((hi as u64) << 32 | lo as u64);
+    Some(convert_to(cpu, &Val::Real(f), VT_I4, 0, out, 4))
+}
+
+/// VarBstrFrom<type>: a new BSTR of `v`'s text at `out`, as
+/// VariantChangeType makes it.
+fn to_bstr(cpu: &mut Cpu, v: Val, flags: u32, out: u32) -> Option<u32> {
+    if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
+        return Some(E_INVALIDARG);
+    }
+    let units = match change(&v, VT_BSTR, flags & 0xFFFF) {
+        Ok(Out::Str(units)) => units,
+        Ok(_) => return Some(DISP_E_TYPEMISMATCH),
+        Err(e) => return Some(e),
+    };
+    let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+    let s = super::bstr_of_bytes(cpu, &bytes);
+    if s == 0 {
+        return Some(crate::win32::com::E_OUTOFMEMORY);
+    }
+    cpu.bus.guest_write_32(out, s);
+    Some(S_OK)
+}
+
+/// VarBstrFromI2(value, lcid, flags, out).
+pub fn var_bstr_from_i2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[value, _lcid, flags, out] = args else {
+        unreachable!()
+    };
+    to_bstr(cpu, Val::Int(value as u16 as i16 as i64), flags, out)
+}
+
+/// VarBstrFromI4(value, lcid, flags, out).
+pub fn var_bstr_from_i4(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[value, _lcid, flags, out] = args else {
+        unreachable!()
+    };
+    to_bstr(cpu, Val::Int(value as i32 as i64), flags, out)
+}
+
+/// VarBstrFromR4(value, lcid, flags, out): "%.7G" of the value.
+pub fn var_bstr_from_r4(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[value, _lcid, _flags, out] = args else {
+        unreachable!()
+    };
+    let text = format_g(f32::from_bits(value) as f64, 7);
+    to_bstr(cpu, Val::Str(text.encode_utf16().collect()), 0, out)
+}
+
+/// VarBstrFromR8(value, lcid, flags, out): "%.15G" of the value.
+pub fn var_bstr_from_r8(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[lo, hi, _lcid, flags, out] = args else {
+        unreachable!()
+    };
+    let f = f64::from_bits((hi as u64) << 32 | lo as u64);
+    to_bstr(cpu, Val::Real(f), flags, out)
+}
+
+/// VarBstrFromCy(value, lcid, flags, out): the currency's digits, with
+/// as many decimals as it has (none for a whole number).
+pub fn var_bstr_from_cy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[lo, hi, _lcid, flags, out] = args else {
+        unreachable!()
+    };
+    to_bstr(
+        cpu,
+        Val::Cy(((hi as u64) << 32 | lo as u64) as i64),
+        flags,
+        out,
+    )
 }
 
 #[cfg(test)]

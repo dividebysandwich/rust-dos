@@ -215,6 +215,23 @@ pub fn ole_uninitialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     co_uninitialize(cpu, args)
 }
 
+/// CoDisconnectObject(object, reserved): the object's exports to other
+/// processes go (rpc.rs), and with them COM's references to it, as
+/// Windows drops its stub manager. Windows returns S_OK for an object it
+/// never exported, as for one it did. Wine first asks the object for
+/// IMarshal and leaves the work to its DisconnectObject; objects that
+/// marshal themselves aren't exported here, so that step isn't taken.
+pub fn co_disconnect_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[object, _reserved] = args else {
+        unreachable!()
+    };
+    if object == 0 {
+        return Some(E_INVALIDARG);
+    }
+    let released = super::rpc::disconnect(cpu, object);
+    release_all(cpu, S_OK, released.into_iter())
+}
+
 /// Call Release on each of `objects`, then return `value`.
 fn release_all(cpu: &mut Cpu, value: u32, objects: impl Iterator<Item = u32>) -> Option<u32> {
     call_each(cpu, value, RELEASE, objects)

@@ -1310,7 +1310,7 @@ mod tests {
         (114, 0x21C4_F6F9_14CC_F1AA), // the last error and TLS slots in the TIB, as Windows 98's
         (115, 0x3DE4_F58C_0828_F3E7), // VxD handles of DeviceIoControl
         (116, 0x331A_F2D2_3CFD_2C62), // DirectInput's Unicode interfaces
-        (117, 0x4BD9_66EE_BD99_A3E9), // OLEAUT32's standard font and picture objects
+        (117, 0x5856_9E92_1745_BFE9), // OLEAUT32's standard font and picture objects
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

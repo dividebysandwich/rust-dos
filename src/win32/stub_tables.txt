@@ -2097,6 +2097,7 @@ IRunningObjectTable_GetObject
 IRunningObjectTable_NoteChangeTime
 IRunningObjectTable_GetTimeOfLastChange
 IRunningObjectTable_EnumRunning
+CoDisconnectObject
 
 DLL DDRAW.DLL
 DllCanUnloadNow
@@ -3576,6 +3577,7 @@ SafeArrayPtrOfIndex
 SafeArrayCreateVector
 VariantCopyInd
 DispGetParam
+OaBuildVersion
 OleCreateFontIndirect
 IFont_QueryInterface
 IFont_AddRef
@@ -3618,6 +3620,60 @@ IFont_FindConnectionPoint
 IFont_InitNew
 IFont_LoadBag
 IFont_SaveBag
+IConnectionPoint_QueryInterface
+IConnectionPoint_AddRef
+IConnectionPoint_Release
+IConnectionPoint_GetConnectionInterface
+IConnectionPoint_GetConnectionPointContainer
+IConnectionPoint_Advise
+IConnectionPoint_Unadvise
+IConnectionPoint_EnumConnections
+OleLoadPicture
+OleCreatePictureIndirect
+IPicture_QueryInterface
+IPicture_AddRef
+IPicture_Release
+IPicture_get_Handle
+IPicture_get_hPal
+IPicture_get_Type
+IPicture_get_Width
+IPicture_get_Height
+IPicture_Render
+IPicture_set_hPal
+IPicture_get_CurDC
+IPicture_SelectPicture
+IPicture_get_KeepOriginalFormat
+IPicture_put_KeepOriginalFormat
+IPicture_PictureChanged
+IPicture_SaveAsFile
+IPicture_get_Attributes
+IPictureDisp_GetTypeInfoCount
+IPictureDisp_GetTypeInfo
+IPictureDisp_GetIDsOfNames
+IPictureDisp_Invoke
+IPicture_GetClassID
+IPicture_IsDirty
+IPicture_Load
+IPicture_Save
+IPicture_GetSizeMax
+IPicture_EnumConnectionPoints
+IPicture_FindConnectionPoint
+VarI2FromStr
+VarI4FromR8
+VarI4FromStr
+VarR4FromStr
+VarR8FromStr
+VarCyFromI4
+VarCyFromStr
+VarBstrFromI2
+VarBstrFromI4
+VarBstrFromR4
+VarBstrFromR8
+VarBstrFromCy
+DispInvoke
+OleIconToCursor
+LHashValOfNameSys
+LHashValOfNameSysA
 
 DLL ADVPACK.DLL
 IsNTAdmin

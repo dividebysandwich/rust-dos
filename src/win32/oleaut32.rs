@@ -13,6 +13,7 @@ mod connpt;
 mod desc;
 mod errorinfo;
 pub(crate) mod font;
+mod hash;
 mod invoke;
 pub(crate) mod model;
 mod msft;
@@ -369,6 +370,22 @@ static APIS: &[Api] = &[
         3,
         picture::find_connection_point,
     ),
+    stdcall("VarI2FromStr", 54, 4, variant::var_i2_from_str),
+    stdcall("VarI4FromR8", 61, 3, variant::var_i4_from_r8),
+    stdcall("VarI4FromStr", 64, 4, variant::var_i4_from_str),
+    stdcall("VarR4FromStr", 74, 4, variant::var_r4_from_str),
+    stdcall("VarR8FromStr", 84, 4, variant::var_r8_from_str),
+    stdcall("VarCyFromI4", 100, 2, variant::var_cy_from_i4),
+    stdcall("VarCyFromStr", 104, 4, variant::var_cy_from_str),
+    stdcall("VarBstrFromI2", 109, 4, variant::var_bstr_from_i2),
+    stdcall("VarBstrFromI4", 110, 4, variant::var_bstr_from_i4),
+    stdcall("VarBstrFromR4", 111, 4, variant::var_bstr_from_r4),
+    stdcall("VarBstrFromR8", 112, 5, variant::var_bstr_from_r8),
+    stdcall("VarBstrFromCy", 113, 5, variant::var_bstr_from_cy),
+    stdcall("DispInvoke", 30, 8, disp_invoke),
+    stdcall("OleIconToCursor", 415, 2, ole_icon_to_cursor),
+    stdcall("LHashValOfNameSys", 165, 3, hash::lhash_val_of_name_sys),
+    stdcall("LHashValOfNameSysA", 166, 3, hash::lhash_val_of_name_sys_a),
 ];
 
 /// The vtables, by their places in this list. ITypeLib's and ITypeInfo's
@@ -686,6 +703,7 @@ pub(super) const FONT_LOAD: u32 = 1;
 pub(super) const FONT_SAVE: u32 = 2;
 pub(super) const ADVISE: u32 = 3;
 pub(super) const PICTURE_LOAD: u32 = 4;
+pub(super) const PICTURE_SAVE: u32 = 5;
 
 /// A step of a task of the font and picture objects.
 pub fn objects_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
@@ -694,6 +712,7 @@ pub fn objects_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         FONT_LOAD => font::load_step(cpu, t, value),
         FONT_SAVE => font::save_step(cpu, t, value),
         ADVISE => connpt::advise_step(cpu, t, value),
+        PICTURE_SAVE => picture::save_step(cpu, t, value),
         _ => picture::load_step(cpu, t, value),
     }
 }
@@ -748,12 +767,38 @@ fn disp_get_ids_of_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(cpu, task::OLEAUT32, vec![method, info, names, count, ids], 0)
 }
 
+/// DispInvoke(this, info, member, flags, params, result, excepinfo,
+/// arg_err): ITypeInfo::Invoke of `info` with the same arguments, as
+/// Windows makes it.
+fn disp_invoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[this, info, member, flags, params, result, excepinfo, arg_err] = args else {
+        unreachable!()
+    };
+    let invoke_args = [info, this, member, flags, params, result, excepinfo, arg_err];
+    if typelib::info_of(cpu, info).is_some() {
+        return invoke::invoke(cpu, &invoke_args);
+    }
+    let Some(method) = super::ole32::method(cpu, info, 11) else {
+        return Some(super::com::E_INVALIDARG);
+    };
+    let mut vars = vec![method];
+    vars.extend_from_slice(&invoke_args);
+    task::start(cpu, task::OLEAUT32, vars, 0)
+}
+
+/// OleIconToCursor(instance, icon): a copy of the icon, as CopyCursor
+/// makes one, which is what Wine gives.
+fn ole_icon_to_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::user32::resource::copy_icon(cpu, &args[1..])
+}
+
 /// The task of the functions that call into the program:
-/// DispGetIDsOfNames calls the type's GetIDsOfNames and returns what it
+/// DispGetIDsOfNames and DispInvoke call the type's method, its address
+/// the first variable and its arguments the others, and return what it
 /// does.
 pub fn step(_: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.step {
-        0 => Next::call(t.var(0), &[t.var(1), t.var(2), t.var(3), t.var(4)], 1),
+        0 => Next::call(t.var(0), &t.vars[1..], 1),
         _ => Next::Done(value),
     }
 }
