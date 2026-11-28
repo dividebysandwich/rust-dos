@@ -763,6 +763,15 @@ pub(crate) struct Footprint {
 }
 
 impl Footprint {
+    /// The footprint of a unit that takes no texels: every pixel's level
+    /// is below every lodmin.
+    const NONE: Footprint = Footprint {
+        across: 0.0,
+        across_lod: NO_FOOTPRINT,
+        down: [0.0; 2],
+        step: [0.0; 2],
+    };
+
     /// The footprint of a row whose first pixel has `iters`, `itert` and
     /// `iterw`.
     pub(crate) fn new(q: &TmuParams, iters: i64, itert: i64, iterw: i64) -> Self {
@@ -1263,39 +1272,40 @@ macro_rules! variants {
     };
 }
 
-// V0-V7 are the pipelines of Quake's 3dfx renderers (lightmapped textures
-// in two units, blended or not, and the untextured ones), which other
-// Glide games share. V8 and V9 fix the two states observed in a 60-batch
-// Oni main-menu capture. C0 and C1 are 3dfx's OpenGL driver (`3DFXVGL.DLL`)
-// with one texture, which it gives TMU 1 while TMU 0 passes its colour
-// on: the texture times the iterated colour, with the iterated alpha or
-// the texture's times it. Oni draws its menu and its levels with these.
-// V10-V15 and C2 are 3dfx's Direct3D driver for the Voodoo2, which also
-// gives the texture to TMU 1 and has TMU 0 pass it on, modulated by the
-// iterated colour. V10-V14 are its textured states in a saved Omikron
-// scene, most drawn area first: the frame darkened by the colour, opaque,
-// blended by alpha with fog, opaque with fog, and added. V15 darkens
-// without a texture, and C2 covers the driver's other blends, fog and
-// formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel alone,
-// which it draws its terrain, units and lighting with, opaque or
-// blended, in its palettized, intensity and 16-bit formats. V16-V19 and
-// C4 are the built-in Windows' Direct3D HAL (`win32::ddraw::d3d::hal`)
-// on a Voodoo3, which gives the texture to TMU 0 and leaves TMU 1's
-// texel unused (TMU 0's combine sets zero_other). V16 and V17 are its
-// textured states with the most area in Omikron's first dialogue, with
-// two alpha blends, and V18 and V19 the same blends untextured; C4
-// covers its other blends, fog modes, filtering and texel formats. A
-// Banshee has one unit, and of these only the untextured V18 and V19
-// take its triangles (#562).
+// V0-V3, V5 and V6 are the pipelines of Quake's 3dfx renderers (textures in
+// TMU 0 alone and lightmapped ones in two units, blended or not, and the
+// untextured ones), which other Glide games share. V8 and V9 fix the two
+// states observed in a 60-batch Oni main-menu capture. C0 and C1 are 3dfx's
+// OpenGL driver (`3DFXVGL.DLL`) with one texture, which it gives TMU 1
+// while TMU 0 passes its colour on: the texture times the iterated colour,
+// with the iterated alpha or the texture's times it. Oni draws its menu and
+// its levels with these. V10-V15 and C2 are 3dfx's Direct3D driver for the
+// Voodoo2, which also gives the texture to TMU 1 and has TMU 0 pass it on,
+// modulated by the iterated colour. V10-V14 are its textured states in a
+// saved Omikron scene, most drawn area first: the frame darkened by the
+// colour, opaque, blended by alpha with fog, opaque with fog, and added.
+// V15 darkens without a texture, and C2 covers the driver's other blends,
+// fog and formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel
+// alone, which it draws its terrain, units and lighting with, opaque or
+// blended, in its palettized, intensity and 16-bit formats. V16-V19 and C4
+// are the built-in Windows' Direct3D HAL (`win32::ddraw::d3d::hal`), which
+// gives the texture to TMU 0 and leaves TMU 1's texel unused (TMU 0's
+// combine sets zero_other). V16 and V17 are its textured states with the
+// most area in Omikron's first dialogue, with two alpha blends, and V18 and
+// V19 the same blends untextured; C4 covers its other blends, fog modes,
+// filtering and texel formats.
+//
+// A triangle whose TMU 0 ignores TMU 1 draws with one unit (`units`), so
+// V0, V1, V16, V17, C3 and C4 are one-unit variants: they take those
+// triangles whatever TMU 1 holds, on a Voodoo2 or Voodoo3 as on a
+// Banshee, which has one unit.
 variants! {
-    V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
-    V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
+    V0: 1, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0];
+    V1: 1, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0];
     V2: 2, full[0x90110, 0x0D42_0009, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1A0F];
     V3: 0, full[0x90110, 0x0542_610A, 0x0004_5110, 0, 0, 0];
-    V4: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1A0F];
     V5: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8844_230F, 0x8C26_130F];
     V6: 2, full[0x90110, 0x0C00_0005, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1C0F];
-    V7: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
     V8: 2, full[0x80100, 0x0048_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F];
     V9: 2, full[0x80100, 0x0142_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1ACF];
     V10: 2, full[0x10910, 0x0000_2401, 0x0000_601E, 0, 0x0000_0507, 0x0824_1507];
@@ -1304,15 +1314,29 @@ variants! {
     V13: 2, full[0x10910, 0x0000_2401, 0x0000_040E, 0x41, 0x0000_0507, 0x0824_1507];
     V14: 2, full[0x10910, 0x0000_2401, 0x0000_441E, 0, 0x0000_0507, 0x0824_1507];
     V15: 0, full[0x10900, 0, 0x0000_601E, 0, 0, 0];
-    V16: 2, full[0x90110, 0x0000_2401, 0x0004_4410, 0, 0x0C26_1A0F, 0x0422_10C0];
-    V17: 2, full[0x90110, 0x0000_2401, 0x0004_6010, 0, 0x0C26_1A0F, 0x0422_10C0];
+    V16: 1, full[0x90110, 0x0000_2401, 0x0004_4410, 0, 0x0C26_1A0F, 0];
+    V17: 1, full[0x90110, 0x0000_2401, 0x0004_6010, 0, 0x0C26_1A0F, 0];
     V18: 0, full[0x80100, 0, 0x0004_6010, 0, 0, 0];
     V19: 0, full[0x80100, 0, 0x0004_4410, 0, 0, 0];
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
     C2: 2, combine_only[0x0000_2401, 0x0000_0507, 0x0824_1507];
-    C3: 2, combine_only[0x0C00_0035, 0x0C26_150F, 0x0422_10C0];
-    C4: 2, combine_only[0x0000_2401, 0x0C26_1A0F, 0x0422_10C0];
+    C3: 1, combine_only[0x0C00_0035, 0x0C26_150F, 0];
+    C4: 1, combine_only[0x0000_2401, 0x0C26_1A0F, 0];
+}
+
+/// The texture units a triangle with `texcount` units and `st`'s registers
+/// draws with. TMU 1's texel goes only to TMU 0, so where TMU 0 draws and
+/// doesn't read it (its combine reads neither c_other nor a_other) or
+/// sends its configuration instead, the triangle is a one-unit one: TMU
+/// 1's mode then neither picks the variant nor costs its iterators, and
+/// the picture is the same, since TMU 0 gets a c_other of 0 it doesn't
+/// read.
+pub fn units(st: &RasterState, texcount: usize) -> usize {
+    let alone = st.tmu[0].as_ref().is_some_and(|t| {
+        t.lodmin < 8 << 8 && (st.send_config.is_some() || !uses_other(t.mode))
+    });
+    if texcount >= 2 && alone { 1 } else { texcount }
 }
 
 /// The variant a triangle with `texcount` units and `st`'s registers can be
@@ -1395,7 +1419,12 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         let q = &p.tmu[i];
         *t = (at64(q.starts, q.dsdy, q.dsdx), at64(q.startt, q.dtdy, q.dtdx), at64(q.startw, q.dwdy, q.dwdx));
     }
+    // A unit the triangle doesn't draw with (`units`) has none to work
+    // out.
     let fp: [Footprint; 2] = std::array::from_fn(|i| {
+        if i >= TMUS {
+            return Footprint::NONE;
+        }
         let (s, tc, w) = tex[i];
         Footprint::new(&p.tmu[i], s, tc, w)
     });
@@ -1413,12 +1442,6 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         (q.starts, q.startt, q.startw, q.dsdx, q.dtdx, q.dwdx, q.dsdy, q.dtdy, q.dwdy)
     };
     let same_stw = TMUS >= 2 && stw(w0) == stw(w1);
-    // TMU 1's texel goes only to TMU 0: where TMU 0 draws and doesn't read
-    // it, or sends its configuration instead, nothing does.
-    let tmu1_read = TMUS >= 2
-        && !st.tmu[0].as_ref().is_some_and(|t| {
-            t.lodmin < 8 << 8 && (st.send_config.is_some() || !uses_other(m.tex[0]))
-        });
 
     for x in startx..stopx {
         if let Some(depthval) = row.begin(x, y, iterz, iterw, stipple, stats) {
@@ -1428,7 +1451,7 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
             let n = x - startx;
             // TMU 1's footprint, where TMU 0's is the same.
             let mut shared = None;
-            if tmu1_read
+            if TMUS >= 2
                 && let Some(t) = &st.tmu[1]
                 && t.lodmin < 8 << 8
             {

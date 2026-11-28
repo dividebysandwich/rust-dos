@@ -49,6 +49,17 @@ fn indexed_scanlines_preserve_generic_output_counters_and_stipple() {
 }
 
 #[test]
+fn two_unit_variants_are_for_a_tmu_0_that_reads_tmu_1() {
+    // A triangle whose TMU 0 ignores TMU 1 draws with one unit (`units`),
+    // so a two-unit variant for one would never be picked.
+    for &(count, fixed) in VARIANTS {
+        if count == 2 {
+            assert!(uses_other(fixed[4].1), "{fixed:08X?}");
+        }
+    }
+}
+
+#[test]
 fn invalid_variant_indices_keep_the_generic_fallback() {
     let regs = VARIANTS[0].1.map(|(_, value)| value);
     for count in 0..4 {

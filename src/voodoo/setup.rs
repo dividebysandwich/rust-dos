@@ -168,9 +168,7 @@ impl Voodoo {
                 lodbase,
             };
         }
-        let st = self.raster_state(dest, texcount);
-        #[cfg(all(test, feature = "sdl"))]
-        super::raster::scene_profile::record(&st, texcount, verts);
+        let mut st = self.raster_state(dest, texcount);
         if self.recording() {
             self.mirror_sync();
             if self.banshee.is_some() && texcount > 0 {
@@ -183,6 +181,15 @@ impl Voodoo {
                 mirror.triangle(&st, &p, verts, texcount, &self.tmu, self.reg[STIPPLE]);
             }
         }
+        // The software rasterizer leaves out the units the triangle doesn't
+        // read, which also keeps texture downloads to them from waiting on
+        // it (`tmu_in_use`). The GL mirror above draws with all of them.
+        let texcount = super::raster::units(&st, texcount);
+        for t in &mut st.tmu[texcount..] {
+            *t = None;
+        }
+        #[cfg(all(test, feature = "sdl"))]
+        super::raster::scene_profile::record(&st, texcount, verts);
         let access = self.access(|layout| backlog::triangle(layout, &st, &verts));
         let rotate = self.reg[FBZ_MODE] & (1 << 2 | 1 << 12) == 1 << 2;
         let spills = backlog::spills(&st, &verts, self.fbi.height);

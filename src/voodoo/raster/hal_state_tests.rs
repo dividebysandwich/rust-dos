@@ -4,8 +4,8 @@ use super::*;
 /// The registers of the built-in Direct3D HAL's triangles with the most
 /// area in Omikron's first dialogue on a Voodoo3, as the card has them:
 /// fbzMode, fbzColorPath, alphaMode, fogMode and the textureMode of TMU 0
-/// and TMU 1, and the units drawn with. Every one of them was drawn by
-/// the generic pipeline before V16-V19.
+/// and TMU 1, and the units drawn with (`units`: TMU 0 ignores TMU 1).
+/// Every one of them was drawn by the generic pipeline before V16-V19.
 const DIALOGUE: [([u32; 6], usize, usize); 4] = [
     (
         [
@@ -16,7 +16,7 @@ const DIALOGUE: [([u32; 6], usize, usize); 4] = [
             0x0C26_1A0F,
             0x0422_10C0,
         ],
-        2,
+        1,
         VariantId::V16 as usize,
     ),
     (
@@ -28,7 +28,7 @@ const DIALOGUE: [([u32; 6], usize, usize); 4] = [
             0x0C26_1A0F,
             0x0422_10C0,
         ],
-        2,
+        1,
         VariantId::V17 as usize,
     ),
     (
@@ -46,11 +46,10 @@ const DIALOGUE: [([u32; 6], usize, usize); 4] = [
 #[test]
 fn the_hals_dialogue_states_take_their_variants() {
     for (regs, tmus, id) in DIALOGUE {
-        assert_eq!(
-            variant(&two_unit_state(regs), tmus),
-            Some(id),
-            "{regs:08X?}"
-        );
+        let st = two_unit_state(regs);
+        let card = if tmus == 0 { 0 } else { 2 };
+        assert_eq!(units(&st, card), tmus, "{regs:08X?}");
+        assert_eq!(variant(&st, tmus), Some(id), "{regs:08X?}");
     }
 }
 
@@ -60,7 +59,7 @@ fn the_hals_variants_draw_as_the_generic_code() {
         for regs in dynamic(state) {
             assert_eq!(variant(&two_unit_state(regs), tmus), Some(id));
             same_as_generic(regs, tmus, id);
-            if tmus == 2 {
+            if tmus == 1 {
                 same_as_generic(regs, tmus, VariantId::C4 as usize);
             }
         }
@@ -84,10 +83,12 @@ fn the_hals_combine_variant_takes_its_other_states() {
     let mut alpha_failed = 0;
     for state in states {
         for regs in dynamic(state) {
-            let index = variant(&two_unit_state(regs), 2);
+            let st = two_unit_state(regs);
+            assert_eq!(units(&st, 2), 1, "{regs:08X?}");
+            let index = variant(&st, 1);
             assert_eq!(index, Some(VariantId::C4 as usize), "{regs:08X?}");
-            same_as_generic(regs, 2, VariantId::C4 as usize);
-            alpha_failed += draw_rows(&two_unit_state(regs), 2, None).1.afunc_fail;
+            same_as_generic(regs, 1, VariantId::C4 as usize);
+            alpha_failed += draw_rows(&st, 1, None).1.afunc_fail;
         }
     }
     // The alpha test leaves some pixels out, so the comparison covers it.
