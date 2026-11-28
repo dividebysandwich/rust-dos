@@ -207,6 +207,35 @@ impl Bus {
         self.run_to_voodoo(dst, bytes.len(), RunSource::Bytes(bytes))
     }
 
+    /// Write the dword `value` at `addr` as `write_32` does where `addr`
+    /// is in a Voodoo Graphics' or Voodoo2's window, and return true;
+    /// false, having written nothing, elsewhere. Glide's triangle setup
+    /// writes the card's registers a dword at a time from translated code,
+    /// tens of thousands of them a frame, and this goes to the card
+    /// without trying first the places a write there can't reach.
+    pub(crate) fn dword_to_voodoo(&mut self, addr: usize, value: u32) -> bool {
+        if !self.voodoo.as_ref().is_some_and(|v| v.banshee.is_none()) {
+            return false;
+        }
+        let Some(offset) = self.voodoo_at(addr) else {
+            return false;
+        };
+        // `write_32` gives these the dwords of theirs before the card.
+        if self.vbe.lfb_offset(addr, 4).is_some()
+            || self.s3_mmio(addr).is_some()
+            || self.mach64_mmio(addr).is_some()
+            || self.toadforce_at(addr).is_some()
+        {
+            return false;
+        }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
+        if self.observe.on {
+            self.observe.mapped_write(addr, self.ram.len());
+        }
+        self.voodoo_write_32(offset, value);
+        true
+    }
+
     /// `move_to_voodoo` and `write_to_voodoo`: `len` bytes from `src` at
     /// `dst`.
     fn run_to_voodoo(&mut self, dst: usize, len: usize, src: RunSource<'_>) -> bool {
