@@ -4871,3 +4871,158 @@ fn create_surface_makes_a_surface_over_the_programs_memory() {
     assert_eq!(r[11], DDERR_INVALIDCAPS, "complex mipmap");
     assert_eq!(r[12], 0, "DXT1 with DDSD_PITCH 0");
 }
+
+const S4_SET_SURFACE_DESC: u32 = 39;
+/// The DDSURFACEDESC2s SetSurfaceDesc is given: the program's memory
+/// alone, the memory with a width and pitch other than the level's, and
+/// the memory with caps.
+const SET_MEMORY: u32 = DESC;
+const SET_WIDER: u32 = ENTRIES;
+const SET_CAPS: u32 = ENTRIES + 0x80;
+/// The mipmap's top level through IDirectDrawSurface4.
+const TOP4: u32 = CLIPPER;
+
+/// IDirectDrawSurface4's SetSurfaceDesc on the levels of a 4x4 system
+/// memory mipmap of two levels: the second level and the top level
+/// given the program's memory, the second level given a width it
+/// hasn't got, then caps, and the second level locked.
+fn mipmap_user_memory_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    mipmap_desc(&mut d, DDSCAPS_SYSTEMMEMORY, 4, 2);
+    put32(&mut d, SET_MEMORY, 124);
+    put32(&mut d, SET_MEMORY + 0x04, DDSD_LPSURFACE);
+    put32(&mut d, SET_WIDER, 124);
+    put32(
+        &mut d,
+        SET_WIDER + 0x04,
+        DDSD_LPSURFACE | DDSD_WIDTH | DDSD_PITCH,
+    );
+    put32(&mut d, SET_WIDER + 0x0C, 4);
+    put32(&mut d, SET_WIDER + 0x10, 8);
+    put32(&mut d, SET_CAPS, 124);
+    put32(&mut d, SET_CAPS + 0x04, DDSD_LPSURFACE | DDSD_CAPS);
+    put32(&mut d, SET_CAPS + 0x68, DDSCAPS_TEXTURE);
+    put32(&mut d, LOCKED, 124);
+    put(&mut d, KEY, &IID_IDIRECTDRAWSURFACE4);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        for offset in [SET_MEMORY, SET_WIDER, SET_CAPS] {
+            a.mov(dword_ptr(l.at(offset + 0x24)), l.at(PIXELS) as u32)?;
+        }
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let create = [Arg::At(FX), Arg::At(SOURCE), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &create)?;
+        let attached = [Arg::At(LEVEL_CAPS), Arg::At(OFFSCREEN)];
+        c.com(a, l, SOURCE, S_GET_ATTACHED_SURFACE, &attached)?;
+        for (from, to) in [(OFFSCREEN, QUERIED), (SOURCE, TOP4)] {
+            c.com(a, l, from, S_QUERY_INTERFACE, &[Arg::At(KEY), Arg::At(to)])?;
+        }
+        for (surface, desc) in [
+            (QUERIED, SET_MEMORY),
+            (TOP4, SET_MEMORY),
+            (QUERIED, SET_WIDER),
+            (QUERIED, SET_CAPS),
+        ] {
+            let set = [Arg::At(desc), Arg::I(0)];
+            c.com(a, l, surface, S4_SET_SURFACE_DESC, &set)?;
+        }
+        let lock = [Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)];
+        c.com(a, l, QUERIED, S_LOCK, &lock)?;
+        c.com(a, l, QUERIED, S_UNLOCK, &[Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+/// A level of a system memory mipmap takes the program's memory as it
+/// is, as Demolition Racer has its track's textures' levels take
+/// theirs before it loads them into video memory. A size other than
+/// the level's is turned down, as Wine does, though Windows takes it
+/// (#2207); caps are turned down as on Windows (Wine's
+/// `test_set_surface_desc`).
+#[test]
+fn set_surface_desc_gives_a_mipmap_level_the_programs_memory() {
+    let (program, data) = mipmap_user_memory_program();
+    let mut cpu = machine("mipmap_user_memory", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 13);
+    assert_eq!(r[2..6], [0; 4], "SetCooperativeLevel to QueryInterface");
+    assert_eq!(r[6], 0, "QueryInterface of the top level");
+    assert_eq!(r[7], 0, "the second level's memory");
+    assert_eq!(r[8], 0, "the top level's memory");
+    assert_eq!(r[9], DDERR_INVALIDPARAMS, "a width other than the level's");
+    assert_eq!(r[10], DDERR_INVALIDCAPS, "caps");
+    assert_eq!(r[11..13], [0; 2], "Lock and Unlock");
+    // The second level keeps its 2x2 size and has the program's pixels.
+    assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x08), 2);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x0C), 2);
+}
+
+/// The DDSURFACEDESC2 that gives the back buffer the program's memory,
+/// with a pitch of 64 bytes, and the one Lock fills for the back buffer.
+const SET_BACK: u32 = DESC;
+const BACK_LOCKED: u32 = ENTRIES;
+
+/// IDirectDraw4: an offscreen flip chain of 4x2 32-bit surfaces in
+/// system memory with one back buffer, the back buffer given the
+/// program's memory with a pitch of 64, a flip, the front buffer locked
+/// (at LOCKED) and the back buffer locked (at BACK_LOCKED), then the
+/// chain released.
+fn flip_user_memory_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    let caps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_BACKBUFFERCOUNT;
+    user_memory_desc(&mut d, FX, 124, flags, caps);
+    put32(&mut d, FX + 0x14, 1);
+    put32(&mut d, SET_BACK, 124);
+    put32(&mut d, SET_BACK + 0x04, DDSD_LPSURFACE | DDSD_PITCH);
+    put32(&mut d, SET_BACK + 0x10, 64);
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, LOCKED, 124);
+    put32(&mut d, BACK_LOCKED, 124);
+    put(&mut d, KEY, &IID_IDIRECTDRAW4);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        a.mov(dword_ptr(l.at(SET_BACK + 0x24)), l.at(PIXELS) as u32)?;
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let query = [Arg::At(KEY), Arg::At(QUERIED)];
+        c.com(a, l, DD, S_QUERY_INTERFACE, &query)?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, QUERIED, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let create = [Arg::At(FX), Arg::At(FRONT), Arg::I(0)];
+        c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        let attached = [Arg::At(CAPS), Arg::At(BACK)];
+        c.com(a, l, FRONT, S_GET_ATTACHED_SURFACE, &attached)?;
+        let set = [Arg::At(SET_BACK), Arg::I(0)];
+        c.com(a, l, BACK, S4_SET_SURFACE_DESC, &set)?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        for (surface, desc) in [(FRONT, LOCKED), (BACK, BACK_LOCKED)] {
+            let lock = [Arg::I(0), Arg::At(desc), Arg::I(1), Arg::I(0)];
+            c.com(a, l, surface, S_LOCK, &lock)?;
+            c.com(a, l, surface, S_UNLOCK, &[Arg::I(0)])?;
+        }
+        c.com(a, l, BACK, S_RELEASE, &[])?;
+        c.com(a, l, FRONT, S_RELEASE, &[])?;
+        finish(a, l)
+    })
+}
+
+/// A flip moves the program's memory that SetSurfaceDesc gave the back
+/// buffer to the front buffer, with its pitch, and the buffer that had
+/// it gets the front buffer's own pixels back.
+#[test]
+fn flip_moves_the_programs_memory_with_its_pitch() {
+    let (program, data) = flip_user_memory_program();
+    let mut cpu = machine("flip_user_memory", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 12);
+    assert_eq!(r[2..12], [0; 10], "QueryInterface to the last Unlock");
+    assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x10), 64);
+    let back = peek(&cpu, data + BACK_LOCKED + 0x24);
+    assert_ne!(back, data + PIXELS);
+    assert_ne!(back, 0);
+    assert_eq!(peek(&cpu, data + BACK_LOCKED + 0x10), 16);
+}

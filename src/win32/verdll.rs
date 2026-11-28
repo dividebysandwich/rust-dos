@@ -21,7 +21,7 @@
 
 use super::stubs::{Api, Conv, Dll};
 use super::version::WindowsVersion;
-use super::{kernel32, process};
+use super::kernel32;
 use crate::cpu::Cpu;
 
 pub static DLL: Dll = Dll {
@@ -79,7 +79,7 @@ const ERROR_BAD_PATHNAME: u32 = 161;
 const ERROR_RESOURCE_DATA_NOT_FOUND: u32 = 1812;
 
 fn set_error(cpu: &mut Cpu, code: u32) {
-    process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
 }
 
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -421,6 +421,10 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
 /// dwFileType for a DLL and a driver.
 const VOS_DOS_WINDOWS16: u32 = 0x0001_0001;
 const VOS_DOS_WINDOWS32: u32 = 0x0001_0004;
+/// dwFileOS of Windows 98 SE's REGSVR32.EXE, an NT file, and
+/// dwFileType for a program.
+const VOS_NT_WINDOWS32: u32 = 0x0004_0004;
+const VFT_APP: u32 = 1;
 const VFT_DLL: u32 = 2;
 const VFT_DRV: u32 = 3;
 
@@ -437,6 +441,9 @@ pub(crate) fn builtin16_version(file: &str, windows: WindowsVersion) -> Vec<u8> 
         "DISPLAY" => (VFT_DRV, 4),
         "SYSTEM" => (VFT_DRV, 7),
         "SOUND" => (VFT_DRV, 9),
+        // VFT2_DRV_INSTALLABLE: DirectX's DDRAW16.DLL (directx_files.rs),
+        // as Windows 98 SE's is.
+        "DDRAW16" => (VFT_DRV, 8),
         _ => (VFT_DLL, 0),
     };
     write_ansi(&builtin_node(file, base, windows, VOS_DOS_WINDOWS16, kind))
@@ -456,10 +463,19 @@ fn builtin_node(
     // DirectX the registry gives (version.rs): DirectX 8.0a and 8.1 give
     // the DLLs of their runtime their own version, as DxDiag shows them
     // on Windows 98 with 8.1 (DDRAW, DSOUND and DINPUT 4.08.01.0881).
+    // DirectX's setups compare their files with these and replace those
+    // that are missing or no newer than their own, so the files of
+    // DirectX that have no functions here (directx_files.rs) have this
+    // version too.
     let directx = super::version::directx(windows).file;
     let version: [u16; 4] = match base.to_ascii_uppercase().as_str() {
         "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" | "D3D8" | "DINPUT8" | "DPNET" => directx,
         "DMUSIC" | "DMIME" | "DMLOADER" | "DMSTYLE" | "DMBAND" | "DMCOMPOS" => directx,
+        "D3DIM" | "D3DIM700" | "DDRAW16" | "DDHELP" => directx,
+        // DirectX 7 leaves DirectX 6.1's D3DRM.DLL as it is: Windows 98
+        // SE and a Windows 95 OSR2.5 machine with DirectX 7 both have
+        // 4.06.02.0436, newer than DirectX 3's and 5's setups' own.
+        "D3DRM" => [4, 6, 2, 436],
         // DirectX 5 to 7 leave DirectX 3's DPLAY.DLL as it is: Windows 98
         // SE and a Windows 95 machine with DirectX 7 both have
         // 4.03.00.1096, of July 1997.
@@ -476,11 +492,14 @@ fn builtin_node(
         // DirectX 6.1's DirectShow, as Windows 98 SE has it.
         "QUARTZ" => [6, 1, 5, 319],
         "AMSTREAM" => [6, 1, 5, 217],
+        // Windows 98 SE's REGSVR32.EXE, a file of Windows 2000's.
+        "REGSVR32" => [5, 0, 1586, 1],
         _ => [4, 0, 0, 950],
     };
     let text = match version {
         [4, 0, 0, 950] => "4.00.950".to_string(),
         [5, 0, 1693, 1] => "5.00.1693.1".to_string(),
+        [5, 0, 1586, 1] => "5.00.1586.1".to_string(),
         [4, 3, 0, 1998] => "4.03.1998".to_string(),
         [4, 10, 0, 1998] => "4.10.1998".to_string(),
         [a, b, c, d] => format!("{}.{:02}.{:02}.{:04}", a, b, c, d),
@@ -561,6 +580,34 @@ pub(super) fn builtin_version(name: &str, windows: WindowsVersion) -> Vec<u8> {
     match builtin_resource(name, windows) {
         Resource::Unicode(b) | Resource::Ansi(b) => b,
     }
+}
+
+/// The version resource of the built-in program `name` (REGSVR32.EXE),
+/// as its file in the system directory has it (dll_files.rs). Windows
+/// 98 SE's REGSVR32.EXE is 5.00.1586.1, a VFT_APP of VOS_NT_WINDOWS32,
+/// and setups and Wine's version tests read it.
+pub(super) fn builtin_program_version(name: &str, windows: WindowsVersion) -> Vec<u8> {
+    let base = name.trim_end_matches(".EXE").trim_end_matches(".exe");
+    write_unicode(&builtin_node(
+        name,
+        base,
+        windows,
+        VOS_NT_WINDOWS32,
+        (VFT_APP, 0),
+    ))
+}
+
+/// The version resource of DirectX's 32-bit file `name` (D3DIM.DLL,
+/// DDHELP.EXE) that the system directory shows (directx_files.rs): a
+/// VFT_DLL or, for a program, a VFT_APP of VOS_DOS_WINDOWS32, with the
+/// version of the DirectX the registry gives.
+pub(super) fn directx_file_version(name: &str, windows: WindowsVersion) -> Vec<u8> {
+    let (base, kind) = match name.split_once('.') {
+        Some((base, ext)) if ext.eq_ignore_ascii_case("EXE") => (base, VFT_APP),
+        Some((base, _)) => (base, VFT_DLL),
+        None => (name, VFT_DLL),
+    };
+    write_unicode(&builtin_node(name, base, windows, VOS_DOS_WINDOWS32, (kind, 0)))
 }
 
 /// The version resource of the file `name` names: a file on disk, found
@@ -1306,6 +1353,11 @@ mod tests {
                 let found = query(resource.bytes(), key, true).unwrap();
                 assert_eq!(found.text.unwrap(), version, "{name} {windows:?}");
             }
+            // D3DRM.DLL is DirectX 6.1's, which DirectX 3's setup, with
+            // its own 4.03.00.1096, leaves as it is.
+            let resource = builtin_resource("D3DRM.DLL", windows);
+            let found = query(resource.bytes(), key, true).unwrap();
+            assert_eq!(found.text.unwrap(), b"4.06.02.0436\0", "{windows:?}");
         }
     }
 }

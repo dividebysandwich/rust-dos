@@ -517,6 +517,7 @@ EnumResourceTypesW
 EnumResourceNamesW
 EnumResourceLanguagesA
 EnumResourceLanguagesW
+DeviceIoControl
 
 DLL ADVAPI32.DLL
 InitializeSecurityDescriptor
@@ -568,6 +569,7 @@ GetTokenInformation
 OpenThreadToken
 RegeditMain
 SetThreadToken
+Regsvr32Main
 
 DLL MSVCRT.DLL
 __getmainargs
@@ -1679,6 +1681,7 @@ NotepadWndProc
 SendMessage16
 UserYield16
 RestoreDefaultPalette
+ExitWindows16
 
 DLL GDI32.DLL
 GetStockObject
@@ -2474,6 +2477,11 @@ DID_Poll
 DID_SendDeviceData
 DID_EnumEffectsInFile
 DID_WriteEffectToFile
+DirectInputCreateW
+DIW_EnumDevices
+DIDW_EnumObjects
+DIDW_GetObjectInfo
+DIDW_GetDeviceInfo
 
 DLL WINMM.DLL
 timeGetTime
@@ -4336,6 +4344,10 @@ DID8_WriteEffectToFile
 DID8_BuildActionMap
 DID8_SetActionMap
 DID8_GetImageInfo
+DI8W_EnumDevices
+DID8W_EnumObjects
+DID8W_GetObjectInfo
+DID8W_GetDeviceInfo
 
 DLL MSACM32.DLL
 acmDriverAddA
@@ -6805,6 +6817,9 @@ lc_time_c 512
 
 VARS DDRAW.DLL
 IsLostCache 4096
+
+VARS DPLAYX.DLL
+providerGuids 32
 
 VARS GLIDE3X.DLL
 context 64

@@ -90,10 +90,13 @@ static APIS: &[Api] = &[
     stdcall("RegeditMain", 0, 1, super::regedit::main),
     // Windows Installer's MSIEXEC.EXE calls it; Windows 98 fails it.
     stdcall("SetThreadToken", 296, 2, not_implemented),
+    // C:\WINDOWS\SYSTEM\REGSVR32.EXE: its work (regsvr32.rs).
+    stdcall("Regsvr32Main", 0, 2, super::regsvr32::main),
 ];
 
 /// The address of ADVAPI32's function `name` in the image a process
-/// started now gets, for a program file the system makes (REGEDIT.EXE).
+/// started now gets, for a program file the system makes (REGEDIT.EXE,
+/// REGSVR32.EXE).
 pub(super) fn address_for_new(bus: &crate::bus::Bus, name: &str) -> u32 {
     let dll = super::stubs::DLLS
         .iter()
@@ -143,7 +146,7 @@ fn reg_not_implemented(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// A function Windows 95 has only as a stub that fails.
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+    super::set_last_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
     Some(FALSE)
 }
 
@@ -155,7 +158,7 @@ fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// and give up on the key when the descriptor fails (InstallShield 5's
 /// engine).
 fn succeeds_not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+    super::set_last_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
     Some(TRUE)
 }
 
@@ -715,7 +718,7 @@ fn get_user_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let need = name.len() as u32 + 1;
     if room < need {
         write_32(cpu, size, need);
-        super::process(cpu).last_error = ERROR_INSUFFICIENT_BUFFER;
+        super::set_last_error(cpu, ERROR_INSUFFICIENT_BUFFER);
         return Some(FALSE);
     }
     write_string(cpu, buffer, &name);

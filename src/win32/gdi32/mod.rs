@@ -467,7 +467,7 @@ pub fn gdi(cpu: &mut Cpu) -> &mut State {
 const ERROR_NOACCESS: u32 = 998;
 
 pub fn set_error(cpu: &mut Cpu, code: u32) {
-    super::process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
 }
 
 fn current_pid(cpu: &Cpu) -> u32 {

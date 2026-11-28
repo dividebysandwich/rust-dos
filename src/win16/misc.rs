@@ -8,6 +8,7 @@
 use super::builtin::{Def, register, rust, win32};
 use super::global::{HeapItem, HeapPlace};
 use super::lz;
+use super::notify;
 use super::thunk;
 use super::user::{P_MISC, P_WORDS};
 use crate::cpu::Cpu;
@@ -123,8 +124,8 @@ pub static TOOLHELP: Def = Def {
         rust("StackTraceNext", 68, "p", zero),
         rust("SystemHeapInfo", 71, "p", system_heap_info),
         rust("MemManInfo", 72, "p", mem_man_info),
-        rust("NotifyRegister", 73, "wSw", one),
-        rust("NotifyUnregister", 74, "w", one),
+        rust("NotifyRegister", 73, "wSw", notify::notify_register),
+        rust("NotifyUnregister", 74, "w", notify::notify_unregister),
         rust("InterruptRegister", 75, "wS", one),
         rust("InterruptUnRegister", 76, "w", one),
         rust("TerminateApp", 77, "ww", zero),

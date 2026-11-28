@@ -310,14 +310,13 @@ pub(super) fn get_console_cp(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// SetStdHandle(which, handle): STD_INPUT_HANDLE, STD_OUTPUT_HANDLE or
 /// STD_ERROR_HANDLE (-10, -11, -12) is `handle` from now on.
 pub(super) fn set_std_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let process = crate::win32::process(cpu);
     match args[0] as i32 {
         n @ -12..=-10 => {
-            process.std[(-10 - n) as usize] = args[1];
+            crate::win32::process(cpu).std[(-10 - n) as usize] = args[1];
             Some(TRUE)
         }
         _ => {
-            process.last_error = ERROR_INVALID_HANDLE;
+            crate::win32::set_last_error(cpu, ERROR_INVALID_HANDLE);
             Some(FALSE)
         }
     }

@@ -3,7 +3,6 @@
 //! EnumPortsA). The ports are those Windows 98 SE lists on a machine
 //! without printers or a network.
 
-use super::process;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -118,6 +117,6 @@ fn enum_ports_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn fail(cpu: &mut Cpu, code: u32) -> Option<u32> {
-    process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
     Some(0)
 }

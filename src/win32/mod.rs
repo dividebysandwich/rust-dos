@@ -27,6 +27,7 @@ mod ddraw;
 pub use ddraw::is_lost_cache;
 mod dinput;
 pub(crate) mod directories;
+mod directx_files;
 pub mod dll_files;
 mod forwarders;
 mod dmusic;
@@ -67,6 +68,7 @@ mod pif;
 mod advpack;
 pub(crate) mod realmode;
 mod regedit;
+mod regsvr32;
 pub(crate) mod registry;
 mod rpcrt4;
 mod screen;
@@ -257,9 +259,10 @@ pub struct Process {
     current: Option<usize>,
     /// The top of the idle loop's stack.
     idle_stack: u32,
-    /// The running thread's last error and TIB, kept in its entry while
-    /// another runs.
-    last_error: u32,
+    /// The running thread's last error in a state saved before its TIB
+    /// held it (`thread::TIB_98`), which the load puts there.
+    older_last_error: crate::savestate::Lost<{ thread::TIB_98 }, u32>,
+    /// The running thread's TIB, kept in its entry while another runs.
     tib: u32,
     pub(crate) command_line: u32,
     /// The program's TLS template, which each thread gets a copy of.
@@ -746,6 +749,24 @@ pub(crate) fn process(cpu: &mut Cpu) -> &mut Process {
         .processes
         .get_mut(win32.running)
         .expect("a Win32 process")
+}
+
+/// The running thread's last error (GetLastError), which its TIB holds
+/// where Windows 98 has it, so that a program reading `fs:[60h]` and
+/// KERNEL32's code read the same; 0 while no thread has a TIB.
+pub(crate) fn last_error(cpu: &mut Cpu) -> u32 {
+    match process(cpu).tib {
+        0 => 0,
+        tib => cpu.bus.guest_read_32(tib + loader::TIB_LAST_ERROR),
+    }
+}
+
+/// Set the running thread's last error (SetLastError) to `code`.
+pub(crate) fn set_last_error(cpu: &mut Cpu, code: u32) {
+    let tib = process(cpu).tib;
+    if tib != 0 {
+        cpu.bus.guest_write_32(tib + loader::TIB_LAST_ERROR, code);
+    }
 }
 
 /// The functions of the built-in DLL `name` in its table's order, which
@@ -1667,7 +1688,7 @@ fn not_written(cpu: &mut Cpu, dll: &str, function: &str, failed: u32) -> Option<
             module, dll, function, caller
         );
         cpu.bus.log_string(&message);
-        process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+        set_last_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
         return Some(failed);
     }
     let message = format!(
@@ -1831,7 +1852,7 @@ crate::state_fields!(Process {
     threads,
     current,
     idle_stack,
-    last_error,
+    older_last_error,
     tib,
     command_line,
     tls_template,

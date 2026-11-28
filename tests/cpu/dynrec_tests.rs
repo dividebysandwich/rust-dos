@@ -4164,6 +4164,89 @@ fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
 }
 
 #[test]
+fn shift_counts_poked_before_each_call_are_read_where_they_are() {
+    // Witchaven's masked columns: the count of their `SHR EBX, imm8`
+    // poked before each run of the loop. Here a SHR and a SAR of a
+    // register, a ROL of memory, and a SHL whose flags the code pushes
+    // right after it, with counts made from the loop's 200 down to 1
+    // (masked to 5 bits, so some are 0, which leaves the operand and the
+    // flags as they were). Blocks translated once those bytes are watched
+    // read the counts where they are, and run without leaving at them.
+    let fns = [CODE + 0x1000, CODE + 0x1100, CODE + 0x1200, CODE + 0x1300];
+    let top = CODE + 0x40;
+    let data = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(fns[0], &asm32(fns[0], |a| {
+            a.mov(eax, edx)?; // 2 bytes
+            a.shr(eax, 3)?; // C1 E8 imm8, at + 2
+            a.add(ebx, eax)?;
+            a.ret()
+        }));
+        rig.load(fns[1], &asm32(fns[1], |a| {
+            a.mov(eax, edx)?;
+            a.sar(eax, 3)?; // C1 F8 imm8, at + 2
+            a.add(esi, eax)?;
+            a.ret()
+        }));
+        rig.load(fns[2], &asm32(fns[2], |a| {
+            a.rol(dword_ptr(data), 3)?; // C1 05 disp32 imm8
+            a.ret()
+        }));
+        rig.load(fns[3], &asm32(fns[3], |a| {
+            a.cmp(edx, ebp)?; // 2 bytes
+            a.mov(eax, edx)?; // 2 bytes
+            a.shl(eax, 3)?; // C1 E0 imm8, at + 4
+            a.pushfd()?;
+            a.adc(edi, eax)?;
+            a.pop(eax)?;
+            a.and(eax, 0x8D5)?;
+            a.add(ebp, eax)?;
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.xor(esi, esi)?;
+            a.xor(edi, edi)?;
+            a.xor(ebp, ebp)?;
+            a.mov(dword_ptr(data), 0x1234_5678)?;
+            a.mov(ecx, 200u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.imul_3(edx, ecx, 0x8765_4321u32 as i32)?;
+            a.mov(byte_ptr(fns[0] + 4), cl)?;
+            a.mov(eax, ecx)?;
+            a.xor(eax, 0x5A)?;
+            a.mov(byte_ptr(fns[1] + 4), al)?;
+            a.mov(byte_ptr(fns[2] + 6), dl)?;
+            a.mov(eax, ecx)?;
+            a.and(eax, 0x21)?;
+            a.mov(byte_ptr(fns[3] + 6), al)?;
+            for f in fns {
+                a.call(f as u64)?;
+            }
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    let (mut shr, mut sar, mut rol) = (0u32, 0u32, 0x1234_5678u32);
+    for n in (1..=200u32).rev() {
+        let v = n.wrapping_mul(0x8765_4321);
+        shr = shr.wrapping_add(v >> (n & 31));
+        sar = sar.wrapping_add(((v as i32) >> ((n ^ 0x5A) & 31)) as u32);
+        rol = rol.rotate_left(v & 31);
+    }
+    assert_eq!((b.cpu.ebx(), b.cpu.esi()), (shr, sar));
+    assert_eq!(b.cpu.bus.read_32(data as usize), rol);
+    if AVAILABLE {
+        assert!(stats.watched < 20, "left at the poked counts: {:?}", stats);
+        assert!(stats.blocks < 100, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
 fn a_displacement_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
     // The same with the address of an ADD's operand: once its bytes are
     // watched, the block reads the address where it is, rather than
@@ -7791,23 +7874,149 @@ fn a_software_renderers_loops_on_a_voodoo3s_memory_are_the_interpreters() {
     let (start, span) = card.desktop_memory();
     assert_eq!(start, 0x8000);
     assert!((0x1010..0x2000).contains(&span), "{span:#x} bytes");
-    // The bytes written into it count the same, and the picture changed
-    // for both.
+    // The bytes written into it count the same, with all the rest of
+    // what `cycles=auto` counts (the bursts, their span, the last
+    // write's time), and the picture changed for both.
     assert_eq!(a.cpu.bus.activity.video_bytes, span);
     assert_eq!(b.cpu.bus.activity.video_bytes, span);
+    assert_same_activity(&a, &b);
     for rig in [&mut a, &mut b] {
         assert!(rig.cpu.bus.voodoo.as_mut().unwrap().prepare_display());
     }
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert_eq!(untranslated(&stats), 0, "{:?}", stats);
-        // The code makes the stores and loads out of sight itself: of
-        // some 36,000, those left to the bus are the 2000h bytes stored
-        // into the desktop's two pages, the tiles and the words and
-        // dwords across two pages.
+        // The code makes the stores and loads itself, counting those
+        // into the desktop's whole page: of some 36,000, those left to
+        // the bus are the 1000h bytes stored into the page the desktop
+        // has in part, the store that starts the burst, the tiles and
+        // the words and dwords across two pages.
         // (A few run in the interpreter where the lockstep's batches
         // stop in a loop.)
         let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
-        assert!((0x2000 - 128..0x2000 + 64).contains(&calls), "{calls} calls");
+        assert!(
+            (0x1000 - 128..0x1000 + 64).contains(&calls),
+            "{calls} calls"
+        );
+    }
+}
+
+/// What `cycles=auto` counts (`Activity`) is the same in both rigs, but
+/// for the last write's instruction count, which translated code takes
+/// from its block's count and may have a block's instructions off
+/// (`Activity::video_write`).
+fn assert_same_activity(a: &Rig, b: &Rig) {
+    let split = |rig: &Rig| -> (String, u64) {
+        let text = format!("{:?}", rig.cpu.bus.activity);
+        let at = text.find("last_write: ").expect("a last write") + "last_write: ".len();
+        let end = at + text[at..].find(',').expect("more after it");
+        let count = text[at..end].parse().expect("a count");
+        (format!("{}{}", &text[..at], &text[end..]), count)
+    };
+    let ((a, a_at), (b, b_at)) = (split(a), split(b));
+    assert_eq!(a, b);
+    assert!(a_at.abs_diff(b_at) < 64, "last writes at {a_at} and {b_at}");
+}
+
+/// A game's MMX copy of its frame into the desktop shown in a Voodoo3's
+/// memory (Rage of Mages's, 64 bytes a turn), 4000h bytes from the
+/// desktop's first, at 1800h: its first page is the desktop's in part.
+/// Then a pause longer than a burst's gap, and a second copy. Then a
+/// flip: the code moves the desktop's start to 9800h, and copies the
+/// frame there. `cycles=auto` counts the same, and the code makes the
+/// stores into the desktop's whole pages itself.
+#[test]
+fn an_mmx_copy_into_a_voodoo3s_desktop_counts_as_the_interpreters() {
+    use rust_dos::voodoo::banshee::{
+        LFB_MEMORY_CONFIG, VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR,
+        VID_PROC_CFG,
+    };
+    const BAR0: usize = 0xD000_0000;
+    const BAR1: u32 = 0xD200_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
+        rig.cpu
+            .bus
+            .configure_voodoo(Some(rust_dos::voodoo::Board::Voodoo3));
+        let bus = &mut rig.cpu.bus;
+        bus.write_32(BAR0 + LFB_MEMORY_CONFIG as usize, 0x400);
+        bus.write_32(BAR0 + VGA_INIT0 as usize, 0x0000_1140);
+        bus.write_32(BAR0 + VID_PROC_CFG as usize, 0x0004_0081);
+        bus.write_32(BAR0 + VID_DESKTOP_OVERLAY_STRIDE as usize, 0x400);
+        bus.write_32(BAR0 + VID_DESKTOP_START_ADDR as usize, 0x1800);
+        for i in 0..0x1000u32 {
+            rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507));
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let (mut copy, mut turn, mut pause) =
+                    (a.create_label(), a.create_label(), a.create_label());
+                a.mov(ebp, 2u32)?;
+                a.set_label(&mut copy)?;
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x1800)?;
+                a.mov(ecx, 0x100u32)?;
+                a.set_label(&mut turn)?;
+                for at in (0..64).step_by(8) {
+                    a.movq(mm0, qword_ptr(esi + at))?;
+                    a.movq(qword_ptr(edi + at), mm0)?;
+                }
+                a.add(esi, 64)?;
+                a.and(esi, DATA + 0x3FFF)?;
+                a.add(edi, 64)?;
+                a.dec(ecx)?;
+                a.jnz(turn)?;
+                a.mov(ecx, 8000u32)?;
+                a.set_label(&mut pause)?;
+                a.dec(ecx)?;
+                a.jnz(pause)?;
+                a.dec(ebp)?;
+                a.jnz(copy)?;
+                let flip = BAR0 as u32 + VID_DESKTOP_START_ADDR;
+                a.mov(dword_ptr(flip), 0x9800u32)?;
+                let mut flipped = a.create_label();
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x9800)?;
+                a.mov(ecx, 0x100u32)?;
+                a.set_label(&mut flipped)?;
+                for at in (0..64).step_by(8) {
+                    a.movq(mm0, qword_ptr(esi + at))?;
+                    a.movq(qword_ptr(edi + at), mm0)?;
+                }
+                a.add(esi, 64)?;
+                a.and(esi, DATA + 0x3FFF)?;
+                a.add(edi, 64)?;
+                a.dec(ecx)?;
+                a.jnz(flipped)?;
+                a.emms()?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let card = b.cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap();
+    assert_eq!(card.desktop_memory().0, 0x9800);
+    let memory = |rig: &Rig| -> Vec<u32> {
+        (0x1800..0xD800)
+            .step_by(4)
+            .map(|i| rig.cpu.bus.read_32(BAR1 as usize + i))
+            .collect()
+    };
+    assert!(memory(&a) == memory(&b), "the card's memory differs");
+    assert_eq!(b.cpu.bus.read_32(BAR1 as usize + 0x1804), 0x0103_0507);
+    // Every copy is 4000h bytes from the desktop's first, the last one
+    // after the flip from the new start.
+    assert_same_activity(&a, &b);
+    assert_eq!(b.cpu.bus.activity.video_bytes, 0xC000);
+    assert_eq!(b.cpu.bus.read_32(BAR1 as usize + 0x9804), 0x0103_0507);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+        // Of each copy's 800h stores, those through the bus are the
+        // 100h into the page the desktop has in part (1800h to 2000h,
+        // and 9800h to A000h after the flip), the first of which starts
+        // the burst.
+        let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+        assert!((0x300 - 16..0x300 + 64).contains(&calls), "{calls} calls");
     }
 }
 

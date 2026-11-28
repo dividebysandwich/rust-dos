@@ -568,7 +568,10 @@ const CL: Gpr = Gpr { index: ECX, high: false, size: 1 };
 /// Shifts and rotates of a register or memory by an immediate count from 1
 /// to the width less 1, or by CL, which the host's instructions do as the
 /// interpreter does. Counts by CL of the width or more (of a byte or word)
-/// run through the handler.
+/// run through the handler. A dword's immediate count of 0 (after the
+/// mask) goes as a count of CL does, changing nothing, so that a count
+/// the program pokes there later can be read where it is
+/// (`live_shift_count`).
 fn shift(instr: &Instruction, op: ShiftOp, u: &mut Vec<Uop>) -> bool {
     let size = match instr.op0_kind() {
         OpKind::Register => match gpr(instr.op0_register()) {
@@ -583,16 +586,19 @@ fn shift(instr: &Instruction, op: ShiftOp, u: &mut Vec<Uop>) -> bool {
     }
     let shift = if is_imm(instr.op1_kind()) {
         let count = instr.immediate(1) as u32 & 0x1F;
-        if count == 0 || count >= size as u32 * 8 {
+        if count == 0 && size == 4 && dword_shift_by_imm8(instr) {
+            Uop::ShiftVar { op, size, t: T0, count: Count::Const(0) }
+        } else if count == 0 || count >= size as u32 * 8 {
             return false;
+        } else {
+            Uop::Shift { op, size, t: T0, count: count as u8 }
         }
-        Uop::Shift { op, size, t: T0, count: count as u8 }
     } else if instr.op1_register() == Register::CL {
         if size < 4 {
             u.push(Uop::Get { t: T1, r: CL });
             u.push(Uop::Bail { t: T1, mask: 0x1F & !(size as u32 * 8 - 1) });
         }
-        Uop::ShiftVar { op, size, t: T0, count: CL }
+        Uop::ShiftVar { op, size, t: T0, count: Count::Reg(CL) }
     } else {
         return false;
     };
@@ -721,7 +727,7 @@ fn double_shift(instr: &Instruction, left: bool, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Get { t: T1, r: CL });
             u.push(Uop::Bail { t: T1, mask: 0x10 });
         }
-        Uop::DoubleShiftVar { left, size, dst: T0, src: T1, count: CL }
+        Uop::DoubleShiftVar { left, size, dst: T0, src: T1, count: Count::Reg(CL) }
     } else {
         return false;
     };
@@ -1727,15 +1733,19 @@ fn far_ret_pm(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// translated. False, with nothing changed, for forms other than MOV, the
 /// ALU operations and the three-operand IMUL with an immediate (Riverworld
 /// pokes the factors of its transforms into those), and where the watched
-/// bytes take in more than the immediate. An MMX shift by a constant
-/// goes by the count it reads instead (`live_shift`), and an instruction
-/// whose watched bytes are all in its displacement by the displacement it
-/// reads (`live_displacement`).
+/// bytes take in more than the immediate. A shift of a dword or an MMX
+/// shift by a constant goes by the count it reads instead
+/// (`live_shift_count`, `live_shift`), and an instruction whose watched
+/// bytes are all in its displacement by the displacement it reads
+/// (`live_displacement`).
 pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
     if let Some((start, size)) = displacement(instr)
         && watched.iter().all(|&w| (start..start + size).contains(&w))
     {
         return live_displacement(instr, phys, start, size, u);
+    }
+    if dword_shift_by_imm8(instr) {
+        return live_shift_count(instr, phys, watched, u);
     }
     if u.iter().any(shift_imm) {
         return live_shift(instr, phys, watched, u);
@@ -1954,6 +1964,56 @@ fn live_displacement(
     };
     u.splice(site + 1..site + 1, [load, add]);
     true
+}
+
+/// `live_immediate` for a shift or rotate of a dword by an immediate,
+/// whose count Witchaven's masked columns poke into their
+/// `SHR EBX, imm8`: the shift reads the count's byte from RAM and goes by
+/// it as by CL (`Uop::ShiftVar`), masked to 5 bits, with nothing changed,
+/// the flags too, for a count of 0. A dword takes every count from 1 to
+/// 31 on the host, so nothing is left to the handler, which would shift
+/// by the count the instruction was decoded with. Bytes and words aren't
+/// read this way: a count of their width or more goes through the
+/// handler (`shift`), so they leave the block where the count changes.
+fn live_shift_count(instr: &Instruction, phys: u32, watched: &[usize], u: &mut [Uop]) -> bool {
+    // The count is the last byte.
+    let start = instr.len() - 1;
+    if watched.iter().any(|&w| w < start) {
+        return false;
+    }
+    // (`shift` gives a count of 0 as a constant one of `ShiftVar`.)
+    let shift = |uop: &Uop| match *uop {
+        Uop::Shift { op, size: 4, t, .. }
+        | Uop::ShiftVar {
+            op,
+            size: 4,
+            t,
+            count: Count::Const(_),
+        } => Some((op, t)),
+        _ => None,
+    };
+    let mut shifts = u.iter().enumerate().filter_map(|(k, uop)| shift(uop).map(|s| (k, s)));
+    let (Some((site, (op, t))), None) = (shifts.next(), shifts.next()) else {
+        return false;
+    };
+    let count = Count::Code(phys + start as u32);
+    u[site] = Uop::ShiftVar { op, size: 4, t, count };
+    true
+}
+
+/// A shift or rotate of a dword by an immediate byte (not the forms by 1,
+/// whose count isn't in their bytes, nor RCL and RCR, which `shift`
+/// doesn't translate).
+fn dword_shift_by_imm8(instr: &Instruction) -> bool {
+    matches!(
+        instr.code(),
+        Code::Rol_rm32_imm8
+            | Code::Ror_rm32_imm8
+            | Code::Shl_rm32_imm8
+            | Code::Sal_rm32_imm8
+            | Code::Shr_rm32_imm8
+            | Code::Sar_rm32_imm8
+    )
 }
 
 /// `live_immediate` for an MMX shift by a constant, whose count Delta

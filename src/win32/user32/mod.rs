@@ -371,7 +371,7 @@ pub fn current_pid(cpu: &Cpu) -> u32 {
 }
 
 pub fn set_error(cpu: &mut Cpu, code: u32) {
-    super::process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
 }
 
 /// A function Windows 95 has only as a stub that fails.
@@ -1465,6 +1465,8 @@ static APIS: &[Api] = &[
     stdcall("SendMessage16", 0, 4, message::send_message16),
     stdcall("UserYield16", 0, 0, message::user_yield16),
     stdcall("RestoreDefaultPalette", 0, 2, palette::restore_default_palette),
+    // A 16-bit task's ExitWindows and ExitWindowsExec (session.rs).
+    stdcall("ExitWindows16", 0, 1, session::exit_windows16),
 ];
 
 crate::state_fields!(State {

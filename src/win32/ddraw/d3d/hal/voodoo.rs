@@ -572,8 +572,17 @@ fn blend(src: u32, dst: u32) -> (u32, u32) {
         9 => COLOR,
         10 => OM_COLOR,
         11 => SATURATE,
-        // SRCCOLOR and INVSRCCOLOR: the card has neither as a source
-        // factor.
+        // SRCCOLOR: the card has no source colour as a source factor.
+        // With 3dfx's Voodoo3 driver (4.11.01.1151) on Windows 98,
+        // Outlaw Racers' rain (SRCCOLOR, ZERO) multiplies the scene by
+        // its streaks; read as ONE it was white. Code 2 (the source
+        // colour as a destination factor, the destination's as a source
+        // one) gives that picture. The picture alone doesn't tell it
+        // from the driver swapping the pair to (ZERO, SRC_COLOR), which
+        // draws the same.
+        3 => COLOR,
+        // INVSRCCOLOR: neither, and what the driver does with it isn't
+        // known yet.
         4 => ZERO,
         _ => ONE,
     };
