@@ -1616,6 +1616,9 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
 const MCI_SET_DRIVER_DATA: u16 = 707;
 const MCI_GET_DRIVER_DATA: u16 = 708;
 const GET_MODULE_HANDLE: u16 = 47;
+const GET_DRIVER_MODULE_HANDLE: u16 = 254;
+const MCI_GETDEVCAPS: u16 = 0x80B;
+const MCIERR_FILE_NOT_FOUND: u16 = 275;
 
 /// What the test driver keeps in its data segment: how far its opening
 /// got (1 after DRV_LOAD, 2 after DRV_ENABLE).
@@ -1646,10 +1649,12 @@ fn answer(code: &mut Code, value: u16, ends: &mut Vec<usize>) {
 /// DRV_LOAD and DRV_ENABLE came first, its lParam1 is the rest of the
 /// [mci] line ("hello") and its lParam2 an MCI_OPEN_DRIVER_PARMS, gives
 /// its device type as animation and returns the device's id as the
-/// driver's. MCI_OPEN_DRIVER keeps 12345678h as the device's data, read
-/// from the program's MCI_OPEN_PARMS's wDeviceID, which MCI_STATUS gives
-/// back in dwReturn, read with the driver's id. Other commands are
-/// MCIERR_UNSUPPORTED_FUNCTION.
+/// driver's. MCI_OPEN_DRIVER refuses an element that doesn't start with
+/// 'C' (MCIERR_FILE_NOT_FOUND), and keeps 12345678h as the device's
+/// data, read from the program's MCI_OPEN_PARMS's wDeviceID, which
+/// MCI_STATUS gives back in dwReturn, read with the driver's id.
+/// MCI_GETDEVCAPS gives back GetDriverModuleHandle of the handle the
+/// driver is given. Other commands are MCIERR_UNSUPPORTED_FUNCTION.
 fn test_mci_driver() -> Vec<u8> {
     let mut code = Code::new();
     code.emit(&[0xB8, 0x01, 0x00, 0xCB]); // LibMain: mov ax,1; retf
@@ -1696,8 +1701,14 @@ fn test_mci_driver() -> Vec<u8> {
     ends.push(code.bytes.len() - 2);
     answer(&mut code, 0, &mut ends);
     skip_to_here(&mut code, next);
-    // MCI_OPEN_DRIVER: mciSetDriverData(wDeviceID, 12345678h).
+    // MCI_OPEN_DRIVER: the element starts with 'C', then
+    // mciSetDriverData(wDeviceID, 12345678h).
     let next = when_ax(&mut code, 0x801);
+    code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
+    code.emit(&[0x26, 0xC4, 0x5F, 0x0C]); // les bx,es:[bx+12]
+    code.emit(&[0x26, 0x80, 0x3F, b'C']); // cmp byte es:[bx],'C'
+    code.emit(&[0x74, 0x07]); // je over the refusal
+    answer(&mut code, MCIERR_FILE_NOT_FOUND, &mut ends);
     code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
     code.emit(&[0x26, 0xFF, 0x77, 0x04]); // push word es:[bx+4]
     code.push(0x1234).push(0x5678);
@@ -1711,6 +1722,15 @@ fn test_mci_driver() -> Vec<u8> {
     code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
     code.emit(&[0x26, 0x89, 0x47, 0x04]); // mov es:[bx+4],ax
     code.emit(&[0x26, 0x89, 0x57, 0x06]); // mov es:[bx+6],dx
+    answer(&mut code, 0, &mut ends);
+    skip_to_here(&mut code, next);
+    // MCI_GETDEVCAPS: dwReturn is GetDriverModuleHandle(hDriver).
+    let next = when_ax(&mut code, MCI_GETDEVCAPS);
+    code.emit(&[0xFF, 0x76, 0x10]); // push word [bp+16]
+    code.call("USER", GET_DRIVER_MODULE_HANDLE);
+    code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
+    code.emit(&[0x26, 0x89, 0x47, 0x04]); // mov es:[bx+4],ax
+    code.emit(&[0x26, 0xC7, 0x47, 0x06, 0x00, 0x00]); // mov word es:[bx+6],0
     answer(&mut code, 0, &mut ends);
     skip_to_here(&mut code, next);
     // MCI_CLOSE_DRIVER, DRV_CLOSE, DRV_DISABLE and DRV_FREE.
@@ -1730,21 +1750,25 @@ fn test_mci_driver() -> Vec<u8> {
     win16::library("TESTMCI", &code, &[("DriverProc", driver_proc)])
 }
 
-#[test]
-fn an_element_opens_through_the_installable_driver_its_extension_names() {
-    // WIN.INI's [mci extensions] gives .TST the type TestAnim, which
-    // SYSTEM.INI's [mci] gives the 16-bit driver TESTMCI.DRV in the
-    // system folder, as Outpost's setup installs MCIAAP.DRV for .FLC.
-    // MCI_OPEN of CLIP.TST loads it and opens a device through its
-    // DriverProc (`test_mci_driver`): wDeviceID gets the device's id,
-    // and the reserved word after it is left alone. MCI_STATUS goes to
-    // the driver with the program's block and gets the data
-    // MCI_OPEN_DRIVER kept; a play gets the driver's error as it is. The
-    // close closes the device and frees the driver, after which the id
-    // is no device's. Exit code 1, or the check that failed.
+/// MCI_OPEN of `element` with WIN.INI's [mci extensions] giving .TST
+/// the type TestAnim, which SYSTEM.INI's [mci] gives the 16-bit driver
+/// TESTMCI.DRV in the system folder, as Outpost's setup installs
+/// MCIAAP.DRV for .FLC. The open loads it and opens a device through
+/// its DriverProc (`test_mci_driver`): wDeviceID gets the device's id,
+/// the reserved word after it is left alone, and lpstrElementName is
+/// as the program set it. MCI_STATUS goes to the driver with the
+/// program's block and gets the data MCI_OPEN_DRIVER kept, and
+/// MCI_GETDEVCAPS the driver's instance; a play gets the driver's error
+/// as it is. The close closes the device and frees the driver, after
+/// which the id is no device's. The run's exit code, 1 or the check
+/// that failed, and its log.
+fn open_through_driver(test: &str, element: &[u8]) -> (u8, String) {
     let mut code = Code::new();
-    let (_, element) = open_parms(&mut code);
+    let (_, element_place) = open_parms(&mut code);
     mci(&mut code, MCI_OPEN, MCI_OPEN_ELEMENT, OPEN, 0, 2);
+    code.emit(&[0xA1, lo(OPEN + 12), hi(OPEN + 12)]); // mov ax,[OPEN+12]
+    let restored = code.here() + 1;
+    expect_ax(&mut code, 0, 12);
     expect(&mut code, DEVICE, 0xEEEE, false, 3);
     expect(&mut code, DEVICE, 0, false, 3);
     expect(&mut code, DEVICE + 2, 0xCAFE, true, 4);
@@ -1755,6 +1779,18 @@ fn an_element_opens_through_the_installable_driver_its_extension_names() {
     mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, 5);
     expect(&mut code, STATUS + 4, 0x5678, true, 6);
     expect(&mut code, STATUS + 6, 0x1234, true, 7);
+    // GetDriverModuleHandle gave the driver its own instance: the module
+    // of that instance is TESTMCI's.
+    mci(&mut code, MCI_GETDEVCAPS, 0, STATUS, 0, 13);
+    code.push(0);
+    push_word(&mut code, STATUS + 4);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0xA3, lo(INFO), hi(INFO)]); // mov [INFO],ax
+    let module_name = code.here() + 2;
+    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x3B, 0x06, lo(INFO), hi(INFO)]) // cmp ax,[INFO]
+        .emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, 14, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,14; exit
     let unsupported = 274;
     mci(&mut code, MCI_PLAY, 0, 0, unsupported, 8);
     mci(&mut code, MCI_CLOSE, 0, 0, 0, 9);
@@ -1765,12 +1801,14 @@ fn an_element_opens_through_the_installable_driver_its_extension_names() {
     expect_ax(&mut code, 0, 11);
     code.emit(&[0xB0, 0x01]).exit_al();
     let element_at = code.here();
-    code.emit(b"CLIP.TST\0");
+    code.emit(element).emit(&[0]);
     let name_at = code.here();
     code.emit(b"TESTMCI\0");
-    code.patch(element, element_at);
+    code.patch(element_place, element_at);
+    code.patch(restored, element_at);
     code.patch(name, name_at);
-    let (exit, log) = run_with("mci_driver16", program(&code, CODE), |_, dir| {
+    code.patch(module_name, name_at);
+    run_with(test, program(&code, CODE), |_, dir| {
         let system = dir.join("WINDOWS").join("SYSTEM");
         std::fs::create_dir_all(&system).unwrap();
         std::fs::write(system.join("TESTMCI.DRV"), test_mci_driver()).unwrap();
@@ -1780,10 +1818,29 @@ fn an_element_opens_through_the_installable_driver_its_extension_names() {
         let win_ini = "[mci extensions]\r\ntst=TestAnim\r\n";
         std::fs::write(windows.join("WIN.INI"), win_ini).unwrap();
         std::fs::write(dir.join("CLIP.TST"), b"a film").unwrap();
-    });
+    })
+}
+
+#[test]
+fn an_element_opens_through_the_installable_driver_its_extension_names() {
+    let (exit, log) = open_through_driver("mci_driver16", b"CLIP.TST");
     assert_eq!(exit, 1, "{log}");
     assert!(
-        log.contains("MCI driver testmci.drv for CLIP.TST"),
+        log.contains("MCI driver testmci.drv for CLIP.TST: device"),
+        "{log}"
+    );
+}
+
+/// "type!element" opens the type's driver for an element whose
+/// extension has none, the device is named by the element alone, and
+/// the driver gets the element alone (it refuses one that doesn't start
+/// with 'C'), as WINMM does for its own types (`mci::open`).
+#[test]
+fn a_type_before_the_element_opens_its_installable_driver() {
+    let (exit, log) = open_through_driver("mci_driver16_bang", b"TestAnim!CLIP.XYZ");
+    assert_eq!(exit, 1, "{log}");
+    assert!(
+        log.contains("MCI driver testmci.drv for CLIP.XYZ: device"),
         "{log}"
     );
 }

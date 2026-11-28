@@ -70,9 +70,10 @@ const STEP_FREE: u32 = 9;
 
 /// The places in `then`'s data: the step, the device's id, the error
 /// the command returns once the device is closed, the command's
-/// message, flags and parameter block (16:16), and whether it closes
-/// all the program's devices. The libraries whose entry points are still
-/// to run follow, for STEP_INIT.
+/// message, flags and parameter block (16:16), whether it closes all
+/// the program's devices, and for an open of "type!element" the length
+/// of "type!" (`Found::skip`). The libraries whose entry points are
+/// still to run follow, for STEP_INIT.
 const D_STEP: usize = 0;
 const D_ID: usize = 1;
 const D_ERROR: usize = 2;
@@ -80,7 +81,8 @@ const D_MSG: usize = 3;
 const D_FLAGS: usize = 4;
 const D_PARMS: usize = 5;
 const D_ALL: usize = 6;
-const D_LEN: usize = 7;
+const D_SKIP: usize = 7;
+const D_LEN: usize = 8;
 
 /// The bytes of the program's stack below its call that DRV_OPEN's
 /// MCI_OPEN_DRIVER_PARMS (at 0) and the parameters' string (at
@@ -89,11 +91,13 @@ const SCRATCH: u16 = 0x100;
 const PARAMS_AT: u16 = 0x10;
 
 /// The driver an MCI_OPEN opens: its file, the rest of its [mci] line,
-/// and the name the device gets.
+/// the name the device gets, and for an element "type!element" the
+/// length of "type!", which the driver doesn't see (`move_element`).
 struct Found {
     file: String,
     params: String,
     name: String,
+    skip: u32,
 }
 
 /// mciSendCommand(id, message, flags, parms), when it is for a device of
@@ -112,7 +116,7 @@ pub fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<Option<u32>> {
         // The drivers' devices close first, then WINMM's.
         let first = drivers.iter().find(|d| d.pid == pid && d.open)?.id;
         let mut ctx = Context::of(cpu);
-        let data = vec![STEP_CLOSE_DRIVER, first, 0, msg, flags, segptr, 1];
+        let data = vec![STEP_CLOSE_DRIVER, first, 0, msg, flags, segptr, 1, 0];
         return Some(close_driver(cpu, first, &data, &mut ctx));
     }
     // A 16-bit device id is a word.
@@ -121,7 +125,7 @@ pub fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<Option<u32>> {
         .iter()
         .find(|d| d.id == id && d.pid == pid && d.open)?;
     let mut ctx = Context::of(cpu);
-    let data = vec![STEP_COMMAND, id, 0, msg, flags, segptr, 0];
+    let data = vec![STEP_COMMAND, id, 0, msg, flags, segptr, 0, 0];
     Some(match msg {
         wmci::MCI_CLOSE => close_driver(cpu, id, &data, &mut ctx),
         // MMSYSTEM keeps the break key itself, as WINMM does for its own
@@ -145,16 +149,23 @@ fn found(cpu: &mut Cpu, flags: u32, segptr: u32) -> Option<Found> {
         let p = super::read_32(cpu, at + off);
         super::string(cpu, super::linear(cpu, p))
     };
-    let element = if flags & wmci::MCI_OPEN_ELEMENT != 0 {
+    let mut element = if flags & wmci::MCI_OPEN_ELEMENT != 0 {
         string_at(cpu, 12)
     } else {
         String::new()
     };
+    let mut skip = 0;
     let kind = if flags & wmci::MCI_OPEN_TYPE != 0 {
         string_at(cpu, 8)
-    } else if let Some((kind, _)) = element.split_once('!') {
-        // "type!element" names both.
-        kind.to_string()
+    } else if let Some((kind, rest)) = element.split_once('!') {
+        // "type!element" names both. The device is named by the element
+        // alone, as WINMM names its own (`mci::open`), and the driver
+        // opens the element alone. A character is a byte of the
+        // program's string.
+        skip = kind.chars().count() as u32 + 1;
+        let kind = kind.to_string();
+        element = rest.to_string();
+        kind
     } else {
         // The type WIN.INI's [mci extensions] gives the extension.
         let (_, ext) = element.rsplit_once('.')?;
@@ -190,6 +201,7 @@ fn found(cpu: &mut Cpu, flags: u32, segptr: u32) -> Option<Found> {
         file: file.to_string(),
         params: params.trim().to_string(),
         name,
+        skip,
     })
 }
 
@@ -234,7 +246,16 @@ fn open(cpu: &mut Cpu, flags: u32, segptr: u32, found: Found) -> Option<u32> {
         params: found.params,
         ..Driver16::default()
     });
-    let mut data = vec![STEP_INIT, id, 0, wmci::MCI_OPEN, flags, segptr, 0];
+    let mut data = vec![
+        STEP_INIT,
+        id,
+        0,
+        wmci::MCI_OPEN,
+        flags,
+        segptr,
+        0,
+        found.skip,
+    ];
     data.extend(
         inits
             .iter()
@@ -443,6 +464,7 @@ fn step(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u3
             }
             let (flags, segptr) = (data[D_FLAGS], data[D_PARMS]);
             write_id(cpu, id, segptr);
+            move_element(cpu, segptr, data[D_SKIP], true);
             send(
                 cpu,
                 id,
@@ -454,22 +476,23 @@ fn step(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u3
                 None,
             )
         }
-        STEP_OPEN_DRIVER if value & 0xFFFF != 0 => {
-            // The driver refused the element: the device closes, and the
-            // open returns the driver's error.
-            next[D_ERROR] = value & 0xFFFF;
-            send(
-                cpu,
-                id,
-                DRV_CLOSE,
-                0,
-                0,
-                at_step(&next, STEP_CLOSE),
-                ctx,
-                None,
-            )
-        }
         STEP_OPEN_DRIVER => {
+            move_element(cpu, data[D_PARMS], data[D_SKIP], false);
+            if value & 0xFFFF != 0 {
+                // The driver refused the element: the device closes, and
+                // the open returns the driver's error.
+                next[D_ERROR] = value & 0xFFFF;
+                return send(
+                    cpu,
+                    id,
+                    DRV_CLOSE,
+                    0,
+                    0,
+                    at_step(&next, STEP_CLOSE),
+                    ctx,
+                    None,
+                );
+            }
             if let Some(d) = device(cpu, id) {
                 d.open = true;
             }
@@ -616,6 +639,39 @@ fn write_id(cpu: &mut Cpu, id: u32, segptr: u32) {
     if at != 0 {
         super::write_16(cpu, at + 4, id as u16);
     }
+}
+
+/// For an open of "type!element", the program's lpstrElementName at
+/// `segptr` moved `by` characters on (`forward`) past "type!" while the
+/// driver's MCI_OPEN_DRIVER runs, and back afterwards: Windows' MMSYSTEM
+/// gives the driver the element alone, and the program its own block
+/// back as it was.
+fn move_element(cpu: &mut Cpu, segptr: u32, by: u32, forward: bool) {
+    let at = super::linear(cpu, segptr);
+    if by == 0 || at == 0 {
+        return;
+    }
+    let p = super::read_32(cpu, at + 12);
+    let offset = if forward {
+        (p as u16).wrapping_add(by as u16)
+    } else {
+        (p as u16).wrapping_sub(by as u16)
+    };
+    super::write_32(cpu, at + 12, p & 0xFFFF_0000 | offset as u32);
+}
+
+/// GetDriverModuleHandle(driver), USER's: for the handle a device's
+/// DriverProc is given, its driver's instance, which LoadLibrary
+/// returned for it, as OpenDriver's handles give theirs; 0 for another
+/// handle.
+pub fn get_driver_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let pid = crate::win32::user32::current_pid(cpu);
+    let handle = args[0] & 0xFFFF;
+    let module = wmci::drivers16(cpu)
+        .iter()
+        .find(|d| d.handle == handle && d.pid == pid)
+        .map_or(0, |d| d.module as u16);
+    Some(super::module_index(cpu, module).map_or(0, |i| module::instance_of(cpu, i) as u32))
 }
 
 /// mciSetDriverData(id, data): the driver's data for its device. FALSE

@@ -353,7 +353,12 @@ static APIS: &[Api16] = &[
     rust("SendDriverMessage", 251, "wwll", zero),
     rust("OpenDriver", 252, "ppl", zero),
     rust("CloseDriver", 253, "wll", zero),
-    rust("GetDriverModuleHandle", 254, "w", zero),
+    rust(
+        "GetDriverModuleHandle",
+        254,
+        "w",
+        super::mcidrv::get_driver_module_handle,
+    ),
     rust("DefDriverProc", 255, "lwwll", super::misc::def_driver_proc),
     rust("MapWindowPoints", 258, "wwpw", map_window_points),
     win32(
