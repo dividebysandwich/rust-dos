@@ -186,7 +186,8 @@ pub fn log_depth_fallback(cpu: &mut Cpu) {
     let bpp = desktop_bpp(cpu);
     if bpp != asked {
         cpu.bus.log_string(&format!(
-            "[W32] win32_depth={asked}: the display adapter has no {asked}-bit desktop,              so it is {bpp} bits a pixel"
+            "[W32] win32_depth={asked}: the display adapter has no {asked}-bit desktop, so it is \
+             {bpp} bits a pixel"
         ));
     }
 }
