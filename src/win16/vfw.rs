@@ -232,10 +232,15 @@ pub static MSVIDEO: Def = Def {
 
 /// VideoForWindowsVersion(): Video for Windows' version, the major and
 /// minor numbers in the high word and the build in the low one, of
-/// Windows 98 SE's MSVIDEO.DLL (4.03.1998); Windows 95's gives
-/// 0x040003B6, as Wine's notes say.
-fn vfw_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0x0403_07CE)
+/// Windows 98 SE's MSVIDEO.DLL (4.03.1998), or Windows 95's
+/// (0x040003B6, 4.00.950, as Wine's notes say): the version its file
+/// has in SYSTEM (verdll.rs).
+fn vfw_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(if crate::win32::version::is_98(cpu) {
+        0x0403_07CE
+    } else {
+        0x0400_03B6
+    })
 }
 
 /// AVISTREAMINFO's sizes: the 32-bit one's rcFrame is a RECT of LONGs,
