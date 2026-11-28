@@ -141,7 +141,14 @@ const SETTLE_NS: u64 = 250_000_000;
 /// After a step down, which only saves the host's time and can wait, the
 /// program settles longer: some adapt to a slower machine for seconds
 /// (F-117A draws fewer frames than it can for four), and a step that
-/// seems to lose frames goes back up.
+/// seems to lose frames goes back up. Not a protected-mode program that
+/// keeps an idling system busy (`BUSY`): it draws as many frames as it
+/// gets instructions for, so a step down shows what it costs at once, and
+/// two measurements short of the frame rate to keep end it. Its frames
+/// paid for the wait: Redguard's ship fight, whose frame rate goes with
+/// the speed, drew 47.7 frames a second at 433,766 and 37.5 to 38.7 for
+/// the 5 s and three measurements of a try at 352,521, 11 of 74
+/// half-seconds under 40 in a 40 s run (#2359).
 const SETTLE_DOWN_NS: u64 = 5_000_000_000;
 const AGREE: f64 = 0.15;
 const TRIES: u32 = 4;
@@ -2618,7 +2625,10 @@ impl AutoSpeed {
             return None;
         }
         self.mark = None;
-        let lowered = matches!(self.step, Step::Lowered { .. });
+        // A program that keeps an idling system busy settles at once after
+        // a step down too (`SETTLE_DOWN_NS`).
+        let busy = self.busy(protected, measured.halted, measured.io);
+        let lowered = matches!(self.step, Step::Lowered { .. }) && !busy;
         self.settle_until = now.ns + if lowered { SETTLE_DOWN_NS } else { SETTLE_NS };
         self.unsettled = Some((f64::NAN, 0));
         // A step up is watched until its first measurement is in, unless
@@ -3366,7 +3376,11 @@ impl AutoSpeed {
                     let back = clamp((from as f64).max(least));
                     return hold_drawing(self, before, back, left, true);
                 }
-                if seen < JUDGED && !dropped {
+                // A busy program's frames follow the speed (`FIRST_STEP`):
+                // two measurements short of what the step has to keep are
+                // its loss, not a moment's dip (`SETTLE_DOWN_NS`).
+                let lost = busy && short >= SEEN_TWICE;
+                if seen < JUDGED && !dropped && !lost {
                     self.step = Step::Lowered {
                         from,
                         fps: before,
@@ -6052,6 +6066,48 @@ mod tests {
         // host runs 419,353, and the step goes back to the try's speed.
         let (cut, _) = step_back_up_ended(0.9);
         assert_eq!(cut, Some((419_353.0 / FINE_STEP).round() as u32));
+    }
+
+    /// Redguard's ship fight (#2359): a hold at 433,766, at 47.7 frames a
+    /// second, tries a step lower, where the frames follow the speed. The
+    /// measurements the try takes before it goes back up, of a program that
+    /// keeps an idling system busy, or not.
+    fn try_lower_measurements(busy: bool) -> u32 {
+        const HOST: u32 = 520_000;
+        let fight = |fps: f64| Measurement {
+            fps: Some(fps),
+            refresh: 60.0,
+            ..STILL
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_idles(busy);
+        auto.step = Step::Hold {
+            fps: 47.7,
+            left: 1,
+            more: false,
+            recent: 47.7,
+            seen: HOLD_WINDOWS,
+            dipped: 0,
+        };
+        let lowered = auto.decide(433_766, &fight(47.7), true, HOST);
+        assert!(matches!(auto.step, Step::Lowered { from: 433_766, .. }));
+        let fps = 47.7 * lowered as f64 / 433_766.0;
+        for seen in 1..=JUDGED {
+            let next = auto.decide(lowered, &fight(fps), true, HOST);
+            if next != lowered {
+                assert!(next > lowered, "{next}");
+                return seen;
+            }
+        }
+        panic!("the try lower stayed");
+    }
+
+    #[test]
+    fn a_busy_programs_try_lower_that_loses_frames_ends_at_two_measurements() {
+        assert_eq!(try_lower_measurements(true), SEEN_TWICE);
+        // A program with time to spare may adapt to the slower speed for a
+        // while (`SETTLE_DOWN_NS`): its try is judged on `JUDGED`.
+        assert_eq!(try_lower_measurements(false), JUDGED);
     }
 
     #[test]
