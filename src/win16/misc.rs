@@ -2081,7 +2081,7 @@ fn mmio_to32(cpu: &Cpu, buffer: Option<[u32; 4]>, segptr: u32) -> u32 {
     if let Some([_, seg, base, _]) = buffer {
         let step = ((segptr >> 16) as u16).wrapping_sub((seg >> 16) as u16);
         let at = (u32::from(step / super::ldt::AHINCR) << 16) | (segptr & 0xFFFF);
-        if step % super::ldt::AHINCR == 0 && at <= mmio_tiles(cpu, seg) << 16 {
+        if step.is_multiple_of(super::ldt::AHINCR) && at <= mmio_tiles(cpu, seg) << 16 {
             return base.wrapping_add(at).wrapping_sub(seg & 0xFFFF);
         }
     }
