@@ -497,6 +497,15 @@ pub trait Host {
         false
     }
 
+    /// The end of a run of the card's commands: hand the GPU what the
+    /// host has queued for it since the last time, so it draws while
+    /// the emulator runs on. A read of the host's pixels (`read_back`,
+    /// `read_back_rows`) waits for what is queued before it to be
+    /// drawn, and waits less when the GPU began that earlier. It has
+    /// no default, so a host that passes the calls on to another (the
+    /// window's link to its renderer) passes this one on too.
+    fn submit(&mut self);
+
     /// Drop every copy: card memory is all there is, as after a saved
     /// state was loaded.
     fn forget(&mut self);
@@ -1649,6 +1658,14 @@ impl Gpu {
                 true
             }
             None => false,
+        }
+    }
+
+    /// The end of a run of the card's commands, its draws handed to the
+    /// host (`Host::submit`).
+    pub fn submit(&mut self) {
+        if let Some(host) = self.host.get_mut() {
+            host.submit();
         }
     }
 
