@@ -83,10 +83,12 @@ so a runtime is worth installing when it brings what the built-in
 Windows lacks:
 
 - **DirectX and DirectX Media:** skip them. The built-in Windows has
-  DirectX 8.1 (8.0a with `win32_version=95`) and DirectShow, and the
-  registry gives that version at every start. A DirectX setup that
-  checks the version, as the DirectX 6.1 on Prince of Persia 3D's CD
-  does, ends at once and copies nothing.
+  DirectX 8.0a, or 8.1 with `win32_version=98` or `98se`, and DirectX
+  6.1's DirectShow, and the registry gives that version at every start.
+  The setup of an older DirectX that checks the version, as the DirectX
+  6.1 on Prince of Persia 3D's CD does, ends at once and copies nothing.
+  DirectX Media's DirectAnimation isn't built in, and the package of
+  Media Player 6 that brings it doesn't install (below).
 - **QuickTime:** install it when the game has QuickTime movies (`.mov`
   files). It isn't part of Windows, and Prince of Persia 3D, for one,
   skips its movies without it. QuickTime 4's and 5's installers run.
@@ -95,19 +97,25 @@ Windows lacks:
 - **Windows Media Player 6 (`MPFULL.EXE`):** skip it. Its setup stops
   at each of its parts with "Missing entry:LaunchINFSection", as the
   built-in ADVPACK.DLL doesn't install INF sections yet (#2271), and
-  leaves the system as it was. Movies a game plays through DirectShow
-  or Video for Windows don't need it.
+  copies nothing into the system folder. Movies a game plays through
+  DirectShow or Video for Windows don't need it.
 - **Internet Explorer 4 or 5:** skip it. Its setup installs through the
   same ADVPACK functions as Media Player's. A game that loads
-  `WININET.DLL` for its online parts goes on without it (#1491).
-- **Indeo codecs and Video for Windows 1.1e:** skip them for a Windows
-  95 or 98 game. The built-in Video for Windows (MSVFW32 and AVIFIL32)
-  decodes Indeo 3, 4 and 5, Cinepak and Microsoft Video 1 itself,
-  whatever SYSTEM.INI lists, so a codec's DLL isn't used. A setup that
-  installs and registers a codec, as Leadfoot's runs
-  `regsvr32 /s ir50_32.dll`, still works. A Windows 3.1 game needs
-  Video for Windows 1.1e: the built-in Windows has no 16-bit
-  MSVIDEO.DLL or AVIFILE.DLL yet (#2306).
+  `WININET.DLL` while it runs, as Myth III does, goes on without it
+  (#1491).
+- **Indeo codecs and Video for Windows 1.1e:** skip them for a 32-bit
+  game. The built-in Video for Windows (MSVFW32 and AVIFIL32), which
+  DirectShow plays through too, decodes Indeo 3, 4 and 5, Cinepak and
+  Microsoft Video 1 itself, whatever SYSTEM.INI lists, and never loads
+  a codec's DLL: a codec installed for any other format isn't used
+  either. A setup that installs and registers a codec, as Leadfoot's
+  runs `regsvr32 /s ir50_32.dll`, still works. A 16-bit game, made for
+  Windows 3.1 or, as Civilization II, for Windows 3.1 and 95, gets
+  Video for Windows 1.1e from its setup, since the built-in Windows has
+  no 16-bit MSVIDEO.DLL or AVIFILE.DLL yet. Let the setup install it,
+  as a game that imports those DLLs doesn't start without them, but
+  its movies don't play on it yet: Civilization II stops at start with
+  a notice about its video setup (#2306).
 - **Visual Basic runtimes:** install one when a program says it needs
   `MSVBVM50.DLL` or `MSVBVM60.DLL`, which the built-in Windows doesn't
   have. If the package's setup doesn't run, open it with 7-Zip and copy
