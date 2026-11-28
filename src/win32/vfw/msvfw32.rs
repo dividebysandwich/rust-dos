@@ -408,10 +408,12 @@ fn decodes(fourcc: u32, compression: u32) -> bool {
 /// The formats of a decompression by the codec `fourcc` other than
 /// Microsoft Video 1, as `ms_video_1_formats` gives them: the stream is
 /// one of the codec's that codec.rs decodes, and the output an
-/// uncompressed DIB of its size of 16, 24 or 32 bits. codec.rs gives a
-/// picture of 24 bits, which is written in the output's format.
-/// Cinepak's 8 bits, in iccvid.dll's own palette, aren't given here
-/// (#2202), though iccvid.dll gives them.
+/// uncompressed DIB of its size of 16, 24 or 32 bits, or of 8 bits
+/// with a colour table that can be read (`output_colours`). codec.rs
+/// gives a picture of 24 bits, which is written in the output's format,
+/// in 8 bits as the nearest of the DIB's colours. iccvid.dll gives 8
+/// bits dithered to a palette of its own, or the one
+/// ICM_DECOMPRESS_SET_PALETTE gives (#2202, #2325).
 fn codec_formats(
     cpu: &mut Cpu,
     fourcc: u32,
