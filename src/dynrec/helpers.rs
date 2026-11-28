@@ -1569,6 +1569,13 @@ mod tests {
         // fbzMode and the low half of the register after it (lfbMode).
         jit_dev_write(cpu_ptr, ctx_ptr, base + 0x112, 0x0005_0007, 4);
         assert_eq!(cpu.bus.read_32(base as usize + 0x110) >> 16, 0x0007);
+        // The bus's own way takes a dword outside the window, and every
+        // dword of a Voodoo3, whose memory has ways of its own.
+        assert!(cpu.bus.dword_to_voodoo(base as usize + 0x112, 0x0005_0007));
+        assert!(!cpu.bus.dword_to_voodoo(base as usize - 4, 0));
+        cpu.bus.configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+        assert!(cpu.bus.voodoo_at(INITIAL_BAR1 as usize).is_some());
+        assert!(!cpu.bus.dword_to_voodoo(INITIAL_BAR1 as usize, 0));
     }
 
     #[test]

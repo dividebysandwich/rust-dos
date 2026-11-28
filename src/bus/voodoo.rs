@@ -214,18 +214,13 @@ impl Bus {
     /// tens of thousands of them a frame, and this goes to the card
     /// without trying first the places a write there can't reach.
     pub(crate) fn dword_to_voodoo(&mut self, addr: usize, value: u32) -> bool {
-        if !self.voodoo.as_ref().is_some_and(|v| v.banshee.is_none()) {
+        if self.voodoo.as_ref().is_none_or(|v| v.banshee.is_some()) {
             return false;
         }
         let Some(offset) = self.voodoo_at(addr) else {
             return false;
         };
-        // `write_32` gives these the dwords of theirs before the card.
-        if self.vbe.lfb_offset(addr, 4).is_some()
-            || self.s3_mmio(addr).is_some()
-            || self.mach64_mmio(addr).is_some()
-            || self.toadforce_at(addr).is_some()
-        {
+        if self.dword_before_voodoo(addr) {
             return false;
         }
         let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
@@ -234,6 +229,16 @@ impl Bus {
         }
         self.voodoo_write_32(offset, value);
         true
+    }
+
+    /// Whether `write_32` gives the dword at `addr` to a window it tries
+    /// before the 3dfx card's: the VESA frame buffer, or the S3's,
+    /// Mach64's or ToadForce's registers.
+    fn dword_before_voodoo(&self, addr: usize) -> bool {
+        self.vbe.lfb_offset(addr, 4).is_some()
+            || self.s3_mmio(addr).is_some()
+            || self.mach64_mmio(addr).is_some()
+            || self.toadforce_at(addr).is_some()
     }
 
     /// `move_to_voodoo` and `write_to_voodoo`: `len` bytes from `src` at
@@ -246,17 +251,13 @@ impl Bus {
             return false;
         };
         let last = dst + len - 4;
-        // `write_32` gives the VESA frame buffer and the S3's and Mach64's
-        // registers the dwords of theirs before the card: a run that
-        // starts or ends in one of them goes a dword at a time.
-        let other = |at: usize| {
-            self.vbe.lfb_offset(at, 4).is_some()
-                || self.s3_mmio(at).is_some()
-                || self.mach64_mmio(at).is_some()
-                || self.toadforce_at(at).is_some()
-        };
+        // A run that starts or ends in a window `write_32` tries before
+        // the card's goes a dword at a time.
         let len32 = len as u32;
-        if self.voodoo_at(last) != Some(first + len32 - 4) || other(dst) || other(last) {
+        if self.voodoo_at(last) != Some(first + len32 - 4)
+            || self.dword_before_voodoo(dst)
+            || self.dword_before_voodoo(last)
+        {
             return false;
         }
         let Some(run) = self
