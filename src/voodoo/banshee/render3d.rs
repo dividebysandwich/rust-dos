@@ -1488,6 +1488,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn multibase_textures_that_share_level_0_are_decoded_apart() {
+        use super::super::LINEAR;
+        // Level 1 (128x128) of a 5-6-5 texture with multibase, read from
+        // texBaseAddr_1 plus level 0's bytes, as Glide's
+        // grTexMultibaseAddress writes it: two textures with the same
+        // texBaseAddr, red at 6 MB and blue at 7 MB.
+        let mut v = mirrored();
+        reg3d(&mut v, COL_BUFFER_ADDR, 0x10_0000);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        let now = Now::default();
+        v.write(LINEAR + 0x60_0000, 0xF800, 0xFFFF, now);
+        v.write(LINEAR + 0x70_0000, 0x001F, 0xFFFF, now);
+        reg3d(&mut v, TEX_BASE_ADDR, 0x50_0000);
+        reg3d(&mut v, T_LOD, 1 << 24 | 4 << 6 | 4);
+        let decal = 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27;
+        reg3d(&mut v, TEXTURE_MODE, decal);
+        reg3d(&mut v, FBZ_COLOR_PATH, 1 | 1 << 27);
+        let draw = |v: &mut Voodoo, start: u32| -> Vec<u32> {
+            reg3d(v, TEX_BASE_ADDR_1, start - 256 * 256 * 2);
+            rectangle(v, (0.0, 0.0, 8.0, 8.0), (0.0, 0.0, 0.0));
+            let frame = v.take_mirror().unwrap();
+            let textures = frame.commands.iter().filter_map(|c| match c {
+                Command::Texture(t) => Some(t.levels[0].argb[0]),
+                _ => None,
+            });
+            textures.collect()
+        };
+        // A Voodoo3's two units draw with it.
+        assert_eq!(draw(&mut v, 0x60_0000), [0xFFFF_0000; 2]);
+        assert_eq!(draw(&mut v, 0x70_0000), [0xFF00_00FF; 2]);
+    }
+
+    #[test]
     fn double_buffered_frames_drop_what_is_drawn_over() {
         use super::super::LINEAR;
         // Eight frames as a game draws them, into two tiled buffers in

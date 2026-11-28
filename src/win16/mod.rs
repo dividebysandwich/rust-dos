@@ -38,6 +38,7 @@ mod ole2;
 mod ole2disp;
 pub(crate) mod resource;
 mod setupx;
+mod storage;
 pub mod task;
 pub(crate) mod thunk;
 mod typelib;

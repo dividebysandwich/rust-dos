@@ -152,11 +152,7 @@ pub fn screen_mode(cpu: &Cpu) -> Option<(u32, u32, u32)> {
 /// size and then depth.
 pub fn modes(cpu: &Cpu) -> Vec<(u32, u32, u32)> {
     // An S3 ViRGE's "24-bit" color is 3 bytes a pixel instead of 4.
-    let truecolor = if cpu.bus.vga.adapter.is_virge() {
-        24
-    } else {
-        32
-    };
+    let truecolor = screen::true_color(cpu);
     let mut list = Vec::new();
     // A ToadForce has the larger sizes too, which fit its memory.
     let more: &[(u32, u32)] = if screen::is_toadforce(cpu) {
