@@ -409,7 +409,8 @@ const STALLED: f64 = 2.0;
 /// frames end goes back no lower than the speed the hold ran, where the
 /// host kept up with that for the `JUDGED` measurements before the try:
 /// the late frames say the host can't run the step, and those
-/// measurements say it runs the hold's speed. In Redguard's ship fight a
+/// measurements say it runs the hold's speed. A step back to less than
+/// that stays where it is, and the hold the try's end set up goes on. In Redguard's ship fight a
 /// hold at 419,353, at 46 frames a second, tried 364,655, where the fight
 /// drew 40, and went back up to 421,239. Seven frames on time and then
 /// three 25 to 31 ms behind ended that step before a run on time, and
@@ -2753,7 +2754,9 @@ impl AutoSpeed {
         // host kept up with before the try (`try_kept`): its frames being
         // late says the host can't run the step, not that it can't run
         // that speed, which its measurements showed it does.
-        let back = self.try_kept.map_or(from, |kept| kept.clamp(from, current));
+        let back = self
+            .try_kept
+            .map_or(from, |kept| kept.min(current).max(from));
         let fine = ((from as f64 * FINE_STEP).round() as u32).max(back);
         let next = if current as f64 > fine as f64 * 1.01 {
             // Still a step up from `from`, as the search had it (or the
@@ -2772,14 +2775,21 @@ impl AutoSpeed {
             }
             self.trying = None;
             self.lagged = Some((back, LAGGED_WINDOWS));
-            self.step = Step::Hold {
-                fps: f64::NAN,
-                left: HOLD_WINDOWS,
-                more: false,
-                recent: f64::NAN,
-                seen: 0,
-                dipped: 0,
-            };
+            // Back at the speed kept, the hold that the end of the try
+            // lower set up stays: it waits for as long as the try's
+            // backoffs say, and tries more next (`Step::Lowered`). A fresh
+            // hold there would try the same step down after
+            // `HOLD_WINDOWS`, and lose its frames again.
+            if back == from {
+                self.step = Step::Hold {
+                    fps: f64::NAN,
+                    left: HOLD_WINDOWS,
+                    more: false,
+                    recent: f64::NAN,
+                    seen: 0,
+                    dipped: 0,
+                };
+            }
             back
         };
         if trace() {
@@ -5978,8 +5988,9 @@ mod tests {
     /// Redguard's ship fight (#2350): the last `JUDGED` measurements of a
     /// hold at 419,353, at 46 frames a second, the first of them at `pace`,
     /// then its try lower, at 40 frames a second, and the step back up its
-    /// frames ended: seven on time and three late. The speed it went to.
-    fn step_back_up_ended(pace: f64) -> Option<u32> {
+    /// frames ended: seven on time and three late. The speed it went to,
+    /// and the search's step after that.
+    fn step_back_up_ended(pace: f64) -> (Option<u32>, Step) {
         const MS: u64 = 1_000_000;
         const HOST: u32 = 421_239;
         let fight = |fps: f64, pace: f64| Measurement {
@@ -6017,22 +6028,57 @@ mod tests {
             assert_eq!(auto.falling_behind(bus, unsorted(behind, 0)), None);
         }
         assert_eq!(auto.trying, Some(lowered));
-        auto.falling_behind(bus, unsorted(30_700_000, 0))
+        let cut = auto.falling_behind(bus, unsorted(30_700_000, 0));
+        (cut, auto.step)
     }
 
     #[test]
     fn a_step_back_up_from_a_try_lower_ends_at_the_speed_the_host_kept_up_with() {
         // The hold kept up with 419,353 before its try lower: the step back
         // up ends there, not at 364,655, where the fight draws 40.
-        assert_eq!(step_back_up_ended(1.0), Some(419_353));
+        let (cut, step) = step_back_up_ended(1.0);
+        assert_eq!(cut, Some(419_353));
+        // The hold the try lower's end set up stays: it waits out the
+        // try's backoffs and tries more next, not the same step down.
+        assert!(
+            matches!(step, Step::Hold { more: true, left, .. } if left >= HOLD_WINDOWS),
+            "{step:?}"
+        );
     }
 
     #[test]
     fn a_step_back_up_to_a_speed_the_host_fell_behind_at_ends_under_it() {
         // One of the hold's last measurements fell behind: nothing says the
         // host runs 419,353, and the step goes back to the try's speed.
-        let cut = step_back_up_ended(0.9);
+        let (cut, _) = step_back_up_ended(0.9);
         assert_eq!(cut, Some((419_353.0 / FINE_STEP).round() as u32));
+    }
+
+    #[test]
+    fn a_step_back_up_past_the_speed_kept_ends_there_and_no_lower() {
+        // A step back up from 364,655 to 461,288, past the 419,353 the host
+        // kept up with: late frames take it to 419,353, still watched, and
+        // late frames there leave it, for its measurements to judge.
+        const MS: u64 = 1_000_000;
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let mut auto = AutoSpeed::new(3000, None);
+        bus.set_cycles_per_ms(461_288);
+        auto.watch(364_655);
+        auto.try_kept = Some(419_353);
+        for _ in 1..TRY_BEHIND_FRAMES {
+            assert_eq!(auto.falling_behind(bus, unsorted(30 * MS, 0)), None);
+        }
+        let cut = auto.falling_behind(bus, unsorted(30 * MS, 0));
+        assert_eq!(cut, Some(419_353));
+        assert_eq!(auto.trying, Some(364_655));
+        bus.set_cycles_per_ms(419_353);
+        for _ in 1..TRY_BEHIND_FRAMES {
+            assert_eq!(auto.falling_behind(bus, unsorted(30 * MS, 0)), None);
+        }
+        assert_eq!(auto.falling_behind(bus, unsorted(30 * MS, 0)), None);
+        assert_eq!(auto.trying, None);
+        assert_eq!(auto.lagged, Some((419_353, LAGGED_WINDOWS)));
     }
 
     #[test]
