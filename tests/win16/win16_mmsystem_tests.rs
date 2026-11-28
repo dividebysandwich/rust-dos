@@ -1359,7 +1359,7 @@ fn mci_send_command_gives_sysinfos_name_in_a_16_bit_buffer() {
 
 /// The frames of an AVI file: twelve uncompressed 24-bit 32x32
 /// pictures, with an index.
-fn avi_clip() -> Vec<u8> {
+pub(crate) fn avi_clip() -> Vec<u8> {
     fn chunk(out: &mut Vec<u8>, id: &[u8], data: &[u8]) {
         out.extend_from_slice(id);
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
