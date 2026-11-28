@@ -38,6 +38,7 @@ use super::builtin::{Def, cdecl, missing, rust, variable, win32};
 use super::{global, local, thunk};
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
+use crate::savestate::Since;
 use crate::win32::com::{
     E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, REGDB_E_CLASSNOTREG, S_FALSE, S_OK,
 };
@@ -134,6 +135,11 @@ pub struct OleTask {
     pub message_filter: u32,
     /// The error object of the last SetErrorInfo (OLE2DISP).
     pub error_info: u32,
+    /// The modules of the in-process servers CoGetClassObject and
+    /// CoCreateInstance loaded for the task, each loaded once for it:
+    /// CoFreeUnusedLibraries frees those whose DllCanUnloadNow says so,
+    /// and the last CoUninitialize all of them.
+    pub libraries: Since<SERVERS_SAVED, Vec<u16>>,
 }
 
 crate::state_fields!(OleTask {
@@ -142,8 +148,13 @@ crate::state_fields!(OleTask {
     ole_inits,
     app_malloc,
     message_filter,
-    error_info
+    error_info,
+    libraries
 });
+
+/// The W32 state version that first saves the in-process servers a
+/// task loaded (`OleTask::libraries`).
+pub const SERVERS_SAVED: u16 = 117;
 
 /// A class object CoRegisterClassObject registered.
 #[derive(Clone, Debug, Default)]
@@ -199,8 +210,19 @@ pub fn this_task_or_new(cpu: &mut Cpu) -> &mut OleTask {
 /// The task `task` ended: what the modules kept for it goes, with the
 /// class objects and drop targets it registered, so that no other task
 /// reaches them. Their code and data went with the task, so none of
-/// their methods is called.
+/// their methods is called. The in-process servers it loaded are freed
+/// as its last CoUninitialize would have freed them, so that a program
+/// that ends without calling it doesn't keep them loaded.
 pub fn task_ended(cpu: &mut Cpu, task: u16) {
+    let libraries = ole(cpu)
+        .tasks
+        .iter_mut()
+        .find(|t| t.task == task)
+        .map(|t| std::mem::take(&mut *t.libraries))
+        .unwrap_or_default();
+    for handle in libraries {
+        super::module::release(cpu, handle);
+    }
     let o = ole(cpu);
     o.tasks.retain(|t| t.task != task);
     o.classes.retain(|c| c.task != task);
@@ -222,17 +244,17 @@ pub static COMPOBJ: Def = Def {
             co_register_class_object,
         ),
         rust("CoRevokeClassObject", 6, "l", co_revoke_class_object),
-        rust("CoGetClassObject", 7, "pllll", co_get_class_object),
+        rust("CoGetClassObject", 7, "lllll", co_get_class_object),
         missing("CoMarshalInterface", 8),
         missing("CoUnmarshalInterface", 9),
         missing("CoLoadLibrary", 10),
         missing("CoFreeLibrary", 11),
         missing("CoFreeAllLibraries", 12),
-        rust("CoCreateInstance", 13, "pllll", co_create_instance),
+        rust("CoCreateInstance", 13, "lllll", co_create_instance),
         rust("StringFromIID", 14, "pl", string_from_clsid),
         rust("CoDisconnectObject", 15, "ll", s_ok),
         missing("CoReleaseMarshalData", 16),
-        rust("CoFreeUnusedLibraries", 17, "", s_ok),
+        rust("CoFreeUnusedLibraries", 17, "", co_free_unused_libraries),
         rust("IsEqualGUID", 18, "pp", is_equal_guid),
         rust("StringFromCLSID", 19, "pl", string_from_clsid),
         rust("CLSIDFromString", 20, "pp", clsid_from_string),
@@ -628,6 +650,17 @@ fn co_uninitialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return Some(0);
     };
     t.co_inits = t.co_inits.saturating_sub(1);
+    if t.co_inits == 0 {
+        // CoFreeAllLibraries: the in-process servers loaded for the
+        // task.
+        let libraries = std::mem::take(&mut *t.libraries);
+        for handle in libraries {
+            super::module::release(cpu, handle);
+        }
+    }
+    let Some(t) = this_task(cpu) else {
+        return Some(0);
+    };
     if t.co_inits == 0 && t.app_malloc != 0 {
         // The reference CoInitialize took.
         let malloc = std::mem::take(&mut t.app_malloc);
@@ -957,8 +990,16 @@ fn call_at(
     then: u16,
     data: Vec<u32>,
 ) {
-    // C's order: the last argument pushed first, a dword's high word
-    // before its low one.
+    let words = cdecl_words(object, args, sizes);
+    let resume = Context::of(cpu);
+    thunk::call16(cpu, target, &words, 0, resume, then, data);
+}
+
+/// The words of a call of a method of the 16-bit interface `object`
+/// with the arguments `args` (`sizes` as `call_method` has them), in
+/// C's order: the last argument pushed first, a dword's high word
+/// before its low one, the object last.
+fn cdecl_words(object: u32, args: &[u32], sizes: &str) -> Vec<u16> {
     let mut words = Vec::new();
     for (&a, size) in args.iter().zip(sizes.bytes()).rev() {
         if size == b'l' {
@@ -968,8 +1009,7 @@ fn call_at(
     }
     words.push((object >> 16) as u16);
     words.push(object as u16);
-    let resume = Context::of(cpu);
-    thunk::call16(cpu, target, &words, 0, resume, then, data);
+    words
 }
 
 /// Return `result` to the function's caller in DX:AX from a `then`.
@@ -1151,12 +1191,12 @@ fn registered(cpu: &mut Cpu, clsid: u32) -> Option<u32> {
 }
 
 /// CoGetClassObject(rclsid, dwClsContext, pvReserved, riid, ppv): the
-/// class object registered in this process, asked for the interface.
-/// The built-in Windows starts no server for a class, so one not
-/// registered is REGDB_E_CLASSNOTREG. `riid` and `ppv` come as 16:16
-/// pointers, which the method gets.
+/// class object registered in this process, asked for the interface, or
+/// else the one the class's in-process server gives (`start_server`).
+/// The pointers come as 16:16 ones, which the method and the server
+/// get.
 fn co_get_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [clsid, _context, _reserved, riid, out] = args[..] else {
+    let [clsid, context, _reserved, riid, out] = args[..] else {
         unreachable!()
     };
     let at = super::linear(cpu, out);
@@ -1164,18 +1204,20 @@ fn co_get_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     }
     super::write_32(cpu, at, 0);
-    match registered(cpu, clsid) {
+    match registered(cpu, super::linear(cpu, clsid)) {
         Some(unk) => call_method(cpu, unk, 0, &[riid, out], "ll", None),
-        None => Some(REGDB_E_CLASSNOTREG),
+        None => start_server(cpu, clsid, context, riid, out, None),
     }
 }
 
 /// CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv): an
-/// object of a class registered in this process, made by its class
-/// object's IClassFactory::CreateInstance (the object registered is the
-/// class factory, as CoRegisterClassObject's callers register it).
+/// object of the class, made by its class object's
+/// IClassFactory::CreateInstance: the one registered in this process
+/// (the object registered is the class factory, as
+/// CoRegisterClassObject's callers register it), or else the one the
+/// class's in-process server gives (`start_server`).
 fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [clsid, outer, _context, riid, out] = args[..] else {
+    let [clsid, outer, context, riid, out] = args[..] else {
         unreachable!()
     };
     let at = super::linear(cpu, out);
@@ -1183,9 +1225,276 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     }
     super::write_32(cpu, at, 0);
-    match registered(cpu, clsid) {
+    match registered(cpu, super::linear(cpu, clsid)) {
         Some(factory) => call_method(cpu, factory, 3, &[outer, riid, out], "lll", None),
-        None => Some(REGDB_E_CLASSNOTREG),
+        None => start_server(cpu, clsid, context, riid, out, Some(outer)),
+    }
+}
+
+// In-process servers.
+
+const CLSCTX_INPROC_SERVER: u32 = 1;
+const CLSCTX_INPROC_HANDLER: u32 = 2;
+const CO_E_DLLNOTFOUND: u32 = 0x8004_01F8;
+const CO_E_ERRORINDLL: u32 = 0x8004_01F9;
+const IID_ICLASSFACTORY: [u8; 16] = ole_guid(1);
+
+/// The steps of `then_server`, its `data[0]`.
+const SERVER_INITS: u32 = 0;
+const SERVER_GOT: u32 = 1;
+const SERVER_FACTORY: u32 = 2;
+const SERVER_MADE: u32 = 3;
+const SERVER_UNLOAD: u32 = 4;
+
+/// The DLL the registry names for the class whose GUID is at `clsid`
+/// (16:16), in a context `context` allows: `CLSID\{...}\InprocServer`,
+/// else `InprocHandler`, as OLE 2's COMPOBJ looks for them.
+fn inproc_dll(cpu: &mut Cpu, clsid: u32, context: u32) -> Option<String> {
+    let at = super::linear(cpu, clsid);
+    let key = format!("CLSID\\{}", guid_text(&read_guid(cpu, at)));
+    [
+        (CLSCTX_INPROC_SERVER, "InprocServer"),
+        (CLSCTX_INPROC_HANDLER, "InprocHandler"),
+    ]
+    .into_iter()
+    .filter(|&(bit, _)| context & bit != 0)
+    .find_map(|(_, sub)| {
+        let path = format!("{key}\\{sub}");
+        crate::win32::registry::string_value(cpu, HKEY_CLASSES_ROOT, &path, "")
+            .filter(|dll| !dll.is_empty())
+    })
+}
+
+/// Start the in-process server of the class at `clsid` for
+/// CoGetClassObject (`outer` None) or CoCreateInstance (`outer` the
+/// controlling object): its DLL loaded for the task, as COMPOBJ's
+/// CoLoadLibrary loads it, and its entry points run, then its
+/// DllGetClassObject asked for the class object (`then_server`). A class
+/// with no DLL in the registry for `context` is REGDB_E_CLASSNOTREG, a
+/// DLL that doesn't load CO_E_DLLNOTFOUND; the server's own failures are
+/// what it returns.
+fn start_server(
+    cpu: &mut Cpu,
+    clsid: u32,
+    context: u32,
+    riid: u32,
+    out: u32,
+    outer: Option<u32>,
+) -> Option<u32> {
+    let Some(dll) = inproc_dll(cpu, clsid, context) else {
+        return Some(REGDB_E_CLASSNOTREG);
+    };
+    let dir = super::module::task_dir(cpu);
+    let mut inits = Vec::new();
+    let index = match super::module::load(cpu, &dll, &dir, &mut inits) {
+        Ok(index) => index,
+        Err(e) => {
+            cpu.bus.log_string(&format!(
+                "[W16] COMPOBJ: in-process server {dll}: {}",
+                e.message
+            ));
+            return Some(CO_E_DLLNOTFOUND);
+        }
+    };
+    let handle = cpu.bus.win32.win16.modules[index].handle;
+    let mut data = vec![
+        SERVER_INITS,
+        handle as u32,
+        clsid,
+        riid,
+        out,
+        outer.unwrap_or(0),
+        outer.is_some() as u32,
+    ];
+    data.extend(
+        inits
+            .iter()
+            .map(|&i| cpu.bus.win32.win16.modules[i].handle as u32),
+    );
+    let mut resume = Context::of(cpu);
+    server_inits(cpu, &data[1..], &mut resume, true)
+}
+
+/// The next step of starting an in-process server (`start_server`) or
+/// of CoFreeUnusedLibraries, `data[0]`, after the 16-bit code the step
+/// before called returned `value`:
+///
+/// - `SERVER_INITS` [module, clsid, riid, out, outer, create, inits...]:
+///   the entry point of the next library loaded with the server runs;
+///   with none left, the server's module is the task's, kept once, and
+///   its DllGetClassObject (Pascal's) is called: for CoGetClassObject
+///   with the caller's interface and `out`, for CoCreateInstance with
+///   IClassFactory's and a place on the stack below the caller's.
+/// - `SERVER_GOT`: CoGetClassObject's DllGetClassObject returned.
+/// - `SERVER_FACTORY` [outer, riid, out, place]: CoCreateInstance's
+///   returned, and the factory, at `place`, makes the object
+///   (CreateInstance) at `out`.
+/// - `SERVER_MADE` [factory]: CreateInstance returned what the caller
+///   gets, once the factory is released.
+/// - `SERVER_UNLOAD` [module, modules...]: the module's DllCanUnloadNow
+///   returned, S_OK freeing the module; then the next module's is
+///   called.
+pub(super) fn then_server(
+    cpu: &mut Cpu,
+    value: u32,
+    data: &[u32],
+    ctx: &mut Context,
+) -> Option<u32> {
+    match data[0] {
+        SERVER_INITS => server_inits(cpu, &data[1..], ctx, false),
+        SERVER_GOT => dx_ax(ctx, value),
+        SERVER_FACTORY => {
+            let [outer, riid, out, place] = data[1..] else {
+                return dx_ax(ctx, E_INVALIDARG);
+            };
+            let at = super::linear(cpu, place);
+            let factory = if at == 0 { 0 } else { super::read_32(cpu, at) };
+            if value & 0x8000_0000 != 0 || factory == 0 {
+                let hr = if value & 0x8000_0000 != 0 {
+                    value
+                } else {
+                    E_NOINTERFACE
+                };
+                return dx_ax(ctx, hr);
+            }
+            let target = method_address(cpu, factory, 3);
+            if target == 0 {
+                return dx_ax(ctx, E_NOINTERFACE);
+            }
+            let words = cdecl_words(factory, &[outer, riid, out], "lll");
+            let data = vec![SERVER_MADE, factory];
+            thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_SERVER, data);
+            None
+        }
+        SERVER_MADE => {
+            let factory = data[1];
+            let target = method_address(cpu, factory, 2);
+            if target == 0 {
+                return dx_ax(ctx, value);
+            }
+            let words = [(factory >> 16) as u16, factory as u16];
+            let data = vec![1, value];
+            thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_METHOD, data);
+            None
+        }
+        SERVER_UNLOAD => {
+            let module = data[1] as u16;
+            if value == S_OK {
+                if let Some(t) = this_task(cpu) {
+                    t.libraries.retain(|&h| h != module);
+                }
+                super::module::release(cpu, module);
+            }
+            next_unload(cpu, &data[2..], ctx, false)
+        }
+        _ => dx_ax(ctx, E_INVALIDARG),
+    }
+}
+
+/// `SERVER_INITS` of `then_server`, or its first step, called by the
+/// function itself (`direct`) with its caller's context.
+fn server_inits(cpu: &mut Cpu, data: &[u32], ctx: &mut Context, direct: bool) -> Option<u32> {
+    let [module, clsid, riid, out, outer, create, ref inits @ ..] = data[..] else {
+        return reply(ctx, direct, E_INVALIDARG);
+    };
+    if let [init, rest @ ..] = inits {
+        let mut next = vec![SERVER_INITS, module, clsid, riid, out, outer, create];
+        next.extend_from_slice(rest);
+        super::task::call_lib_init(cpu, *init as u16, *ctx, thunk::THEN_OLE_SERVER, next);
+        return None;
+    }
+    let module = module as u16;
+    // The task holds one load of each server, however many classes it
+    // asked it for.
+    let t = this_task_or_new(cpu);
+    if t.libraries.contains(&module) {
+        super::module::release(cpu, module);
+    } else {
+        t.libraries.push(module);
+    }
+    let target = super::module::ordinal_of(cpu, module, "DllGetClassObject")
+        .map_or(0, |o| super::module::entry_point(cpu, module, o));
+    if target == 0 {
+        return reply(ctx, direct, CO_E_ERRORINDLL);
+    }
+    let far = |p: u32| [(p >> 16) as u16, p as u16];
+    if create == 0 {
+        let mut words = far(clsid).to_vec();
+        words.extend(far(riid));
+        words.extend(far(out));
+        thunk::call16(
+            cpu,
+            target,
+            &words,
+            0,
+            *ctx,
+            thunk::THEN_OLE_SERVER,
+            vec![SERVER_GOT],
+        );
+        return None;
+    }
+    // IClassFactory's IID and the place for the factory, below the
+    // caller's stack, which the call is made under.
+    let (ss, sp) = thunk::stack16_for(cpu, ctx);
+    let iid_at = sp.wrapping_sub(20) & !1;
+    let base = super::lin(cpu, ss, iid_at);
+    super::poke(cpu, base, &IID_ICLASSFACTORY);
+    super::write_32(cpu, base + 16, 0);
+    let iid = (ss as u32) << 16 | iid_at as u32;
+    let place = iid + 16;
+    let mut words = far(clsid).to_vec();
+    words.extend(far(iid));
+    words.extend(far(place));
+    let data = vec![SERVER_FACTORY, outer, riid, out, place];
+    thunk::call16_at(
+        cpu,
+        target,
+        &words,
+        0,
+        *ctx,
+        thunk::THEN_OLE_SERVER,
+        data,
+        (ss, iid_at),
+    );
+    None
+}
+
+/// CoFreeUnusedLibraries(): each in-process server loaded for the task
+/// whose DllCanUnloadNow returns S_OK is freed. A server without the
+/// function stays.
+fn co_free_unused_libraries(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let modules: Vec<u32> = this_task(cpu)
+        .map(|t| t.libraries.iter().map(|&h| h as u32).collect())
+        .unwrap_or_default();
+    let mut resume = Context::of(cpu);
+    next_unload(cpu, &modules, &mut resume, true)
+}
+
+/// Call the DllCanUnloadNow of the first of `modules` that has one, the
+/// rest to follow (`SERVER_UNLOAD`); with none left, CoFreeUnusedLibraries
+/// returns (`direct` as `server_inits` has it).
+fn next_unload(cpu: &mut Cpu, modules: &[u32], ctx: &mut Context, direct: bool) -> Option<u32> {
+    for (i, &module) in modules.iter().enumerate() {
+        let target = super::module::ordinal_of(cpu, module as u16, "DllCanUnloadNow")
+            .map_or(0, |o| super::module::entry_point(cpu, module as u16, o));
+        if target == 0 {
+            continue;
+        }
+        let mut data = vec![SERVER_UNLOAD, module];
+        data.extend_from_slice(&modules[i + 1..]);
+        thunk::call16(cpu, target, &[], 0, *ctx, thunk::THEN_OLE_SERVER, data);
+        return None;
+    }
+    reply(ctx, direct, 0)
+}
+
+/// Return `value` to the function's caller: as a function returns it
+/// (`direct`), or in DX:AX from a `then`.
+fn reply(ctx: &mut Context, direct: bool, value: u32) -> Option<u32> {
+    if direct {
+        Some(value)
+    } else {
+        dx_ax(ctx, value)
     }
 }
 

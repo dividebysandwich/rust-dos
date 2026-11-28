@@ -113,6 +113,7 @@ pub static THENS: &[Then] = &[
     super::message::then_send16,
     super::user::then_dlg_int,
     super::notify::then_exit,
+    super::ole2::then_server,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -134,6 +135,7 @@ pub const THEN_TYPELIB_INVOKE: u16 = 15;
 pub const THEN_SEND16: u16 = 16;
 pub const THEN_DLG_INT: u16 = 17;
 pub const THEN_NOTIFY_EXIT: u16 = 18;
+pub const THEN_OLE_SERVER: u16 = 19;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)
