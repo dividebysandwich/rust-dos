@@ -134,13 +134,13 @@ that it improves on main. Steps, in this order:
 4. Mark it ready for review only when that shows a clear improvement on
    main: a speed-up you measured, against main on the same machine and
    scene; less work for the same output, counted in deterministic runs,
-   for a change that only removes work (below); a bug that main has and the branch fixes, seen in the game; or
-   behaviour closer to the real hardware or the real Windows, shown by
-   a test or a comparison with it. Put the evidence in the description.
-   How much checking that takes depends on what the change can break
-   ("Checks in proportion to the change", below), which also says which
-   changes need a "Regression check" section and how many programs it
-   lists.
+   for a change that only removes work (below); a bug that main has and
+   the branch fixes, seen in the game; or behaviour closer to the real
+   hardware or the real Windows, shown by a test or a comparison with
+   it. Put the evidence in the description. How much checking that
+   takes depends on what the change can break ("Checks in proportion to
+   the change", below), which also says which changes need a
+   "Regression check" section and how many programs it lists.
 
    Before it is marked ready, check that it still merges with main,
    which moves on while a pull request is in draft. Fetch both and run
