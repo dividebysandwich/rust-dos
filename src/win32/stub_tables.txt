@@ -6131,6 +6131,7 @@ GetAspectRatioFilter
 GetAspectRatioFilterEx
 IsDCCurrentPalette
 CreateScalableFontResource
+GetOutlineTextMetrics
 
 MODULE KEYBOARD
 ToAscii
