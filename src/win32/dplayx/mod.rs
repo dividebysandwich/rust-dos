@@ -51,14 +51,18 @@ pub use calls::step as call_step;
 pub use net::poll;
 
 use super::com::{self, CLASS_E_NOAGGREGATION, E_NOINTERFACE, E_OUTOFMEMORY, GUID_NULL, Guid};
-use super::stubs::{Api, Conv, Dll, Vtable};
+use super::stubs::{Api, Conv, Dll, Var, Vtable};
 use crate::cpu::Cpu;
 
 pub static DLL: Dll = Dll {
     name: "DPLAYX.DLL",
     base: 0xBFAE_0000,
     apis: APIS,
-    vars: &[],
+    vars: &[Var {
+        name: "providerGuids",
+        ordinal: 0,
+        size: 16 * PROVIDERS.len() as u32,
+    }],
     init: None,
     term: None,
     vtables: VTABLES,
@@ -665,6 +669,28 @@ const PROVIDERS: &[(Guid, &str)] = &[
     (DPSPGUID_IPX, "IPX Connection For DirectPlay"),
     (DPSPGUID_TCPIP, "Internet TCP/IP Connection For DirectPlay"),
 ];
+
+/// Where the GUID of the provider `index` is for the program: in
+/// DPLAYX's variables, which stay while the DLL is mapped. Sorry! keeps
+/// the pointer its DirectPlayEnumerate callback got and passes it to
+/// DirectPlayCreate when the player picks a connection, which works on
+/// Windows 98, so the GUID outlives the callback there. None in a
+/// process whose DPLAYX is from a state saved before the DLL had
+/// variables, and where the variable's page can't be written: a DPLAYX
+/// freed and loaded again after such a state loads keeps the older,
+/// shorter region, though its module has the size of the image now.
+fn provider_guid_at(cpu: &mut Cpu, index: usize) -> Option<u32> {
+    let at = super::stubs::var_address(dll_index(), 0) + 16 * index as u32;
+    let mapped = super::running(cpu)?
+        .modules
+        .iter()
+        .any(|m| m.base == DLL.base && at + 16 <= m.base + m.size);
+    if !mapped {
+        return None;
+    }
+    PROVIDERS.get(index)?.0.write(cpu, at).then_some(at)
+}
+
 /// The version DirectPlayEnumerate gives each provider: DirectX 6's.
 const PROVIDER_VERSION: (u32, u32) = (6, 0);
 
