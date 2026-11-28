@@ -68,8 +68,9 @@ const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
 
 /// The bytes of a vertex as the host gets it: the position, the two
-/// colours, and four coordinate sets (`shader::ATTRIBUTES`), which is
-/// how the card queues it (`gpu::Vertex`).
+/// colours, four coordinate sets and the card's depth plane
+/// (`shader::ATTRIBUTES`), which is how the card queues it
+/// (`gpu::Vertex`).
 const VERTEX_BYTES: usize = gpu::Vertex::BYTES;
 
 /// The texture unit textures are bound to while they are filled, past
@@ -488,6 +489,9 @@ pub struct ToadForceGl {
     runs: u64,
     /// The runs among them whose vertices the host transformed.
     transformed: u64,
+    /// The runs among them drawn with the card's depth
+    /// (`gpu::Run::card_depth`).
+    card_depth_runs: u64,
     uploads: u64,
     decodes: u64,
     /// The images of textures decoded: the levels, and the faces of a
@@ -565,6 +569,10 @@ impl ToadForceGl {
                 let offset = 24 + 16 * slot as i32;
                 gl.vertex_attrib_pointer_f32(3 + slot, 4, glow::FLOAT, false, stride, offset);
             }
+            let depth = 24 + 16 * pipeline::SLOTS as i32;
+            let plane = 3 + pipeline::SLOTS as u32;
+            gl.vertex_attrib_pointer_f32(plane, 3, glow::FLOAT, false, stride, depth);
+            gl.vertex_attrib_pointer_f32(plane + 1, 2, glow::FLOAT, false, stride, depth + 12);
             for (index, _) in shader::ATTRIBUTES {
                 gl.enable_vertex_attrib_array(index);
             }
@@ -606,6 +614,7 @@ impl ToadForceGl {
                 vertex_bytes: Vec::new(),
                 runs: 0,
                 transformed: 0,
+                card_depth_runs: 0,
                 uploads: 0,
                 decodes: 0,
                 images_decoded: 0,
@@ -755,6 +764,7 @@ impl ToadForceGl {
                     state: state(blend),
                     vertices: 0..3,
                     geometry: None,
+                    card_depth: false,
                 }];
                 let batch = Batch {
                     target,
@@ -808,6 +818,7 @@ impl ToadForceGl {
             state: Arc::new(hidden),
             vertices: 0..3,
             geometry: None,
+            card_depth: false,
         }];
         let batch = Batch {
             target,
@@ -2170,12 +2181,16 @@ impl ToadForceGl {
             let scale = [2.0 / surface.width as f32, 2.0 / surface.height as f32];
             gl.uniform_2_f32(u.scale.as_ref(), scale[0], scale[1]);
             gl.uniform_1_i32(u.pack.as_ref(), pack as i32);
-            // The bias in steps of the depth buffer, of its range.
-            let (bias, steps) = match state.target.depth.map(|d| d.format) {
-                Some(Format::D16) => (v.z_bias, 0xFFFF),
-                _ => (v.z_bias >> 8, 0xFF_FFFF),
+            // The bias in steps of the depth buffer: as a part of its
+            // range for the vertex shaders, and with the buffer's bits
+            // for a program that works out the card's depth.
+            let (bias, bits) = match state.target.depth.map(|d| d.format) {
+                Some(Format::D16) => (v.z_bias, 16),
+                _ => (v.z_bias >> 8, 24),
             };
+            let steps = (1u32 << bits) - 1;
             gl.uniform_1_f32(u.bias.as_ref(), bias as f32 / steps as f32);
+            gl.uniform_2_i32(u.depth.as_ref(), bits, bias as i32);
             if u.factor.is_some() {
                 let [r, g, b, a] = rgba(v.factor);
                 gl.uniform_4_i32(u.factor.as_ref(), r, g, b, a);
@@ -2366,7 +2381,7 @@ impl Host for ToadForceGl {
             }
         }
         // SAFETY: the context is current (see the module comment).
-        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0, false)) } {
+        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0, false, false)) } {
             None
         } else {
             Some(Decline::ProgramFailed)
@@ -2374,12 +2389,17 @@ impl Host for ToadForceGl {
     }
 
     fn transforms(&self, state: &DrawState) -> bool {
-        // OpenGL ES has no clip distances.
-        if self.broken || self.glsl == Glsl::Es300 {
+        // OpenGL ES has no clip distances. The card transforms a draw
+        // with a depth bias, and the host writes the card's depth of
+        // it (`gpu::Run::card_depth`): the host's depth of vertices it
+        // transforms is a few steps of a 24-bit buffer off the card's,
+        // and with a bias of a step or two that decides which pixels
+        // of a mark on the ground are drawn (Giants).
+        if self.broken || self.glsl == Glsl::Es300 || state.biased_depth() {
             return false;
         }
         // SAFETY: the context is current (see the module comment).
-        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0, false)) }
+        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0, false, false)) }
     }
 
     fn status(&self) -> serde_json::Value {
@@ -2392,6 +2412,7 @@ impl Host for ToadForceGl {
             "programs": self.programs.borrow().len(),
             "transforming_programs": self.tnl.borrow().len(),
             "transformed_runs": self.transformed,
+            "card_depth_runs": self.card_depth_runs,
             "failed_programs": self.failed.borrow().len(),
             "surfaces": self.copies.len(),
             "textures": self.textures.len(),
@@ -2490,14 +2511,20 @@ impl Host for ToadForceGl {
                 if (count == 0 && geometry.is_none()) || !self.fixed(state) {
                     continue;
                 }
-                // `declines` compiled the program without the range's
-                // `discard`. The one with it is compiled when a run
-                // first needs it; were it to fail, the run is drawn
-                // without, with its pixels outside the range.
+                // `declines` compiled the program with the host's depth
+                // and without the range's `discard`. The one that
+                // writes the card's depth, and the one with the
+                // `discard`, are compiled when a run first needs them;
+                // were one to fail, the run is drawn with the host's
+                // depth, or without the `discard` and with its pixels
+                // outside the range.
                 let anisotropic = self.anisotropy > 0.0;
-                let base = shader::key(state, anisotropic, false);
+                let base = shader::key(state, anisotropic, false, false);
+                let card = Some(shader::key(state, anisotropic, false, true))
+                    .filter(|key| run.card_depth && self.compiled(key));
+                let base = card.unwrap_or(base);
                 let key = match outside {
-                    true => Some(shader::key(state, anisotropic, true))
+                    true => Some(shader::key(state, anisotropic, true, base.card_depth))
                         .filter(|key| self.compiled(key))
                         .unwrap_or(base),
                     false => base,
@@ -2527,6 +2554,7 @@ impl Host for ToadForceGl {
                     .any(|step| matches!(step, Step::Write { blend: None, .. }));
                 let pack = plain && colour.format == Format::R5G6B5;
                 Self::uniforms(&gl, &program.uniforms, state, pack);
+                self.card_depth_runs += key.card_depth as u64;
                 match geometry {
                     Some(geometry) => {
                         self.transformed += 1;

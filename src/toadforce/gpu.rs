@@ -104,6 +104,7 @@
 use super::format::{Format, Rect, Surface};
 use super::level1::{Target, Texture};
 use super::raster::pipeline::{DrawState, SLOTS};
+use super::raster::setup::DepthPlane;
 use super::raster::texel::{A, Rgba};
 use super::raster::vertex::ScreenVertex;
 // The Voodoo tracker's set of ranges, here of rows.
@@ -118,8 +119,13 @@ pub const PAGE: u32 = 4096;
 /// A vertex of a triangle queued for a host, laid out as a host's
 /// vertex buffer has it (`BYTES` bytes with no gaps), so a run's
 /// vertices go there in one copy: the position (x, y, z and 1 / w),
-/// the two colours, and the coordinates of each slot, where the
-/// shader looks for them.
+/// the two colours, the coordinates of each slot, where the shader
+/// looks for them, and, in a run with `Run::card_depth`, the depth of
+/// the triangle the vertex is of as the card works it out at a pixel
+/// (`setup::DepthPlane`: the plane's value at its origin, its change
+/// for a pixel right and down, and the origin), the same at the
+/// triangle's three vertices. Other runs leave it 0, and the host
+/// interpolates their depth.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct Vertex {
@@ -127,11 +133,12 @@ pub struct Vertex {
     pub diffuse: Rgba,
     pub specular: Rgba,
     pub tex: [[f32; 4]; SLOTS],
+    pub depth: [f32; 5],
 }
 
 impl Vertex {
     /// The bytes of one.
-    pub const BYTES: usize = 24 + 16 * SLOTS;
+    pub const BYTES: usize = 24 + 16 * SLOTS + 20;
 
     /// `v`, each slot taking the coordinate set `sets` names for it.
     pub fn of(v: &ScreenVertex, sets: &[u8]) -> Self {
@@ -144,6 +151,20 @@ impl Vertex {
             diffuse: v.diffuse,
             specular: v.specular,
             tex,
+            depth: [0.0; 5],
+        }
+    }
+
+    /// The vertex of a primitive whose depth is `depth`, where it has
+    /// one for the host.
+    pub fn at_depth(self, depth: Option<&DepthPlane>) -> Self {
+        let Some(depth) = depth else {
+            return self;
+        };
+        let z = depth.z;
+        Vertex {
+            depth: [z.at, z.dx, z.dy, depth.ox, depth.oy],
+            ..self
         }
     }
 
@@ -310,6 +331,18 @@ pub struct Run {
     /// triangles at the planes the card cuts at, and leaves out those
     /// `Shape::cull` names.
     pub geometry: Option<Geometry>,
+    /// The card transformed the vertices, from the program's
+    /// untransformed ones, the draw has the depth test on
+    /// (`DrawState::depth_on`), and each vertex has the card's depth of
+    /// its primitive (`Vertex::depth`), which the host writes. The host
+    /// takes the vertices of most such draws itself, but none with a
+    /// depth bias (`DrawState::biased_depth`), whose depth decides
+    /// which pixels of a mark on a surface are drawn: a surface the
+    /// card transforms has to have the card's depth for those to go
+    /// its way. A program's screen vertices, and a draw without the
+    /// depth test, whose depth is neither tested nor written, have the
+    /// host's depth.
+    pub card_depth: bool,
 }
 
 /// What a host draws at once: runs for one render target, in the

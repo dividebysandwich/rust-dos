@@ -778,7 +778,7 @@ smoke and particles.
 | The colour key of a cube map | the host looks the key up at its own nearest texel, from face coordinates it works out itself: a pixel on the edge of a keyed texel may be dropped by one renderer and drawn by the other |
 | Anisotropic filtering, where the host has it | the host GPU's, which reads more texels than the card's stand-in (trilinear at the level of the shorter side); compared by eye and by a mean error. Measured: a mean of 1.5 and at most 29 on the test's square going into the distance; in Giants 12% of the frame's pixels, 0.2% of the frame by more than 8 (the ground's normal map through `DOTPRODUCT3`) |
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
-| Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
+| Depth | none for the vertices the card transforms from a program's untransformed ones, which include every such draw with a depth bias and the depth test on: the fragment shader works out each pixel's depth from the card's plane of the triangle in the card's operations, takes the bias from its whole number of steps, and writes the single-precision number nearest that number over the buffer's most, which the host turns back into it (`shader::LINEAR_CARD`). Vertices the host transforms and a program's screen vertices: 1 step of a 16-bit buffer, 4 steps of a 24-bit one, as the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound, unless both have the card's depth. Giants draws its tracks 2 steps of 24 bits in front of a ground the host transforms, or the card where the ground has a texture matrix, and they go the card's way |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
 | Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above (measured on lines: samples 1 in 255, depth 1 step of 16 bits and 2 of 24). `ZBIAS` moves a line's depth as a triangle's on both. A pixel of a line within half a pixel of where the line's 1 / w falls to 0, or past it, gets its own values at every corner of its square, so a mip filter picks level 0 for it and fog by w takes w as 1 where the centre has no positive 1 / w |
 | 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
@@ -864,11 +864,14 @@ directly, at the points where the software renderer would draw them
   by itself (`TWO_SIDED_LIGHTING`), with texture coordinates it makes
   or puts through a texture matrix, with point sizes or with clip
   planes of the program's (`geometry::Setup::hosted`), and wrapped
-  coordinates (`WRAP0` to `WRAP7`), flat shading, lines and points:
-  for those the host gets screen vertices after the card's transform,
-  lighting, clipping and culling. It keeps no copies of the vertex
-  buffers in card memory. Under `--deterministic` the software
-  renderer draws, so the card transforms everything there.
+  coordinates (`WRAP0` to `WRAP7`), flat shading, lines and points,
+  and the draws with a depth bias and the depth test on
+  (`DrawState::biased_depth`): for those the host gets screen vertices
+  after the card's transform, lighting, clipping and culling, and
+  where the depth test is on, the card's depth of each primitive
+  (`gpu::Run::card_depth`). It keeps no copies of the vertex buffers
+  in card memory. Under `--deterministic` the software renderer
+  draws, so the card transforms everything there.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
   the write counters of the pages each image covers. A write to a page
@@ -954,7 +957,18 @@ hands it, and it has:
 - the depth and stencil tests, the blend, the write masks and the clip
   rectangle as the host's fixed state. The depth bias is taken from the
   depth in the vertex shader, since the unit of the host's polygon
-  offset isn't a step of a 16-bit buffer on every host;
+  offset isn't a step of a 16-bit buffer on every host. Vertices the
+  card transformed from a program's untransformed ones have the card's
+  depth instead: the card hands the host each triangle's depth plane
+  and its origin with the vertices (`setup::DepthPlane`), and the
+  fragment shader works out a pixel's depth from them as `span.rs`
+  does, bias included, and writes it (`gl_FragDepth`). The host's own
+  depth is a few steps of a 24-bit buffer off, which a bias of a step
+  or two doesn't outweigh, so the card transforms every draw with a
+  bias and the depth test on, and the surfaces it transforms under
+  them have its depth too. Writing the depth keeps the host from
+  testing it before the shader runs, so a program's screen vertices
+  and the vertices the host transforms leave the depth to the host;
 - `CLEAR` on a buffer the host has (`Host::clear`). A depth that is
   neither the nearest nor the farthest is written as pixels, since the
   host's clear converts only those two for certain; with the stencil
@@ -1010,29 +1024,31 @@ alpha test, fog, the specular add, the stencil operations, the write
 masks and the blend factors and operations on a 32-bit target are the
 same byte for byte. So is the nearest texel of every format, address
 mode and cube face, the linear filter on a 2D texture of every format
-and address mode, every way of taking the mip levels on squares of 1,
-2, 4 and 8 texels to a pixel, a texture drawn a texel to a pixel from
-whole coordinates, and a filtered texture into a dithered 5-6-5
-target. A square going into the distance is within 1 with each mip
-filter, a projected texture within 2, a cube map with the linear
-filter within 3, and offsets from a linearly filtered bump texture
-within 1. Anisotropic filtering differs from the software renderer's
-by a mean of 1.5 over that square. Depth is within 1 step
-of 16 bits and 4 of 24. That host's 565 format fails the test at
-start, so its 16-bit targets were compared in 8 bits a channel alone,
-and were within one step of the target's with up to five blended
-layers. Lines into every octant, of less than a pixel and of no
-length, with either place of the pixel centres, with and without the
-last pixel, shaded and flat, cut by a viewport and by the scissor
-rectangle, blended, alpha-tested and fogged have the same pixels
-with the same colours, and so do points of every size at and between
-the pixel centres, and triangles drawn as their corners. So do
-lines in the plane of a surface with a `ZBIAS` of 0, 1 and 16.
-Textured lines, lines whose w grows 16 times along them with each
-mip filter, and triangles drawn as their edges are within 1, and a
+and address mode, every way of taking the mip levels on squares of 1, 2,
+4 and 8 texels to a pixel, a texture drawn a texel to a pixel from whole
+coordinates, and a filtered texture into a dithered 5-6-5 target. A
+square going into the distance is within 1 with each mip filter, a
+projected texture within 2, a cube map with the linear filter within 3,
+and offsets from a linearly filtered bump texture within 1. Anisotropic
+filtering differs from the software renderer's by a mean of 1.5 over
+that square. Depth is within 1 step of 16 bits and 4 of 24, and the
+card's to the step where the card transforms. Marks with a `ZBIAS` of 2
+on a ground of other triangles of their plane, transformed by the host
+or by the card, are drawn where the software renderer draws them. That
+host's 565 format fails the test at start, so its 16-bit targets were
+compared in 8 bits a channel alone, and were within one step of the
+target's with up to five blended layers. Lines into every octant, of
+less than a pixel and of no length, with either place of the pixel
+centres, with and without the last pixel, shaded and flat, cut by a
+viewport and by the scissor rectangle, blended, alpha-tested and fogged
+have the same pixels with the same colours, and so do points of every
+size at and between the pixel centres, and triangles drawn as their
+corners. So do lines in the plane of a surface with a `ZBIAS` of 0, 1
+and 16. Textured lines, lines whose w grows 16 times along them with
+each mip filter, and triangles drawn as their edges are within 1, and a
 line's depth within 1 step of 16 bits and 2 of 24. The tests assert
-these figures and no looser ones. A scene for each declined state
-checks that the software renderer draws it.
+these figures and no looser ones. A scene for each declined state checks
+that the software renderer draws it.
 
 They are run by hand on a host with a GPU.
 

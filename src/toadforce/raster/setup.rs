@@ -76,6 +76,17 @@ enum Cover {
     Rows(Box<[(i32, i32)]>),
 }
 
+/// A primitive's depth as the card works it out at a pixel: the value
+/// of `z` at the pixel `fx` right of `ox` and `fy` below `oy`, in
+/// single precision (`span.rs`). A host given this works out the
+/// card's depth at each pixel itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DepthPlane {
+    pub z: Plane,
+    pub ox: f32,
+    pub oy: f32,
+}
+
 /// A triangle, a line or a point ready to be drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prim {
@@ -109,6 +120,31 @@ pub struct Prim {
 fn snap(v: f32) -> Option<i64> {
     v.is_finite()
         .then(|| (v.clamp(-LIMIT, LIMIT) as f64 * 256.0).round() as i64)
+}
+
+/// The pixel whose centre is at `origin`, as the planes count from it.
+fn plane_origin(origin: (f64, f64), shape: &Shape) -> (f32, f32) {
+    let half = if shape.half_centre { 0.5 } else { 0.0 };
+    ((origin.0 - half) as f32, (origin.1 - half) as f32)
+}
+
+/// The origin of the planes of the triangle at `p` (positions in 1/256
+/// of a pixel, `Prim::facing`'s), and what makes the plane of a value
+/// from its value at each corner.
+fn triangle_planes(p: [(i64, i64); 3]) -> ((f64, f64), impl Fn([f64; 3]) -> Plane) {
+    let pos = p.map(|p| (p.0 as f64 / 256.0, p.1 as f64 / 256.0));
+    let (x1, y1) = (pos[1].0 - pos[0].0, pos[1].1 - pos[0].1);
+    let (x2, y2) = (pos[2].0 - pos[0].0, pos[2].1 - pos[0].1);
+    let det = x1 * y2 - x2 * y1;
+    let plane = move |a: [f64; 3]| {
+        let (d1, d2) = (a[1] - a[0], a[2] - a[0]);
+        Plane {
+            at: a[0] as f32,
+            dx: ((d1 * y2 - d2 * y1) / det) as f32,
+            dy: ((d2 * x1 - d1 * x2) / det) as f32,
+        }
+    };
+    (pos[0], plane)
 }
 
 /// The planes of a primitive: `plane` makes one from a value at each of
@@ -149,12 +185,12 @@ fn planes<const V: usize>(
             *plane = over_w(&|v| v.tex[set as usize][i]);
         }
     }
-    let half = if shape.half_centre { 0.5 } else { 0.0 };
+    let (ox, oy) = plane_origin(origin, shape);
     Prim {
         cover,
         rows,
-        ox: (origin.0 - half) as f32,
-        oy: (origin.1 - half) as f32,
+        ox,
+        oy,
         z: plane(each(&|v| v.z as f64)),
         z_outside: v.iter().any(|v| v.z < 0.0 || v.z > 1.0),
         q: plane(q),
@@ -221,18 +257,7 @@ impl Prim {
         }
 
         // The planes, from the rounded positions.
-        let pos = p.map(|p| (p.0 as f64 / 256.0, p.1 as f64 / 256.0));
-        let (x1, y1) = (pos[1].0 - pos[0].0, pos[1].1 - pos[0].1);
-        let (x2, y2) = (pos[2].0 - pos[0].0, pos[2].1 - pos[0].1);
-        let det = x1 * y2 - x2 * y1;
-        let plane = |a: [f64; 3]| {
-            let (d1, d2) = (a[1] - a[0], a[2] - a[0]);
-            Plane {
-                at: a[0] as f32,
-                dx: ((d1 * y2 - d2 * y1) / det) as f32,
-                dy: ((d2 * x1 - d1 * x2) / det) as f32,
-            }
-        };
+        let (origin, plane) = triangle_planes(p);
         let cover = Cover::Edges {
             edges,
             centre,
@@ -241,13 +266,34 @@ impl Prim {
         Some(planes(
             cover,
             (top, bottom),
-            pos[0],
+            origin,
             v,
             provoking,
             shape,
             sets,
             &plane,
         ))
+    }
+
+    /// The depth of the triangle of `v` as `triangle` has it, without
+    /// the rest of its set-up, from the positions `facing` gives.
+    pub fn triangle_depth(p: [(i64, i64); 3], v: [&ScreenVertex; 3], shape: &Shape) -> DepthPlane {
+        let (origin, plane) = triangle_planes(p);
+        let (ox, oy) = plane_origin(origin, shape);
+        DepthPlane {
+            z: plane(v.map(|v| v.z as f64)),
+            ox,
+            oy,
+        }
+    }
+
+    /// The primitive's depth, as a host works it out (`DepthPlane`).
+    pub fn depth(&self) -> DepthPlane {
+        DepthPlane {
+            z: self.z,
+            ox: self.ox,
+            oy: self.oy,
+        }
     }
 
     /// The line from `a` to `b`. Where it is longer across than down it
@@ -715,5 +761,29 @@ mod tests {
         };
         let t = Prim::triangle([&v[0], &v[1], &v[2]], &v[2], &flat, CLIP, &[]).unwrap();
         assert_eq!(t.flat, Some(([9; 4], [0; 4])));
+    }
+
+    /// The depth a host is given for a triangle is the plane and the
+    /// origin the software renderer draws it with, for each winding,
+    /// pixel centre and order of the corners.
+    #[test]
+    fn a_triangles_depth_for_a_host_is_the_one_it_is_drawn_with() {
+        let corners = [(3.25, 1.5, 0.125), (40.75, 9.0, 0.875), (11.5, 50.25, 0.5)];
+        let half = Shape {
+            half_centre: true,
+            ..SHAPE
+        };
+        for shape in [&SHAPE, &half] {
+            for order in [[0, 1, 2], [0, 2, 1], [2, 1, 0]] {
+                let v = order.map(|i| {
+                    let (x, y, z) = corners[i];
+                    ScreenVertex { z, ..vertex(x, y) }
+                });
+                let v = [&v[0], &v[1], &v[2]];
+                let t = Prim::triangle(v, v[0], shape, CLIP, &[]).unwrap();
+                let (p, _) = Prim::facing(v, 1).unwrap();
+                assert_eq!(Prim::triangle_depth(p, v, shape), t.depth());
+            }
+        }
     }
 }

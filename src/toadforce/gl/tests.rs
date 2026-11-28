@@ -669,6 +669,81 @@ fn depth_tests_and_the_bias_agree() {
     }
 }
 
+/// Marks a game draws on the ground, as Giants does its tracks: a
+/// ground of squares, then triangles of other corners on its plane
+/// with a depth bias of two steps of a 24-bit buffer, which is fewer
+/// than the host's own depth of what it transforms or of the card's
+/// screen vertices is off by. The card transforms the marks, which
+/// have the bias, and the host writes the card's depth of them. The
+/// ground is the host's to transform, or with flat shading the card's,
+/// and then has the card's depth too. A mark is drawn where the card
+/// draws it. These marks are drawn the same with the host's depth as
+/// well; Giants' beach, far from the eye, is where that differed.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn marks_on_the_ground_agree() {
+    bench!(bench, "toadforce marks");
+    let scene = |rig: &mut Rig, shade: u32| {
+        rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[
+            (RS_LIGHTING, 0),
+            (RS_ZENABLE, 1),
+            (RS_ZFUNC, 4),
+            (RS_SHADEMODE, shade),
+        ]);
+        perspective(rig, 0.25, 0.3, 4.0);
+        let draw = |rig: &mut Rig, vertices: &[[u32; 6]]| {
+            let words: Vec<u32> = vertices.iter().flatten().copied().collect();
+            rig.run(|w| encode::draw(w, 4, FVF_UNLIT, vertices.len() as u32, &words));
+        };
+        let at = |x: f32, z: f32, diffuse: u32| unlit([x, -1.5, z], diffuse, 0.0, 0.0);
+        let mut ground = Vec::new();
+        for square in 0..32 {
+            let x = (square % 4) as f32 * 2.0 - 4.1;
+            let z = (square / 4) as f32 * 2.0 - 2.9;
+            let (r, f) = (x + 2.0, z + 2.0);
+            let corners = [(x, z), (r, z), (x, f), (r, z), (r, f), (x, f)];
+            ground.extend(corners.map(|(x, z)| at(x, z, 0xFF40_8040)));
+        }
+        draw(rig, &ground);
+        rig.states(&[(RS_ZBIAS, 2), (RS_ZWRITEENABLE, 0), (RS_SHADEMODE, 2)]);
+        let mut marks = Vec::new();
+        for i in 0..12 {
+            let x = (i % 3) as f32 * 2.3 - 3.7;
+            let z = (i / 3) as f32 * 3.1 - 1.3;
+            let corners = [(x, z), (x + 1.7, z + 0.4), (x + 0.6, z + 1.9)];
+            marks.extend(corners.map(|(x, z)| at(x, z, 0xFFC0_4040)));
+        }
+        draw(rig, &marks);
+    };
+    for (shade, transformed, card) in [(2, 1, 1), (1, 0, 2)] {
+        // A ground the host transforms has the colours and the depth
+        // of `the_vertices_the_host_transforms_agree`. Everything else
+        // has the card's depth.
+        let bound = match transformed {
+            1 => Bound {
+                outliers: 4,
+                ..close(Format::D24S8)
+            },
+            _ => Bound { depth: 0, ..CLOSE },
+        };
+        let name = format!("marks shade {shade}");
+        let scene = |rig: &mut Rig| scene(rig, shade);
+        let declined = bench.compare(&name, Format::A8R8G8B8, Some(Format::D24S8), bound, scene);
+        assert_eq!(declined, 0);
+        // The host transformed the ground of smooth shading, and not
+        // the marks, which it drew with the card's depth, as it did
+        // the flat ground.
+        let mut rig = Rig::new(Format::A8R8G8B8, Some(Format::D24S8));
+        rig.card.set_host(Some(bench.host()), &mut rig.memory);
+        scene(&mut rig);
+        rig.card.settle(&mut rig.memory, None);
+        let counts = &rig.card.describe(Rig::live())["host"]["counts"];
+        assert_eq!(counts["transformed_runs"], transformed, "{counts}");
+        assert_eq!(counts["card_depth_runs"], card, "{counts}");
+    }
+}
+
 /// The bound of a blend into a target of `format`: one in 255, a step
 /// of a 5-6-5 target in the host's format, and a few steps of one the
 /// host keeps in 8 bits, whose layers are rounded only when read back.

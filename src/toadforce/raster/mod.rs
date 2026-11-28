@@ -140,8 +140,10 @@ enum Queue<'a> {
     /// asked. Each vertex is made the host's as it is queued
     /// (`gpu::Vertex::of`), with its slots' coordinates and, in a
     /// flat-shaded triangle, the colours of the vertex that gives
-    /// them: the queue is what the host's vertex buffer takes.
-    Host(&'a mut Vec<gpu::Vertex>, &'a mut u64),
+    /// them: the queue is what the host's vertex buffer takes. With
+    /// the flag each vertex has the card's depth of its primitive
+    /// (`gpu::Run::card_depth`).
+    Host(&'a mut Vec<gpu::Vertex>, &'a mut u64, bool),
 }
 
 /// A clockwise triangle of a point or of a line's square, turned
@@ -167,15 +169,21 @@ impl Queue<'_> {
                         .flatten(),
                 );
             }
-            Queue::Host(vertices, count) => {
+            Queue::Host(vertices, count, card_depth) => {
                 for t in Prim::point_triangles(v, shape) {
-                    // One with no area has no pixels.
-                    if Prim::facing([&t[0], &t[1], &t[2]], 1).is_none() {
+                    // One with no area has no pixels. The card's depth
+                    // is that of the triangle `Prim::point` draws.
+                    let corners = [&t[0], &t[1], &t[2]];
+                    let Some((p, _)) = Prim::facing(corners, 1) else {
                         continue;
-                    }
+                    };
+                    let depth = (*card_depth).then(|| Prim::triangle_depth(p, corners, shape));
                     // The corners have the point's colours.
                     let t = kept(t, shape);
-                    vertices.extend(t.iter().map(|c| gpu::Vertex::of(c, sets)));
+                    vertices.extend(
+                        t.iter()
+                            .map(|c| gpu::Vertex::of(c, sets).at_depth(depth.as_ref())),
+                    );
                     **count += 1;
                 }
             }
@@ -197,15 +205,20 @@ impl Queue<'_> {
         };
         match self {
             Queue::Software(prims) => prims.push(line),
-            Queue::Host(vertices, count) => {
+            Queue::Host(vertices, count, card_depth) => {
                 // The corners have their coordinates in the slots
-                // already, and the pixels' colours.
+                // already, and the pixels' colours. The card's depth
+                // is the line's.
+                let depth = (*card_depth).then(|| line.depth());
                 line.squares(shape, |c| {
                     for t in [[0, 1, 2], [1, 3, 2]] {
                         let t = kept(t.map(|i| c[i]), shape);
-                        vertices.extend(t.iter().map(|v| match shape.flat {
-                            true => gpu::Vertex::flat(v, &c[0], &[]),
-                            false => gpu::Vertex::of(v, &[]),
+                        vertices.extend(t.iter().map(|v| {
+                            match shape.flat {
+                                true => gpu::Vertex::flat(v, &c[0], &[]),
+                                false => gpu::Vertex::of(v, &[]),
+                            }
+                            .at_depth(depth.as_ref())
                         }));
                     }
                 });
@@ -375,15 +388,20 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
                 }
             }
             // The triangles the card doesn't cull.
-            Queue::Host(vertices, count) => {
+            Queue::Host(vertices, count, card_depth) => {
                 for i in 1..n - 1 {
-                    if Prim::facing(fan(i), shape.cull).is_some() {
-                        vertices.extend(fan(i).map(|v| match shape.flat {
+                    let Some((p, _)) = Prim::facing(fan(i), shape.cull) else {
+                        continue;
+                    };
+                    let depth = (*card_depth).then(|| Prim::triangle_depth(p, fan(i), shape));
+                    vertices.extend(fan(i).map(|v| {
+                        match shape.flat {
                             true => gpu::Vertex::flat(v, provoking, sets),
                             false => gpu::Vertex::of(v, sets),
-                        }));
-                        **count += 1;
-                    }
+                        }
+                        .at_depth(depth.as_ref())
+                    }));
+                    **count += 1;
                 }
             }
         },
@@ -659,10 +677,12 @@ impl Renderer {
         let colour = state.target.colour;
         if hosted {
             let vertices = first..self.host_vertices.len();
+            let card_depth = geometry.is_some() && state.depth_on();
             let run = gpu::Run {
                 state,
                 vertices,
                 geometry: None,
+                card_depth,
             };
             if run.vertices.is_empty() {
                 return Ok(None);
@@ -673,6 +693,7 @@ impl Renderer {
             match self.host_runs.last_mut() {
                 Some(last)
                     if last.geometry.is_none()
+                        && last.card_depth == run.card_depth
                         && (Arc::ptr_eq(&last.state, &run.state) || *last.state == *run.state) =>
                 {
                     last.vertices.end = run.vertices.end;
@@ -775,6 +796,7 @@ impl Renderer {
                 note_reads(&mut self.reads, &state);
                 self.host_runs.push(gpu::Run {
                     state,
+                    card_depth: false,
                     vertices: 0..0,
                     geometry: Some(gpu::Geometry {
                         transform,
@@ -811,7 +833,7 @@ impl Renderer {
             ..
         } = self;
         let mut queue = match hosted {
-            true => Queue::Host(host_vertices, host_count),
+            true => Queue::Host(host_vertices, host_count, false),
             false => Queue::Software(prims),
         };
         let (shape, sets) = (&state.shape, &state.sets[..]);
@@ -875,8 +897,10 @@ impl Renderer {
             host_count,
             ..
         } = self;
+        // The card's depth goes with the vertices of a draw that tests
+        // or writes depth (`gpu::Run::card_depth`).
         let mut queue = match hosted {
-            true => Queue::Host(host_vertices, host_count),
+            true => Queue::Host(host_vertices, host_count, state.depth_on()),
             false => Queue::Software(prims),
         };
         let shape = &state.shape;
