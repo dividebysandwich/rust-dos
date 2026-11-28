@@ -246,7 +246,12 @@ while it runs.
   programs, their settings, the builds and what each showed. The
   program the work is for shows that the change fixes it, not what it
   does to the others. The reviewer checks the tier like any other
-  claim in the description.
+  claim in the description. Pick the programs from the rows of
+  `docs/regression-programs.md`, which lists for each area of the
+  emulator the programs and fixture scenes earlier checks found to
+  reach it, the counter that shows a run did, and the programs found
+  not to. When your check finds a program a row doesn't list as
+  reaching it or not, add it there in the same pull request.
 
   1. Two to four other programs, main against the branch, for a change
      to what every program meets: the CPU, the recompiler and the FPU,

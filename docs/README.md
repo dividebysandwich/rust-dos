@@ -42,6 +42,7 @@ fits what you want to play.
 | [profiling.md](profiling.md) | Finding where the emulator's time goes |
 | [benchmarks.md](benchmarks.md) | The microbenchmarks of the emulator's hot paths |
 | [game-suite.md](game-suite.md) | The game regression suite, and blessing its screenshots |
+| [regression-programs.md](regression-programs.md) | Which programs and fixture scenes reach each area of the emulator, for a pull request's regression check |
 | [cpu-tests.md](cpu-tests.md) | The CPU conformance suites against real hardware |
 | [dynrec.md](dynrec.md) | The dynamic recompiler |
 | [builtin-windows-architecture.md](builtin-windows-architecture.md) | How the built-in Windows is built |
