@@ -615,7 +615,11 @@ const MAX_COMMANDS: usize = 500_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TexKey {
     unit: u8,
-    base: u32,
+    /// Where each level starts. With multibase (tLOD bit 24) levels 1, 2
+    /// and 3 to 8 have base registers of their own, so textures that
+    /// share level 0's address can differ in every other level, and a
+    /// unit that holds only the odd levels never reads level 0's.
+    bases: [u32; 9],
     format: u32,
     wmask: i32,
     hmask: i32,
@@ -1051,7 +1055,7 @@ impl Mirror {
         let (first, last) = t.levels();
         let key = TexKey {
             unit: unit as u8,
-            base: t.lodoffset[0],
+            bases: t.lodoffset,
             format: (t.mode >> 8) & 0xF,
             wmask: t.wmask,
             hmask: t.hmask,

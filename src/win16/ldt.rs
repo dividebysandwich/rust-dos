@@ -57,7 +57,7 @@ pub fn index(selector: u16) -> u16 {
 }
 
 /// The W32 version whose states keep the entries freed (`Ldt::freed`).
-pub const FREED_SAVED: u16 = 117;
+pub const FREED_SAVED: u16 = 118;
 
 /// Which LDT entries are taken, a bit each, and the order the free ones
 /// were freed in.

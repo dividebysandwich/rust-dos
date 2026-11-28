@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::config::DesktopDepth;
+use crate::video::adapter::Adapter;
 use crate::win32::user32::paint::get_dc;
 
 const SRCCOPY: u32 = 0x00CC_0020;
@@ -18,10 +19,23 @@ const BITS: u32 = 0x0010_0000;
 /// A machine with a desktop of `depth` on a Voodoo3, as the game runs,
 /// and the screen's DC with a palette of `colors` realized.
 fn machine(depth: DesktopDepth, colors: &[u32]) -> (Box<Cpu>, u32) {
+    machine_on(Adapter::Voodoo3, depth, colors)
+}
+
+/// `machine` with the display adapter `adapter`.
+fn machine_on(adapter: Adapter, depth: DesktopDepth, colors: &[u32]) -> (Box<Cpu>, u32) {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.bus.win32.desktop_depth = depth;
-    cpu.bus
-        .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+    if adapter == Adapter::Voodoo3 {
+        cpu.bus
+            .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+    } else {
+        let setup = crate::video::adapter::VideoSetup {
+            adapter,
+            ..Default::default()
+        };
+        crate::video::bios::install(&mut cpu.bus, setup);
+    }
     crate::win32::user32::paint::ensure_desktop(&mut cpu);
     let screen = get_dc(&mut cpu, &[0]).unwrap();
     // LOGPALETTE: version 0x300, the count, PC_NOCOLLAPSE entries.
@@ -426,8 +440,14 @@ fn a_bitmap_shows_its_values_through_explicit_entries() {
 /// raster operations, a top-down DIB and one whose colors aren't the
 /// palette's. A hash of the screen after them.
 fn blit_everything(depth: DesktopDepth) -> u64 {
+    let mut cpu = blit_everything_on(Adapter::Voodoo3, depth);
+    fnv(&screen_pixels(&mut cpu))
+}
+
+/// The blits of `blit_everything` on the display adapter `adapter`.
+fn blit_everything_on(adapter: Adapter, depth: DesktopDepth) -> Box<Cpu> {
     let colors = game_colors();
-    let (mut cpu, screen) = machine(depth, &colors);
+    let (mut cpu, screen) = machine_on(adapter, depth, &colors);
     let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
     let grays: Vec<u32> = (0..256u32).map(|i| i * 0x01_0101).collect();
     let other = BITS + 640 * 480;
@@ -477,7 +497,7 @@ fn blit_everything(depth: DesktopDepth) -> u64 {
     bit_blt(&mut cpu, screen, (330, 0, 300, 200), dev, 0, 0);
     bit_blt(&mut cpu, screen, (0, 400, 640, 80), gray, 0, 400);
     bit_blt(&mut cpu, screen, (560, 0, 80, 40), gray, 560, 0);
-    fnv(&screen_pixels(&mut cpu))
+    cpu
 }
 
 fn fnv(data: &[u8]) -> u64 {
@@ -500,6 +520,32 @@ fn blits_to_the_palette_screen_leave_the_same_pixels() {
 fn blits_to_the_16_bit_screen_leave_the_same_pixels() {
     let hash = blit_everything(DesktopDepth::Adapter);
     assert_eq!(hash, 0x1280_930d_72d1_d005, "{hash:#018x}");
+}
+
+/// The Voodoo3's desktop of `win32_depth=32` holds what an S3 Trio's
+/// own 32-bit desktop does after the same blits, and the card's scanout
+/// shows it as the Trio's does: through its lookup table, bypassed.
+#[test]
+fn blits_to_the_voodoo3s_32_bit_screen_match_the_trios() {
+    use crate::video::{Frame, frame_size, render_screen};
+    let shown = |cpu: &mut Cpu| {
+        let (width, height) = frame_size(&cpu.bus);
+        let mut frame = Frame::new(width, height);
+        cpu.bus.vga.mark_dirty_full();
+        render_screen(&mut frame, &cpu.bus);
+        ((width, height), frame.rgba)
+    };
+    let mut card = blit_everything_on(Adapter::Voodoo3, DesktopDepth::TrueColor32);
+    let mut trio = blit_everything_on(Adapter::S3, DesktopDepth::Adapter);
+    let m = crate::win32::screen::mode(&card).unwrap();
+    assert_eq!((m.width, m.height, m.bpp, m.pitch), (640, 480, 32, 2560));
+    assert_eq!(crate::win32::screen::mode(&trio), Some(m));
+    let pixels = screen_pixels(&mut card);
+    assert_eq!(pixels.len(), 640 * 480 * 4);
+    assert!(pixels == screen_pixels(&mut trio));
+    let (size, picture) = shown(&mut card);
+    assert_eq!(size, (640, 480));
+    assert!(picture == shown(&mut trio).1);
 }
 
 /// A blit from a 16-bit bitmap to a monochrome one compares each pixel
