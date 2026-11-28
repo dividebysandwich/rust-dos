@@ -1,9 +1,9 @@
 //! Rectangles and regions. A region is a list of rectangles that don't
 //! overlap, in bands: each band a run of rows whose rectangles are the
 //! same, sorted by top and then by left, as Windows keeps them
-//! (GetRegionData gives them in that order). The operations work on the
-//! grid the rectangles' edges make, which is plenty fast for the regions
-//! windows and clipping make.
+//! (GetRegionData gives them in that order). The operations sweep down
+//! the rows where the rectangles start or end and combine the two
+//! regions' spans in each band.
 
 use crate::cpu::Cpu;
 
@@ -346,8 +346,8 @@ impl Region {
     }
 }
 
-/// The rectangles sorted by top. A region's are already, apart from one
-/// a program gave as it liked.
+/// The rectangles sorted by top. Every way of making a region here leaves
+/// them so; a list put in `rects` by hand may not be, and is sorted.
 fn by_top(rects: &[Rect]) -> std::borrow::Cow<'_, [Rect]> {
     if rects.is_sorted_by_key(|r| r.top) {
         std::borrow::Cow::Borrowed(rects)
@@ -530,14 +530,19 @@ mod tests {
             let a = random_region(&mut seed, n);
             let b = random_region(&mut seed, 3);
             for op in [Op::And, Op::Or, Op::Xor, Op::Diff] {
-                assert_eq!(a.combine(&b, op), by_cells(&a, &b, op), "{a:?} {op:?} {b:?}");
+                assert_eq!(
+                    a.combine(&b, op),
+                    by_cells(&a, &b, op),
+                    "{a:?} {op:?} {b:?}"
+                );
             }
         }
     }
 
     #[test]
     fn rectangles_out_of_order_or_overlapping_still_combine() {
-        // ExtCreateRegion takes rectangles as the program lists them.
+        // `rects` is public, so a list put there by hand needn't be in
+        // bands or free of overlaps.
         let given = Region {
             rects: vec![
                 Rect::new(0, 10, 10, 20),
@@ -546,7 +551,10 @@ mod tests {
             ],
         };
         let got = given.or_rect(&Rect::new(20, 0, 30, 5));
-        assert_eq!(got, by_cells(&given, &Region::from_rect(Rect::new(20, 0, 30, 5)), Op::Or));
+        assert_eq!(
+            got,
+            by_cells(&given, &Region::from_rect(Rect::new(20, 0, 30, 5)), Op::Or)
+        );
         assert_eq!(
             got.rects,
             vec![
