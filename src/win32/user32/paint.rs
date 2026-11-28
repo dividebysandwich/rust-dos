@@ -22,7 +22,7 @@ use super::message::{WM_ERASEBKGND, WM_NCPAINT, WM_PAINT};
 use super::sysparams::{self, COLOR_BACKGROUND, COLOR_BTNFACE, COLOR_WINDOW};
 use super::window::{
     SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_MINIMIZE, WS_VISIBLE, Window, send,
+    WS_CLIPSIBLINGS, WS_EX_TRANSPARENT, WS_MINIMIZE, WS_VISIBLE, Window, send,
 };
 use super::{
     DESKTOP, ERROR_INVALID_WINDOW_HANDLE, FALSE, State, TRUE, address_of, set_error, user,
@@ -317,6 +317,20 @@ fn shape(state: &State, hwnd: u32) -> Region {
     }
 }
 
+/// Whether the window `hwnd` is cut out of the region of a window it
+/// covers: its parent's with WS_CLIPCHILDREN, a sibling's beneath it
+/// with WS_CLIPSIBLINGS. A hidden window isn't, and nor is a
+/// WS_EX_TRANSPARENT one. On Windows 98 the clip list of Sorry!'s view,
+/// which has WS_CLIPCHILDREN, is the whole view with its visible
+/// WS_EX_TRANSPARENT buttons on it, so the view's blits to the primary
+/// surface draw over them (#2261). Wine leaves such a window in the
+/// region of the siblings beneath it too.
+fn clips_out(state: &State, hwnd: u32) -> bool {
+    state
+        .window(hwnd)
+        .is_some_and(|w| w.style & WS_VISIBLE != 0 && w.ex_style & WS_EX_TRANSPARENT == 0)
+}
+
 /// What of the screen the window `hwnd` may draw on, by GetDCEx's
 /// `flags`: its client area (or whole window with DCX_WINDOW), less what
 /// covers it.
@@ -325,10 +339,7 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
         let mut vis = shape(state, DESKTOP);
         if flags & DCX_CLIPCHILDREN != 0 {
             for child in state.top_levels() {
-                if state
-                    .window(child)
-                    .is_some_and(|c| c.style & WS_VISIBLE != 0)
-                {
+                if clips_out(state, child) {
                     vis = vis.diff(&shape(state, child));
                 }
             }
@@ -352,10 +363,7 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
         && let Some(w) = state.window(hwnd)
     {
         for &child in &w.children {
-            if state
-                .window(child)
-                .is_some_and(|c| c.style & WS_VISIBLE != 0)
-            {
+            if clips_out(state, child) {
                 vis = vis.diff(&shape(state, child));
             }
         }
@@ -375,7 +383,7 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
                 .map(|p| p.children.clone())
                 .unwrap_or_default();
             for s in siblings.into_iter().take_while(|&s| s != h) {
-                if state.window(s).is_some_and(|c| c.style & WS_VISIBLE != 0) {
+                if clips_out(state, s) {
                     vis = vis.diff(&shape(state, s));
                 }
             }
@@ -2741,6 +2749,57 @@ mod tests {
         assert_eq!(update(state), Rect::new(0, 0, 50, 50));
         redraw_tree(state, hwnd, &Region::from_rect(rect), RDW_INVALIDATE);
         assert_eq!(update(state), rect);
+    }
+
+    /// A WS_EX_TRANSPARENT window stays in the region of the window
+    /// beneath it: a parent with WS_CLIPCHILDREN loses only its other
+    /// children's area, and a sibling with WS_CLIPSIBLINGS loses nothing
+    /// to it. Windows 98 gives the clipper of Sorry!'s view the whole
+    /// screen with its transparent buttons on it (#2261).
+    #[test]
+    fn a_transparent_window_is_not_cut_out_of_the_one_beneath() {
+        use super::super::window::WS_CHILD;
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        let state = user(&mut cpu);
+        let all = Rect::new(0, 0, 200, 200);
+        let parent = state
+            .new_window(Window {
+                style: WS_VISIBLE | WS_CLIPCHILDREN,
+                rect: all,
+                client: all,
+                ..Window::default()
+            })
+            .expect("a window");
+        let child = |state: &mut State, at: Rect, style: u32, ex_style: u32| {
+            state
+                .new_window(Window {
+                    style: WS_VISIBLE | WS_CHILD | style,
+                    ex_style,
+                    parent,
+                    rect: at,
+                    client: at,
+                    ..Window::default()
+                })
+                .expect("a window")
+        };
+        let glass_at = Rect::new(20, 20, 80, 60);
+        let solid_at = Rect::new(100, 20, 160, 60);
+        let below_at = Rect::new(40, 40, 120, 100);
+        let glass = child(state, glass_at, 0, WS_EX_TRANSPARENT);
+        let solid = child(state, solid_at, 0, 0);
+        let below = child(state, below_at, WS_CLIPSIBLINGS, 0);
+        if let Some(w) = state.window_mut(parent) {
+            w.children = vec![glass, solid, below];
+        }
+        let vis = get_dc_visible_region(state, parent);
+        assert!(!vis.and_rect(&glass_at).is_empty());
+        assert!(vis.and_rect(&solid_at).is_empty());
+        assert!(vis.and_rect(&below_at).is_empty());
+        let vis = get_dc_visible_region(state, below);
+        assert_eq!(vis.bounds(), below_at);
+        assert!(vis.and_rect(&solid_at).is_empty());
+        assert!(!vis.and_rect(&glass_at).is_empty());
     }
 
     /// A child's BeginPaint takes its area out of the update region of a
