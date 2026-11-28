@@ -436,9 +436,9 @@ All output goes through the emulated video hardware (`screen.rs`):
   1252 lacks is as wide as its glyph there. The System font's 16-pixel
   size, VGASYS.FON's, is drawn with the glyphs of Wine's System font
   (`gdi32/system16.rs`, from `tools/gen_system_glyphs.py`), which has
-  VGASYS.FON's widths. The characters code page 437
-  lacks (Central European, Cyrillic, Greek, Turkish and Baltic letters) are
-  drawn from FreeDOS's CPIDOS fonts in the same three sizes, which
+  VGASYS.FON's widths. The characters code page 437 lacks (Central
+  European, Cyrillic, Greek, Turkish and Baltic letters) are drawn from
+  FreeDOS's CPIDOS fonts in the same three sizes, which
   `tools/gen_cpi_glyphs.py` extracts into `video/assets/CPIDOS_glyphs.bin`.
   A font's bytes are those of its character set's code page; the raster
   faces have the system locale's character set, Arial, Times New Roman and

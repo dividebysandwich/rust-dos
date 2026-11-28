@@ -87,8 +87,7 @@ def metric(m, *names):
     raise AttributeError(names[0])
 
 
-def main():
-    src, out = sys.argv[1], sys.argv[2]
+def main(src, out):
     font = TTFont(src)
     cmap = font.getBestCmap()
     eblc, ebdt = font["EBLC"], font["EBDT"]
@@ -155,4 +154,7 @@ def main():
         f.write(FOOTER)
 
 
-main()
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit("usage: gen_system_glyphs.py WINE/fonts/system.ttf OUT")
+    main(sys.argv[1], sys.argv[2])

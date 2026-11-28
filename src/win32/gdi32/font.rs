@@ -567,7 +567,8 @@ fn raster_width(r: &Raster, page: CodePage, b: u8, x_scale: i32) -> i32 {
 /// lit columns, or the size's average. In MS Sans Serif's 8-point size, a
 /// letter `sans8` draws (one with an accent, or with a stroke) is as wide
 /// as its glyph, and in System's 16-pixel size a character `system16`
-/// has moves on as far as that font's does.
+/// draws with a glyph of its own (`system16_lacks`) moves on as far as
+/// that font's does.
 fn derived_width(r: &Raster, c: u16) -> i32 {
     if is_sans8(r)
         && let Some(w) = sans8::width(c)
@@ -575,6 +576,7 @@ fn derived_width(r: &Raster, c: u16) -> i32 {
         return w;
     }
     if is_system16(r)
+        && !system16_lacks(r, c)
         && let Some(w) = system16::advance(c)
     {
         return w;
@@ -926,15 +928,28 @@ fn is_system16(r: &Raster) -> bool {
     r.face == SYSTEM_FACE && r.height == system16::HEIGHT as i32
 }
 
+/// Whether `system16` draws the character `c` with the bar of the raster
+/// size `r`'s default character, as Wine's System font does the
+/// characters of code page 1252's 80h to 9Fh that VGASYS.FON lacks (€,
+/// ƒ, ˆ, Œ, ˜, œ and Ÿ). In code page 1252 the bar is what Windows draws
+/// for them; in another code page they are letters its font has.
+fn system16_lacks(r: &Raster, c: u16) -> bool {
+    let default = CodePage::WESTERN.char(r.default);
+    c != default
+        && system16::advance(c)
+            .is_some_and(|w| system16::glyph(c, w) == system16::glyph(default, w))
+}
+
 /// The glyph drawn for the byte `b` of the code page `page` in the
 /// raster size `r`, `w` wide, if the size has drawn glyphs and the
 /// character has one: `sans8`'s for MS Sans Serif's 8-point size, and
 /// for System's 16-pixel size `system16`'s where it moves on as far as
-/// `w`. Its rows are stretched to the key's cell and width by whole
-/// numbers, and made bold as `raster_glyphs` does. A character
-/// stretched past the 60 columns `raster_glyphs` gives a glyph has none:
-/// its ROM glyph squeezed into them keeps all its strokes, where the
-/// drawn one would lose its right side.
+/// `w`, unless it is the bar for a character VGASYS.FON lacks and the
+/// code page isn't 1252. Its rows are stretched to the key's cell and
+/// width by whole numbers, and made bold as `raster_glyphs` does. A
+/// character stretched past the 60 columns `raster_glyphs` gives a
+/// glyph has none: its ROM glyph squeezed into them keeps all its
+/// strokes, where the drawn one would lose its right side.
 fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Vec<u64>> {
     if b < 0x20 || w - 1 > 60 {
         return None;
@@ -945,7 +960,11 @@ fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Ve
     let rows: &[u64] = if is_sans8(r) {
         &sans8::glyph(page.char(b), w / x_scale - 1)?
     } else if is_system16(r) {
-        &system16::glyph(page.char(b), w / x_scale)?
+        let c = page.char(b);
+        if page.number() != CodePage::WESTERN.number() && system16_lacks(r, c) {
+            return None;
+        }
+        &system16::glyph(c, w / x_scale)?
     } else {
         return None;
     };
@@ -3089,6 +3108,34 @@ mod tests {
             let w = r.widths[b as usize - 0x20] as i32;
             assert_eq!(system16::advance(c), Some(w), "{b:02X}");
         }
+    }
+
+    #[test]
+    fn system_bar_stands_for_a_missing_character_in_1252_only() {
+        // Wine's System font draws Œ, Ÿ, € and the like with the bar of
+        // VGASYS.FON's default character. Code page 1252's font lacks
+        // them; code page 1254's has them as letters.
+        let r = &RASTERS[0];
+        let key = |page: u32| Key {
+            page: page as u16,
+            base: 16,
+            cell: 16,
+            glyph_width: 1,
+            bold: true,
+            fixed: false,
+            widths: Widths::Raster(0),
+        };
+        let western = CodePage::WESTERN;
+        let w = raster_width(r, western, 0x9F, 1);
+        assert_eq!(w, 4);
+        let bar = drawn_rows(&key(1252), r, western, 0x80, 4).unwrap();
+        assert_eq!(drawn_rows(&key(1252), r, western, 0x9F, w), Some(bar));
+        // Ÿ in Turkish: as wide as Y, and not the bar.
+        let turkish = CodePage::by_number(1254).unwrap();
+        let w = raster_width(r, turkish, 0x9F, 1);
+        assert_eq!(w, raster_width(r, western, b'Y', 1));
+        assert_eq!(drawn_rows(&key(1254), r, turkish, 0x9F, w), None);
+        assert_eq!(drawn_rows(&key(1254), r, turkish, 0x8C, 4), None);
     }
 
     #[test]
