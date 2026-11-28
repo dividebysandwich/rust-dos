@@ -1031,7 +1031,9 @@ thread_local! {
 }
 
 /// For each colour of 4 bits a channel (red, green and blue, from the
-/// high bits), the index of the nearest of `colours` to its middle.
+/// high bits), the index of the nearest of `colours` to the colour each
+/// channel's 4 bits stand for: 17 times them, so that black is 0 and
+/// white 255 in every channel.
 fn nearest_table(colours: &[[u8; 3]]) -> std::rc::Rc<[u8]> {
     NEAREST.with(|last| {
         let mut last = last.borrow_mut();
