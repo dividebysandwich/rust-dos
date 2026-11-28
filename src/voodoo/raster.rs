@@ -1306,12 +1306,12 @@ macro_rules! variants {
 // texel times the iterated colour, with depth from W. V23 and V24 are
 // its textured states with the most area in the fight on the ship,
 // fogged and not, V25 its untextured one, and C8 its other blends and
-// texture formats.
+// its point-sampled textures.
 //
 // A triangle whose TMU 0 ignores TMU 1 draws with one unit (`units`), so
-// V0, V1, V16, V17, C3 and C4 are one-unit variants: they take those
-// triangles whatever TMU 1 holds, on a Voodoo2 or Voodoo3 as on a
-// Banshee, which has one unit.
+// V0, V1, V16, V17, V20, V21, V23, V24 and C3-C8 are one-unit variants:
+// they take those triangles whatever TMU 1 holds, on a Voodoo Graphics,
+// Voodoo2 or Voodoo3 as on a Banshee, which has one unit.
 variants! {
     V0: 1, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0];
     V1: 1, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0];
