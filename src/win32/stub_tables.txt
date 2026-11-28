@@ -517,6 +517,7 @@ EnumResourceTypesW
 EnumResourceNamesW
 EnumResourceLanguagesA
 EnumResourceLanguagesW
+DeviceIoControl
 
 DLL ADVAPI32.DLL
 InitializeSecurityDescriptor
