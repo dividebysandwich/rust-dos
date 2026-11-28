@@ -943,12 +943,16 @@ fn texture_combine(t: &TmuRaster, mode: u32, lod: i32, cother: u32, c_local: u32
         5 => lod & 0xFF,
         _ => 0,
     };
-    if !bit(mode, 17) {
+    // With trilinear on (bit 30), the reverse blend bits flip at odd
+    // levels: a unit that holds the even levels then passes the other
+    // unit's texel of the odd level through at a fraction of 0.
+    let odd = bit(mode, 30) && (lod >> 8) & 1 != 0;
+    if bit(mode, 17) == odd {
         br ^= 0xFF;
         bg ^= 0xFF;
         bb ^= 0xFF;
     }
-    if !bit(mode, 26) {
+    if bit(mode, 26) == odd {
         ba ^= 0xFF;
     }
     tr = (tr * (br + 1)) >> 8;
@@ -1168,6 +1172,8 @@ const fn full(tmus: usize, [fbz, cp, am, fog, t0, t1]: [u32; 6]) -> [(u32, u32);
 }
 
 /// The bits of textureMode that choose the texture combine (12-29).
+/// Trilinear (bit 30) also changes it, flipping the reverse blend bits at
+/// odd levels, but isn't fixed: a variant reads it from the register.
 const TC_FIXED: u32 = 0x3FFF_F000;
 
 /// A variant that fixes only fbzColorPath (as `CP_FIXED` says) and the
@@ -1898,6 +1904,44 @@ pub(crate) mod tests {
                 assert_eq!(a, b, "textureMode {mode:08X} reads c_local");
             }
         }
+    }
+
+    #[test]
+    fn trilinear_flips_the_lod_fraction_blend_at_odd_levels() {
+        let t = TmuRaster {
+            ram: Vram::new(2),
+            mask: 1,
+            mode: 0,
+            unfiltered: false,
+            lodmin: 0,
+            lodmax: 8 << 8,
+            lodbias: 0,
+            lodmask: 0x155,
+            lodoffset: [0; 9],
+            detailmax: 0xFF,
+            detailbias: 0,
+            detailscale: 0,
+            wmask: 255,
+            hmask: 255,
+            lookup: Arc::new([0; 256]),
+            bilinear_mask: 0xFF,
+        };
+        // Glide's grTexCombine(BLEND, LOD_FRACTION) for colour and alpha:
+        // (other - local) * fraction + local, reverse blend set.
+        let blend = 1 << 13 | 5 << 14 | 1 << 17 | 1 << 18 | 1 << 22 | 5 << 23 | 1 << 26 | 1 << 27;
+        let trilinear = blend | 1 << 30;
+        let (other, local) = (0xFF11_2233, 0x8044_5566);
+        // A fraction of 0 takes the unit's own texel (less the 1/256 of
+        // the difference that the blend's factor + 1 adds)...
+        let own = texture_combine(&t, blend, 0x100, other, local);
+        assert!((0..32).step_by(8).all(|s| ((own >> s) as u8).abs_diff((local >> s) as u8) <= 1));
+        assert_eq!(texture_combine(&t, trilinear, 0x200, other, local), own);
+        // ...but at an odd level with trilinear on, the other unit's.
+        assert_eq!(texture_combine(&t, trilinear, 0x100, other, local), other);
+        assert_eq!(texture_combine(&t, trilinear, 0x300, other, local), other);
+        // Halfway from level 1 to 2: the two texels about equally.
+        let half = texture_combine(&t, trilinear, 0x180, other, local);
+        assert_eq!(half, 0xBF2A_3B4C);
     }
 
     #[test]
