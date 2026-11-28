@@ -10,6 +10,7 @@ use super::thunk::{self, KIND_DLGPROC, KIND_PLAIN, KIND_WNDPROC};
 use super::{comm, hook, kernel, message};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
+use crate::win32::user32::DESKTOP;
 use crate::win32::user32::text::ansi_case;
 
 pub static MODULE: Def = Def {
@@ -975,6 +976,9 @@ fn is_dialog(cpu: &Cpu, hwnd: u32) -> bool {
 
 fn get_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, index) = (args[0], args[1]);
+    if index == GWL_HINSTANCE && hwnd == DESKTOP {
+        return Some(user_instance(cpu) as u32);
+    }
     let data = match index {
         GWL_WNDPROC => vec![P_PROC16, KIND_WNDPROC as u32],
         DWL_DLGPROC if is_dialog(cpu, hwnd) => vec![P_PROC16, KIND_DLGPROC as u32],
@@ -1025,10 +1029,23 @@ fn get_window_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     crate::idle::reads_arguments(cpu);
     let (hwnd, index) = (args[0], args[1]);
     match index {
+        GWL_HINSTANCE if hwnd == DESKTOP => Some(user_instance(cpu) as u32),
         GWL_HINSTANCE => go_post(cpu, "GetWindowLongA", &[hwnd, index], vec![P_INSTANCE]),
         i if i as i32 >= 0 => go(cpu, "GetWindowWord", &[hwnd, index]),
         _ => go(cpu, "GetWindowLongA", &[hwnd, index]),
     }
+}
+
+/// USER's instance, its DGROUP (`builtin::USER_DGROUP`): the desktop
+/// window's, as USER made it. 0 in a state saved before USER had one.
+fn user_instance(cpu: &Cpu) -> u16 {
+    cpu.bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .find(|m| m.builtin.is_some() && m.name == MODULE.name)
+        .map_or(0, |m| m.dgroup)
 }
 
 fn set_window_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
