@@ -2095,7 +2095,12 @@ order.
   AnimatePalette changes the colors on the screen at once. `16` is High
   Color, 16 bits a pixel (5-6-5), which programs that say they need a 16
   bit screen mode, such as Moto Racer, need when the adapter's own is
-  deeper. Like `win32_version`, a change takes effect for the next
+  deeper. `24` and `32` are True Color, 24 bits a pixel (3 bytes) or 32
+  (4 bytes): `32` gives a Banshee or Voodoo3 the True Color desktop
+  3dfx's driver offers. An adapter without the depth asked for has its
+  own True Color depth instead, and the log says so: the S3 ViRGE has
+  only 24, the others (the 3dfx cards and the ToadForce among them)
+  only 32. Like `win32_version`, a change takes effect for the next
   program that starts when none runs.
 * `win32_desktop` is the size of the built-in Windows' desktop:
   `640x480` (the default), `800x600` or `1024x768`, as Display
@@ -3136,7 +3141,7 @@ profile:
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both. With `svga_toadforce` the machine has a Pentium III without the line |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
-| `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it, except on a Voodoo2 add-on card: a game that sets its mode there leaves the 2D card's desktop as it was, and Omikron's movies, which take their format from that desktop, then need `16` ([docs/compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows)) |
+| `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits, `32` for one that says it needs True Color | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A windowed game that wants a True Color desktop needs `32` on a Voodoo3. A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it, except on a Voodoo2 add-on card: a game that sets its mode there leaves the 2D card's desktop as it was, and Omikron's movies, which take their format from that desktop, then need `16` ([docs/compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows)) |
 | `win32_desktop` | `800x600` only for a game that says it needs that screen resolution | The desktop is 640x480 by default. A game that checks the desktop's size before it starts, such as Fields of Fire, needs `800x600` (or `1024x768`, if it asks for that). Games that set their own mode with DirectDraw don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
 
@@ -3316,10 +3321,10 @@ last. Go through these in order:
 
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
 2. **Its message names `win32_version`:** set `win32_version=98se`.
-3. **It says it needs 256 colours or a 16 bit screen mode:** set
-   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits. If
-   it says it needs a screen resolution of 800x600, set
-   `win32_desktop=800x600`.
+3. **It says it needs 256 colours, a 16 bit screen mode or True
+   Color:** set `win32_depth=8` for 256 colours, `win32_depth=16` for
+   16 bits, `win32_depth=32` for True Color. If it says it needs a
+   screen resolution of 800x600, set `win32_desktop=800x600`.
 4. **It says there isn't enough memory:** raise `memsize`.
 5. **It can't find its CD or its files:** check its
    [registry keys](#registry-keys) and
