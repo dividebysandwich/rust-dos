@@ -48,6 +48,9 @@ pub const KIND_FONTENUM: u8 = 3;
 /// A hook procedure (hook.rs): its lParam given as a 16-bit copy, as
 /// `extra` (the hook's kind and data segment) says.
 pub const KIND_HOOK: u8 = 4;
+/// An mmio I/O procedure (misc.rs, `call_io_proc16`): its MMIOINFO given
+/// as a 16-bit copy, and the pointers its messages pass mapped.
+pub const KIND_IOPROC: u8 = 5;
 
 /// Bytes of a slot.
 const SLOT: u32 = 8;
@@ -80,6 +83,8 @@ pub static POSTS: &[Post] = &[
     super::message::post_send16_hooks,
     super::message::post_send16_ret,
     super::kernel::post_yield,
+    super::misc::post_mmio_open,
+    super::misc::post_mmio_close,
 ];
 
 pub const POST_PLAIN: u16 = 0;
@@ -91,6 +96,8 @@ pub const POST_MSG_FILTER: u16 = 5;
 pub const POST_SEND16_HOOKS: u16 = 6;
 pub const POST_SEND16_RET: u16 = 7;
 pub const POST_YIELD: u16 = 8;
+pub const POST_MMIO_OPEN: u16 = 9;
+pub const POST_MMIO_CLOSE: u16 = 10;
 
 /// The thens, by their place. Append only.
 pub static THENS: &[Then] = &[
@@ -113,9 +120,12 @@ pub static THENS: &[Then] = &[
     super::message::then_send16,
     super::user::then_dlg_int,
     super::notify::then_exit,
+    super::ole2::then_blocks,
+    super::misc::then_io_proc,
+    super::ole2::then_server,
 ];
 
-// Place 0 is then_keep, which no call names now.
+// Place 0 is then_keep, and 13 then_block, which no call names now.
 pub const THEN_PROC: u16 = 1;
 pub const THEN_TASK: u16 = 2;
 pub const THEN_MESSAGE: u16 = 3;
@@ -128,12 +138,14 @@ pub const THEN_CALLBACK: u16 = 9;
 pub const THEN_BOOT: u16 = 10;
 pub const THEN_CALLS16: u16 = 11;
 pub const THEN_OLE_METHOD: u16 = 12;
-pub const THEN_OLE_BLOCK: u16 = 13;
 pub const THEN_OLE2DISP: u16 = 14;
 pub const THEN_TYPELIB_INVOKE: u16 = 15;
 pub const THEN_SEND16: u16 = 16;
 pub const THEN_DLG_INT: u16 = 17;
 pub const THEN_NOTIFY_EXIT: u16 = 18;
+pub const THEN_OLE_BLOCKS: u16 = 19;
+pub const THEN_IO_PROC: u16 = 20;
+pub const THEN_OLE_SERVER: u16 = 21;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)
@@ -634,6 +646,7 @@ pub fn thunk32_trap(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         KIND_WNDPROC | KIND_DLGPROC => super::message::call_wndproc16(cpu, &thunk),
         KIND_FONTENUM => super::gdi::call_font_enum16(cpu, &thunk),
         KIND_HOOK => super::hook::call_hook16(cpu, &thunk),
+        KIND_IOPROC => super::misc::call_io_proc16(cpu, &thunk),
         _ => call_plain16(cpu, &thunk),
     }
     None

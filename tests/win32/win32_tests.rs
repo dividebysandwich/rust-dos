@@ -21636,7 +21636,7 @@ fn an_oledlg_function_not_written_ends_the_program_naming_it() {
 /// A function of OLEPRO32.DLL that isn't written yet and returns an
 /// HRESULT fails with E_NOTIMPL when guest code (a DLL of the
 /// `win32_dlls` folder) calls it, popping its arguments: 0 would be
-/// S_OK, and the caller would use the font it didn't get.
+/// S_OK, and the caller would use the class object it didn't get.
 #[test]
 fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     let call_font = |a: &mut CodeAssembler, l: &Layout| {
@@ -21653,7 +21653,7 @@ fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     let dll = module_image(
         DLL_BASE,
         Some("OLEUSER.DLL"),
-        &[("OLEPRO32.DLL", &["#253"])],
+        &[("OLEPRO32.DLL", &["#256"])],
         &[0; 0x10],
         &[("", &main), ("CallFont", &call_font)],
         &[],

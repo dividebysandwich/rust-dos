@@ -360,6 +360,14 @@ pub static MMSYSTEM: Def = Def {
         rust("midiInReset", 311, "w", wmidi::midi_in_bad_handle),
         rust("midiInGetID", 312, "wp", wmidi::midi_in_bad_handle),
         rust("midiInMessage", 313, "wwll", wmidi::midi_in_bad_handle),
+        rust(
+            "OutputDebugStr",
+            30,
+            "p",
+            super::kernel::output_debug_string,
+        ),
+        rust("mmioInstallIOProc", 1221, "lll", mmio_install_io_proc),
+        win32("mmioSendMessage", 1222, "wwll", MM, "mmioSendMessage", b'w'),
     ],
     library: true,
 };
@@ -2095,10 +2103,11 @@ fn mmio_to32(cpu: &Cpu, buffer: Option<[u32; 4]>, segptr: u32) -> u32 {
 fn mmio_info16(cpu: &mut Cpu, hmmio: u32, at: u32, at16: u32) {
     let buffer = mmio_buffer(cpu, hmmio);
     let f = |i: u32| r32(cpu, at + 4 * i);
+    let io_proc = thunk::thunk32_of(cpu, f(2)).map_or(0, |t| t.target);
     let words = [
         f(0),
         f(1),
-        0,
+        io_proc,
         f(3) & 0xFFFF,
         f(5),
         mmio_to16(cpu, buffer, f(6)),
@@ -2138,8 +2147,8 @@ fn mmio_info32(cpu: &mut Cpu, hmmio: u32, at16: u32) -> Option<u32> {
 /// mmioOpen(name, info, flags): with a 32-bit copy of the MMIOINFO16 if
 /// there is one, whose error and handle go back to it. A buffer that
 /// MMIO_ALLOCBUF, or a size without a buffer, asks for is a block of the
-/// global heap. A 16-bit I/O procedure isn't called: the file fails to
-/// open.
+/// global heap. Its pIOProc, a 16-bit I/O procedure, is given to WINMM
+/// as the procedure's 32-bit slot (`call_io_proc16`).
 fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (name, info16, mut flags) = (args[0], args[1], args[2]);
     // MMIO_PARSE, MMIO_EXIST and MMIO_GETTEMP open no file: TRUE or FALSE,
@@ -2149,7 +2158,9 @@ fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let at16 = super::linear(cpu, info16);
     let r = |cpu: &Cpu, o: u32| if at16 == 0 { 0 } else { r32(cpu, at16 + o) };
-    if r(cpu, 8) != 0 {
+    // A 16-bit I/O procedure is called through a 32-bit slot of its own.
+    let io_proc = thunk::proc32(cpu, r(cpu, 8), thunk::KIND_IOPROC, 0);
+    if r(cpu, 8) != 0 && io_proc == 0 {
         super::write_16(cpu, at16 + 12, MMIOERR_CANNOTOPEN as u16);
         return Some(0);
     }
@@ -2162,6 +2173,7 @@ fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if at16 != 0 {
         w32(cpu, info, r(cpu, 0));
         w32(cpu, info + 4, r(cpu, 4));
+        w32(cpu, info + 8, io_proc);
         for i in 0..3 {
             w32(cpu, info + 48 + 4 * i, r(cpu, 44 + 4 * i));
         }
@@ -2187,29 +2199,79 @@ fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         w32(cpu, info + 20, cch);
         w32(cpu, info + 24, flat);
     }
-    let hmmio = wmmio::mmio_open(cpu, &[name, info, flags])?;
+    // WINMM's mmioOpenA runs as 32-bit code, as it may call the file's
+    // I/O procedure; its MMIOINFO is above the stack it gets.
+    let [segptr, flat, handle] = buffer.unwrap_or([0; 3]);
+    let data = vec![info, at16, buffer.is_some() as u32, segptr, flat, handle];
+    let target = api(cpu, MM, "mmioOpenA");
+    let ctx = Context::of(cpu);
+    thunk::enter32_at(
+        cpu,
+        ctx,
+        info,
+        target,
+        &[name, info, flags],
+        thunk::POST_MMIO_OPEN,
+        data,
+    );
+    None
+}
+
+/// WINMM's mmioOpenA returned the file `hmmio` (`mmio_open`): its error
+/// and handle go to the MMIOINFO16, and the file keeps the buffer made
+/// for it, or the buffer goes.
+pub(super) fn post_mmio_open(
+    cpu: &mut Cpu,
+    hmmio: u32,
+    data: &[u32],
+    _: &mut Context,
+) -> Option<u32> {
+    let &[info, at16, has_buffer, segptr, flat, handle] = data else {
+        return Some(hmmio);
+    };
     if at16 != 0 {
         let error = r32(cpu, info + 12);
         super::write_16(cpu, at16 + 12, error as u16);
         super::write_16(cpu, at16 + 64, hmmio as u16);
     }
-    match buffer {
-        Some([segptr, flat, handle]) if hmmio != 0 => {
+    if has_buffer != 0 {
+        if hmmio != 0 {
             mmio_keep_buffer(cpu, hmmio, Some([hmmio, segptr, flat, handle]));
-        }
-        Some([_, _, handle]) if handle != 0 => {
+        } else if handle != 0 {
             super::global::free(cpu, handle as u16);
         }
-        _ => {}
     }
     Some(hmmio)
 }
 
-/// mmioClose(hmmio, flags): and the global block of its buffer is freed.
+/// mmioClose(hmmio, flags): WINMM's, as 32-bit code that may call the
+/// file's I/O procedure, and the global block of its buffer is freed.
 fn mmio_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let result = wmmio::mmio_close(cpu, &[args[0], args[1]])?;
-    if result == 0 {
-        mmio_keep_buffer(cpu, args[0], None);
+    let target = api(cpu, MM, "mmioClose");
+    let data = vec![args[0]];
+    thunk::call32(
+        cpu,
+        target,
+        &[args[0], args[1]],
+        thunk::POST_MMIO_CLOSE,
+        data,
+    );
+    None
+}
+
+/// WINMM's mmioClose returned (`mmio_close`). The buffer goes once the
+/// file is closed: a file of a program's procedure is, whatever its
+/// MMIOM_CLOSE returned.
+pub(super) fn post_mmio_close(
+    cpu: &mut Cpu,
+    result: u32,
+    data: &[u32],
+    _: &mut Context,
+) -> Option<u32> {
+    if let Some(&hmmio) = data.first()
+        && wmmio::mmio_get_info(cpu, &[hmmio, 0, 0]) == Some(MMSYSERR_INVALHANDLE)
+    {
+        mmio_keep_buffer(cpu, hmmio, None);
     }
     Some(result)
 }
@@ -2556,4 +2618,158 @@ fn wing_bit_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut all = args[..8].to_vec();
     all.push(SRCCOPY);
     go(cpu, G, "BitBlt", &all, Vec::new())
+}
+
+// 16-bit I/O procedures. WINMM's mmio keeps the procedures and calls
+// them: a 16-bit one is installed and named in MMIOINFOs as its 32-bit
+// slot (`thunk::proc32`), which calls it with a 16-bit MMIOINFO and the
+// pointers its messages pass made 16:16 ones.
+
+const MMIOM_READ: u32 = 0;
+const MMIOM_WRITE: u32 = 1;
+const MMIOM_OPEN: u32 = 3;
+const MMIOM_RENAME: u32 = 6;
+/// The size of an MMIOINFO16.
+const INFO16_SIZE: u32 = 66;
+/// What a 16-bit procedure is asked to read or write at once for a count
+/// that doesn't fit a word, as mmio's own read of the whole file asks:
+/// the procedure may take the count as a word, and the buffer's alias
+/// covers 64 KB. A count that fits goes as it is, as Windows passes the
+/// program's. Fewer bytes than were asked for is an answer mmio takes.
+const IO16_MAX: u32 = 0x8000;
+/// The most bytes of a file name copied to the 16-bit stack.
+const NAME16_MAX: usize = 260;
+
+/// mmioInstallIOProc(fccIOProc, pIOProc, dwFlags): WINMM's, with the
+/// 16-bit procedure's 32-bit slot, and the 16-bit procedure given back.
+fn mmio_install_io_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[fcc, proc16, flags] = args else {
+        unreachable!()
+    };
+    let slot = thunk::proc32(cpu, proc16, thunk::KIND_IOPROC, 0);
+    if proc16 != 0 && slot == 0 {
+        return Some(0);
+    }
+    let found = wmmio::mmio_install_io_proc(cpu, &[fcc, slot, flags])?;
+    Some(thunk::thunk32_of(cpu, found).map_or(0, |t| t.target))
+}
+
+/// WINMM called the 32-bit slot of a 16-bit I/O procedure,
+/// IOProc(lpmmioinfo, uMsg, lParam1, lParam2), stdcall: the procedure
+/// runs with a 16-bit copy of the MMIOINFO on its stack, a file name
+/// (MMIOM_OPEN, MMIOM_RENAME) copied there too, and the buffer of
+/// MMIOM_READ and MMIOM_WRITE mapped as MapLS maps it. Other messages
+/// pass their values as they are, as a program's own (MMIOM_USER and
+/// up) come from mmioSendMessage as the program gave them.
+pub(super) fn call_io_proc16(cpu: &mut Cpu, thunk: &super::Thunk) {
+    let esp = cpu.esp();
+    let [ret, info, msg, p1, p2] = [0, 4, 8, 12, 16].map(|o| r32(cpu, esp + o));
+    let mut resume = Context::of(cpu);
+    resume.eip = ret;
+    resume.gpr[thunk::ESP] = esp + 20;
+    let at = thunk::stack16_for(cpu, &resume);
+    let mut stack = super::message::Stack16::new(cpu, at);
+    let (info16, info16_at) = stack.alloc(INFO16_SIZE);
+    io_info16(cpu, info, info16_at, thunk.target);
+    let mut alias = 0;
+    let (l1, l2) = match msg {
+        MMIOM_OPEN | MMIOM_RENAME => {
+            let mut names = [p1, p2];
+            for (i, p) in names.iter_mut().enumerate() {
+                if *p == 0 || (i == 1 && msg == MMIOM_OPEN) {
+                    continue;
+                }
+                let mut bytes = super::string_bytes(cpu, *p, NAME16_MAX);
+                bytes.push(0);
+                let (p16, lin) = stack.alloc(bytes.len() as u32);
+                super::poke(cpu, lin, &bytes);
+                *p = p16;
+            }
+            (names[0], names[1])
+        }
+        MMIOM_READ | MMIOM_WRITE => {
+            alias = super::flat::map_ls(cpu, p1);
+            if alias == 0 && p1 != 0 {
+                // No selector for the buffer: the call fails, as a
+                // procedure's -1 says, rather than give it a null one.
+                resume.gpr[thunk::EAX] = u32::MAX;
+                crate::win32::system::load_context(cpu, &resume);
+                return;
+            }
+            (alias, if p2 > 0xFFFF { IO16_MAX } else { p2 })
+        }
+        _ => (p1, p2),
+    };
+    let words = [
+        (info16 >> 16) as u16,
+        info16 as u16,
+        msg as u16,
+        (l1 >> 16) as u16,
+        l1 as u16,
+        (l2 >> 16) as u16,
+        l2 as u16,
+    ];
+    let data = vec![info, info16_at, alias];
+    let at = (stack.ss, stack.sp);
+    thunk::call16_at(
+        cpu,
+        thunk.target,
+        &words,
+        0,
+        resume,
+        thunk::THEN_IO_PROC,
+        data,
+        at,
+    );
+}
+
+/// Write the 32-bit MMIOINFO at `info` as the MMIOINFO16 at `at` for the
+/// 16-bit procedure `proc16`: what a procedure reads (the flags, the
+/// FOURCC, the error, the offsets, adwInfo and the handle), and no
+/// buffer, which mmio keeps to itself.
+fn io_info16(cpu: &mut Cpu, info: u32, at: u32, proc16: u32) {
+    let f = |i: u32| r32(cpu, info + 4 * i);
+    let dwords = [
+        f(0),
+        f(1),
+        proc16,
+        f(3) & 0xFFFF | (f(4) & 0xFFFF) << 16,
+        f(5),
+        0,
+        0,
+        0,
+        0,
+        f(10),
+        f(11),
+        f(12),
+        f(13),
+        f(14),
+        f(15),
+        f(16),
+    ];
+    let mut bytes: Vec<u8> = dwords.iter().flat_map(|d| d.to_le_bytes()).collect();
+    bytes.extend_from_slice(&(f(17) as u16).to_le_bytes());
+    super::poke(cpu, at, &bytes);
+}
+
+/// A 16-bit I/O procedure returned (`call_io_proc16`): what it changed of
+/// its MMIOINFO (the error, the disk offset and adwInfo) goes back to
+/// WINMM's, the buffer's alias goes, and WINMM gets the LRESULT.
+pub(super) fn then_io_proc(
+    cpu: &mut Cpu,
+    value: u32,
+    data: &[u32],
+    _: &mut Context,
+) -> Option<u32> {
+    let &[info, at16, alias] = data else {
+        return Some(value);
+    };
+    w32(cpu, info + 12, super::read_16(cpu, at16 + 12) as u32);
+    for i in 0..4 {
+        w32(cpu, info + 44 + 4 * i, r32(cpu, at16 + 40 + 4 * i));
+    }
+    if alias != 0 {
+        super::flat::unmap_ls(cpu, alias);
+    }
+    Some(value)
 }

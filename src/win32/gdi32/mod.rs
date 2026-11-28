@@ -26,6 +26,7 @@ pub mod palette;
 pub mod region;
 pub mod rgn;
 mod sans8;
+mod system16;
 mod truetype;
 mod ttf;
 pub mod surface;
