@@ -527,10 +527,12 @@ first instruction in a block that changes them:
   on pages out of the picture shown: each page's byte says whether the
   code writes it, whether it reads it (the pages of a surface the host
   has newer pixels of stay `jit_dev_read`'s), whether the bytes count
-  as those of the picture `cycles=auto` knows, and which of up to four
-  surfaces ahead on the host notes them. A write that starts a burst,
-  one that spans two words of a surface's bits, and the first into a
-  surface without its bits yet go to the bus.
+  as those of the picture `cycles=auto` knows, and which of up to seven
+  surfaces ahead on the host notes them (the pages of any more are the
+  bus's to write, up to 16, past which all of the frame buffer is). A
+  write that starts a burst, one that spans two words of a surface's
+  bits, and the first into a surface without its bits yet go to the
+  bus.
 
 On x86-64, the four guest registers a block's operations use most (twice
 or more) stay in host registers within it (`x64::Cache`). An instruction

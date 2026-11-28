@@ -18,9 +18,16 @@ use crate::toadforce::gpu::Note;
 use crate::video::VideoMode;
 
 /// The most surfaces ahead on a ToadForce's host renderer whose
-/// written bytes translated code notes itself. With more, the code
-/// leaves card memory to the bus.
-pub const NOTES: usize = 4;
+/// written bytes translated code notes itself: one a slot of
+/// `JitCtx::card_notes`, whose number from 1 is in 3 bits of a page's
+/// flags. A game that keeps three buffers and two depth buffers or
+/// render targets on the host, as Nocturne does, has five.
+pub const NOTES: usize = 7;
+
+/// The most surfaces ahead that `Bus::lfb_direct` names. The pages of
+/// those past `NOTES` are the bus's, and with more than this, all of
+/// card memory is.
+pub const AHEAD: usize = 16;
 
 /// Where translated code may read and write the VESA linear frame
 /// buffer by itself (`Bus::lfb_direct`).
@@ -47,8 +54,9 @@ pub struct LfbDirect {
     pub counts: *mut u64,
     /// The surfaces ahead on the host (`gpu::Gpu::notes`), the first
     /// `ahead` of them. Their bytes are read through the bus, which
-    /// answers with the host's pixels.
-    pub notes: [Note; NOTES],
+    /// answers with the host's pixels, and so are the writes into those
+    /// past the first `NOTES`.
+    pub notes: [Note; AHEAD],
     pub ahead: usize,
 }
 
@@ -121,7 +129,7 @@ impl Bus {
             counted: clip(counted, len),
             generation: std::ptr::null_mut(),
             counts: std::ptr::null_mut(),
-            notes: [NO_NOTE; NOTES],
+            notes: [NO_NOTE; AHEAD],
             ahead: 0,
         };
         if let Some(card) = self.toadforce.as_deref_mut() {
@@ -130,7 +138,7 @@ impl Bus {
                 (direct.generation, direct.counts) = (generation, counts);
             }
             for note in notes {
-                if direct.ahead == NOTES {
+                if direct.ahead == AHEAD {
                     return None;
                 }
                 direct.notes[direct.ahead] = note;

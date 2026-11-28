@@ -142,9 +142,9 @@ const WHOLE: Rect = Rect {
 };
 
 /// A rig on `core` with a ToadForce showing 640x480 at 16 bits from the
-/// start of its memory, its host the recorder, and `AHEAD` and `MIXED`
-/// ahead on it.
-fn rig(core: CoreMode, code: &[u8]) -> (Rig, Log) {
+/// start of its memory, its host the recorder, and `AHEAD`, `MIXED` and
+/// `extra`, in that order, ahead on it.
+fn rig(core: CoreMode, code: &[u8], extra: &[Surface]) -> (Rig, Log) {
     let mut rig = Rig::new();
     rig.cpu.core = core;
     // MMX and SSE, as a Pentium III with the OS's SSE support on.
@@ -179,7 +179,7 @@ fn rig(core: CoreMode, code: &[u8]) -> (Rig, Log) {
     let log = Log::default();
     bus.toadforce_set_host(Some(Box::new(Recorder(log.clone()))));
     let mut words = Vec::new();
-    for colour in [AHEAD, MIXED] {
+    for &colour in [AHEAD, MIXED].iter().chain(extra) {
         let target = Target {
             colour,
             depth: None,
@@ -312,8 +312,8 @@ fn program() -> Vec<u8> {
 #[test]
 fn a_programs_drawing_into_a_toadforces_memory_is_the_interpreters() {
     let code = program();
-    let (mut a, log_a) = rig(CoreMode::Normal, &code);
-    let (mut b, log_b) = rig(CoreMode::Dynamic, &code);
+    let (mut a, log_a) = rig(CoreMode::Normal, &code, &[]);
+    let (mut b, log_b) = rig(CoreMode::Dynamic, &code, &[]);
     a.run_batched_to_halt();
     b.run_batched_to_halt();
     assert_ne!(b.cpu.ebx(), 0);
@@ -377,5 +377,84 @@ fn without_generation(line: &str) -> String {
             format!("{}{}", &line[..at], &rest[digits..])
         }
         None => line.to_string(),
+    }
+}
+
+/// `count` surfaces like `AHEAD` after `MIXED`, one after the other.
+fn more(count: u32) -> Vec<Surface> {
+    (0..count)
+        .map(|k| Surface {
+            offset: MIXED.offset + (k + 1) * 0x8000,
+            ..AHEAD
+        })
+        .collect()
+}
+
+/// Dwords into every byte of `surfaces`.
+fn fill_program(surfaces: &[Surface]) -> Vec<u8> {
+    asm32(CODE, |a| {
+        for s in surfaces {
+            let mut dwords = a.create_label();
+            a.mov(edi, MEMORY + s.offset)?;
+            a.mov(ecx, s.pitch * s.height / 4)?;
+            a.set_label(&mut dwords)?;
+            a.mov(dword_ptr(edi), ecx)?;
+            a.add(edi, 4)?;
+            a.dec(ecx)?;
+            a.jnz(dwords)?;
+        }
+        a.hlt()
+    })
+}
+
+/// Nine surfaces ahead on the host, as a game with three buffers, depth
+/// buffers and render targets on it has: the code notes its writes into
+/// the first seven by itself and leaves those into the others to the
+/// bus, which notes them, and the host gets the same pixels as from the
+/// interpreter.
+#[test]
+fn the_code_writes_seven_surfaces_ahead_and_leaves_the_rest_to_the_bus() {
+    let extra = more(7);
+    let all: Vec<Surface> = [AHEAD, MIXED].iter().chain(&extra).copied().collect();
+    let code = fill_program(&all);
+    let (mut a, log_a) = rig(CoreMode::Normal, &code, &extra);
+    let (mut b, log_b) = rig(CoreMode::Dynamic, &code, &extra);
+    a.run_batched_to_halt();
+    b.run_batched_to_halt();
+    let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+    for rig in [&mut a, &mut b] {
+        // The card draws again: the host gets what was written first.
+        let mut words = Vec::new();
+        let first = Rect {
+            left: 0,
+            top: 0,
+            width: 4,
+            height: 1,
+        };
+        level1::encode::clear(&mut words, CLEAR_COLOUR, 7, 0.0, 0, &[first]);
+        rig.cpu.bus.toadforce_submit(&words);
+        rig.cpu.bus.toadforce_flush();
+    }
+    let memory = |rig: &Rig| rig.cpu.bus.vbe.vram[..0x30_0000].to_vec();
+    assert!(memory(&a) == memory(&b), "card memory differs");
+    let activity = |rig: &Rig| format!("{:?}", rig.cpu.bus.activity);
+    assert_eq!(activity(&a), activity(&b));
+    let log = |log: &Log| {
+        log.borrow()
+            .iter()
+            .map(|l| without_generation(l))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(log(&log_a), log(&log_b));
+    assert!(
+        log_b.borrow().iter().any(|l| l.starts_with("write")),
+        "{:?}",
+        log_b.borrow()
+    );
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        // The 2 x 2000h dwords into the last two surfaces, and the
+        // first into each of the others, which makes its bits.
+        let bus = 2 * 0x2000;
+        assert!((bus..bus + 64).contains(&calls), "{calls} calls");
     }
 }
