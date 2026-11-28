@@ -21811,13 +21811,15 @@ fn deleteobject_deletes_a_memory_dc_and_keeps_a_window_dc() {
 }
 
 /// The stock 1x1 bitmap a memory DC starts with goes back into two DCs
-/// at once, as every program that frees its bitmaps so does: Windows
-/// keeps a bitmap to one DC, but not that one. Civilization II's
-/// Civilopedia stops with "Internal Error" when the second SelectObject
-/// fails. A program selects a bitmap of its own into each of two memory
-/// DCs and then the bitmap each replaced back. Its exit code: one bit
-/// each for the two old bitmaps being one, the first SelectObject of it
-/// back, the second, and DeleteObject of each of its own bitmaps.
+/// at once, as it does when a program puts each DC's old bitmap back to
+/// free its own: Windows keeps a program's bitmap to one DC, but not
+/// that one. Civilization II's Civilopedia stops with "Internal Error"
+/// when the second SelectObject fails. A program selects a bitmap of
+/// its own into each of two memory DCs, tries the first DC's into the
+/// second, and then selects the bitmap each replaced back. Its exit
+/// code: one bit each for the two old bitmaps being one, the first
+/// SelectObject of it back, the second, DeleteObject of each of its own
+/// bitmaps, and the first DC's bitmap refused by the second DC.
 #[test]
 fn the_default_bitmap_goes_back_into_two_dcs() {
     let names: &[&str] = &[
@@ -21861,6 +21863,13 @@ fn the_default_bitmap_goes_back_into_two_dcs() {
         a.sete(al)?;
         a.movzx(eax, al)?;
         bit(a, 0)?;
+        a.push(dword_ptr(esp))?;
+        a.push(edi)?;
+        a.call(f("SelectObject"))?;
+        a.cmp(eax, 0)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 5)?;
         for (dc, at, n) in [(esi, 8, 1), (edi, 12, 2)] {
             a.push(dword_ptr(esp + at))?;
             a.push(dc)?;
@@ -21878,7 +21887,7 @@ fn the_default_bitmap_goes_back_into_two_dcs() {
     });
     let mut cpu = machine_with("default_bitmap_two_dcs", &[("T.EXE", exe)]);
     assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
-    assert_eq!(cpu.errorlevel, 0x1F);
+    assert_eq!(cpu.errorlevel, 0x3F);
 }
 
 /// A program adds F.FON, a file of two sizes of the face "Test Face",
