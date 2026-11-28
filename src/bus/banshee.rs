@@ -197,6 +197,10 @@ impl Bus {
     /// on. What lands in the desktop shown counts for `cycles=auto` as a
     /// write into a VESA frame buffer does: a game under Windows that
     /// copies its frames into the primary surface itself draws them there.
+    /// Translated code counts its writes into the desktop's whole pages
+    /// itself, with offsets from the desktop's first byte (`dynrec::x64`'s
+    /// `card_count`, `JitCtx::card_origin`): what changes here changes
+    /// there.
     #[inline]
     pub(crate) fn note_banshee_memory_write(&mut self, addr: u32, len: u32) {
         let Some(b) = self.banshee().filter(|b| b.extended()) else {
@@ -596,14 +600,15 @@ mod tests {
     }
 
     #[test]
-    fn direct_memory_leaves_the_desktop_and_observed_accesses_to_the_bus() {
+    fn direct_memory_names_the_desktop_and_leaves_observed_accesses_to_the_bus() {
         const BAR1: u32 = crate::voodoo::banshee::INITIAL_BAR1;
         let mut cpu = card_with_a_desktop();
         let bus = &mut cpu.bus;
         let (at, direct) = bus.banshee_direct().expect("a quiet card");
         assert_eq!((at, direct.len), (BAR1, 0x40_0000));
         let (_, span) = bus.banshee().unwrap().desktop_memory();
-        assert_eq!(direct.kept, [(0x8000, 0x8000 + span as u32), (0, 0), (0, 0)]);
+        assert_eq!(direct.shown, (0x8000, 0x8000 + span as u32));
+        assert_eq!(direct.kept, [(0, 0); 2]);
         // A proof of an idle loop follows every access (`idle`).
         bus.observe.on = true;
         assert!(bus.banshee_direct().is_none());

@@ -210,6 +210,11 @@ pub struct JitCtx {
     pub card_generation: *mut u64,
     pub card_counts: *mut u64,
     pub card_notes: [NoteSlot; NOTES],
+    /// The offset in the card's memory that `cycles=auto` counts the
+    /// picture's bytes from (`Activity::video_write`'s offsets): 0 for the
+    /// VESA frame buffer, whose offsets are video memory's, the desktop's
+    /// first byte for a Banshee's, whose are the desktop's.
+    pub card_origin: u32,
     /// Whether a write the bus makes into the frame buffer can let the
     /// code write it, wherever it is (`card_state` after it): commands
     /// are queued.
@@ -251,14 +256,14 @@ const NO_SLOT: NoteSlot = NoteSlot {
 
 /// What a byte of `JitCtx::card_pages` allows on its page: the code
 /// writes the bytes itself, it reads them itself, and with `PAGE_COUNT`
-/// a write also counts as the VESA frame buffer's writes count (bytes
-/// for `cycles=auto` within a burst, a ToadForce's page counts), with
-/// `PAGE_SHOWN` as bytes of the picture `cycles=auto` knows. Bits 4 to
-/// 6 hold the number (from 1) of the `card_notes` slot whose surface a
-/// write's bytes go into, noted there. `PAGE_RETRY`: a write through the
-/// bus there can let the code write the page (`card_state` after it), or
-/// in a Banshee's memory a read or write can let it read or write it
-/// (`card_granted`).
+/// a write also counts as the VESA frame buffer's and a Banshee's
+/// desktop's writes count (bytes for `cycles=auto` within a burst, a
+/// ToadForce's page counts), with `PAGE_SHOWN` as bytes of the picture
+/// `cycles=auto` knows. Bits 4 to 6 hold the number (from 1) of the
+/// `card_notes` slot whose surface a write's bytes go into, noted there.
+/// `PAGE_RETRY`: a write through the bus there can let the code write
+/// the page (`card_state` after it), or in a Banshee's memory a read or
+/// write can let it read or write it (`card_granted`).
 pub const PAGE_WRITE: u8 = 1;
 pub const PAGE_READ: u8 = 2;
 pub const PAGE_COUNT: u8 = 4;
@@ -278,11 +283,13 @@ const _: () = assert!(NOTES < 8);
 /// picture shown (writes to devices and ports and reads of ports, by the
 /// code or by handlers). A Banshee's or Voodoo3's memory comes first
 /// (`Bus::banshee_direct`), then the VESA frame buffer
-/// (`Bus::lfb_direct`). The pages a write does more for than the code
-/// does stay the bus's: a Banshee's desktop shown and command rings
-/// (`Direct::kept`) and, while it says so page by page, the pages whose
-/// reads or writes it hasn't said are only the bytes (`Direct::grants`),
-/// the frame buffer's picture shown
+/// (`Bus::lfb_direct`). The code counts a write into a Banshee's desktop
+/// shown for `cycles=auto` itself on the desktop's whole pages
+/// (`Direct::shown`), as it does the frame buffer's. The pages a write
+/// does more for than the code does stay the bus's: a Banshee's command
+/// rings (`Direct::kept`), the desktop's partial pages and, while it says
+/// so page by page, the pages whose reads or writes it hasn't said are
+/// only the bytes (`Direct::grants`), the frame buffer's picture shown
 /// (`LfbDirect::shown`) and the partial pages of the one `cycles=auto`
 /// counts, and pages where a ToadForce's host has newer pixels the code
 /// can't note.
@@ -316,7 +323,12 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
         Some(CardKey::Banshee(bar1, direct)) => {
             ctx.card_base = direct.base;
             ctx.card_lo = bar1;
+            ctx.card_generation = std::ptr::null_mut();
+            ctx.card_counts = std::ptr::null_mut();
+            ctx.card_notes = [NO_SLOT; NOTES];
+            ctx.card_origin = direct.shown.0;
             make_card_map(ctx, direct.len, 0, &direct.kept);
+            counted_pages(&mut ctx.card_map, direct.shown, DESKTOP);
             ctx.card_retry = false;
             if direct.grants.is_some() {
                 // Only the pages the card says, and the others may become
@@ -334,22 +346,13 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
             ctx.card_lo = direct.lo;
             ctx.card_generation = direct.generation;
             ctx.card_counts = direct.counts;
+            ctx.card_origin = 0;
             make_card_map(ctx, direct.len, PAGE_COUNT, &[direct.shown]);
             ctx.card_retry = false;
             // The bytes `cycles=auto` counts as the picture's: on its
             // whole pages the code counts them too, the others are the
             // bus's.
-            let (start, end) = direct.counted;
-            if let Some((first, last)) = page_span(start, end, ctx.card_map.len()) {
-                for (i, flags) in ctx.card_map[first..=last].iter_mut().enumerate() {
-                    let at = ((first + i) << 12) as u64;
-                    if at >= start as u64 && at + 0x1000 <= end as u64 {
-                        *flags |= PAGE_SHOWN;
-                    } else {
-                        *flags &= !PAGE_WRITE;
-                    }
-                }
-            }
+            counted_pages(&mut ctx.card_map, direct.counted, PAGE_SHOWN);
             ctx.card_notes = [NO_SLOT; NOTES];
             for (i, note) in direct.notes[..direct.ahead].iter().enumerate() {
                 ctx.card_notes[i] = NoteSlot {
@@ -428,8 +431,44 @@ fn card_granted(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32) {
         page_span(start, end, ctx.card_map.len()).is_some_and(|(a, b)| (a..=b).contains(&page))
     });
     let flags = PAGE_READ | if whole && !kept { PAGE_WRITE } else { 0 };
+    let flags = counted_page(flags, page, direct.shown, ctx.card_map.len(), DESKTOP);
     if let Some(f) = ctx.card_map.get_mut(page) {
         *f = granted(flags, grant);
+    }
+}
+
+/// What a write into a Banshee's desktop shown (`Direct::shown`) counts
+/// as on the desktop's whole pages: bytes for `cycles=auto` and the
+/// picture's (`counted_page`).
+const DESKTOP: u8 = PAGE_COUNT | PAGE_SHOWN;
+
+/// What page `page` of a map of `pages` allows with `flags`, given the
+/// bytes (start, end) whose writes count as the picture's for
+/// `cycles=auto`: a Banshee's desktop shown, or the part of the VESA
+/// frame buffer `LfbDirect::counted` names. On their whole pages a write
+/// counts with `add` (`PAGE_SHOWN` and on), which the code does itself
+/// (`x64::card_count`); their partial pages are the bus's to write, which
+/// counts only the bytes in them. Other pages keep `flags`.
+fn counted_page(flags: u8, page: usize, (start, end): (u32, u32), pages: usize, add: u8) -> u8 {
+    let Some((first, last)) = page_span(start, end, pages) else {
+        return flags;
+    };
+    if !(first..=last).contains(&page) {
+        return flags;
+    }
+    let at = (page as u64) << 12;
+    if at >= start as u64 && at + 0x1000 <= end as u64 {
+        flags | add
+    } else {
+        flags & !PAGE_WRITE
+    }
+}
+
+/// `counted_page` for every page of `map`.
+fn counted_pages(map: &mut [u8], counted: (u32, u32), add: u8) {
+    let pages = map.len();
+    for (page, flags) in map.iter_mut().enumerate() {
+        *flags = counted_page(*flags, page, counted, pages, add);
     }
 }
 
@@ -532,6 +571,8 @@ pub const CTX_CARD_GENERATION: i32 = offset_of!(JitCtx, card_generation) as i32;
 pub const CTX_CARD_COUNTS: i32 = offset_of!(JitCtx, card_counts) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_CARD_NOTES: i32 = offset_of!(JitCtx, card_notes) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_ORIGIN: i32 = offset_of!(JitCtx, card_origin) as i32;
 pub const CTX_VGA_PLANES: i32 = offset_of!(JitCtx, vga_planes) as i32;
 pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
 pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
@@ -689,6 +730,7 @@ impl JitCtx {
             card_generation: std::ptr::null_mut(),
             card_counts: std::ptr::null_mut(),
             card_notes: [NO_SLOT; NOTES],
+            card_origin: 0,
             card_retry: false,
             card_map: Vec::new(),
             card_key: None,
@@ -1546,7 +1588,7 @@ mod tests {
     };
 
     #[test]
-    fn the_code_writes_a_voodoo3s_memory_but_for_the_desktop_shown() {
+    fn the_code_writes_a_voodoo3s_memory_and_counts_the_desktop_shown() {
         if !cfg!(target_arch = "x86_64") {
             return;
         }
@@ -1566,8 +1608,10 @@ mod tests {
         };
         assert_eq!(pages(&ctx), (0..0x400).collect::<Vec<_>>());
         assert_eq!(ctx.card_pages, ctx.card_map.as_ptr());
-        // A desktop shown from 8000h, its rows 16 bytes apart: its pages,
-        // the last one in part, are the bus's to write.
+        // A desktop shown from 8000h, its rows 16 bytes apart: the code
+        // writes its whole page and counts the writes for `cycles=auto`,
+        // from the desktop's first byte; the page it has in part is the
+        // bus's to write.
         cpu.bus.voodoo_write_32(VGA_INIT0, 0x0000_1140);
         cpu.bus.voodoo_write_32(VID_PROC_CFG, 0x0004_0081);
         cpu.bus.voodoo_write_32(VID_DESKTOP_OVERLAY_STRIDE, 0x10);
@@ -1576,15 +1620,25 @@ mod tests {
         let (start, span) = cpu.bus.banshee().unwrap().desktop_memory();
         assert_eq!(start, 0x8000);
         assert!((0x1010..0x1FF0).contains(&span), "{span:#x} bytes");
-        let kept = [8, 9];
         assert_eq!(
             pages(&ctx),
-            (0..0x400).filter(|p| !kept.contains(p)).collect::<Vec<_>>()
+            (0..0x400).filter(|&p| p != 9).collect::<Vec<_>>()
         );
-        // The start moved, as a flip moves it.
+        let counted = |ctx: &JitCtx| -> Vec<usize> {
+            let both = PAGE_COUNT | PAGE_SHOWN;
+            (0..ctx.card_map.len())
+                .filter(|&p| ctx.card_map[p] & both == both)
+                .collect()
+        };
+        assert_eq!(counted(&ctx), [8]);
+        assert_eq!(ctx.card_origin, 0x8000);
+        // The start moved, as a flip moves it, to the memory's last page,
+        // which has all of the desktop there is.
         cpu.bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x3F_F000);
         card_state(&mut cpu, &mut ctx);
-        assert_eq!(pages(&ctx), (0..0x3FF).collect::<Vec<_>>());
+        assert_eq!(pages(&ctx), (0..0x400).collect::<Vec<_>>());
+        assert_eq!(counted(&ctx), [0x3FF]);
+        assert_eq!(ctx.card_origin, 0x3F_F000);
         // A recording for the OpenGL renderer hears of every write: the
         // code reads and writes a page itself once the card says the
         // page needs nothing else, after an access through the bus.
@@ -1602,21 +1656,22 @@ mod tests {
         card_granted(&mut cpu, &mut ctx, at);
         assert_eq!(ctx.card_map[0x20], PAGE_READ | PAGE_WRITE);
         assert_eq!(open(&ctx), [0x20]);
-        // The desktop shown is the bus's to write still.
+        // So is the desktop's page, whose writes the code counts.
         let shown = INITIAL_BAR1 + 0x3F_F004;
         assert!(cpu.bus.write_banshee_linear(shown as usize, 7, 4));
         card_granted(&mut cpu, &mut ctx, shown);
-        assert_eq!(ctx.card_map[0x3FF], PAGE_READ);
+        let desktop = PAGE_COUNT | PAGE_SHOWN;
+        assert_eq!(ctx.card_map[0x3FF], PAGE_READ | PAGE_WRITE | desktop);
         // The page's writes have to reach the texture units: they go
         // through the bus again, and the map is made again.
         let card = cpu.bus.voodoo.as_mut().unwrap();
         card.banshee_stamp_direct_writes();
         card_state(&mut cpu, &mut ctx);
         assert_eq!(ctx.card_map[0x20], PAGE_READ | PAGE_RETRY);
-        assert_eq!(ctx.card_map[0x3FF], PAGE_READ);
+        assert_eq!(ctx.card_map[0x3FF], PAGE_READ | desktop | PAGE_RETRY);
         cpu.bus.voodoo.as_mut().unwrap().set_mirror(false);
         card_state(&mut cpu, &mut ctx);
-        assert_eq!(pages(&ctx), (0..0x3FF).collect::<Vec<_>>());
+        assert_eq!(pages(&ctx), (0..0x400).collect::<Vec<_>>());
         assert!(ctx.card_map.iter().all(|&f| f & PAGE_RETRY == 0));
     }
 }
