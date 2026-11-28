@@ -133,7 +133,8 @@ that it improves on main. Steps, in this order:
    branch, and compare with main.
 4. Mark it ready for review only when that shows a clear improvement on
    main: a speed-up you measured, against main on the same machine and
-   scene; a bug that main has and the branch fixes, seen in the game; or
+   scene; less work for the same output, counted in deterministic runs,
+   for a change that only removes work (below); a bug that main has and the branch fixes, seen in the game; or
    behaviour closer to the real hardware or the real Windows, shown by
    a test or a comparison with it. Put the evidence in the description.
    How much checking that takes depends on what the change can break
@@ -207,26 +208,33 @@ while it runs.
   by a deterministic comparison: identical frames at equal emulated
   times, and the counter of the work removed lower on the branch
   (`/api/stats`, or the card's and its renderer's counts under `video`
-  in `/api/status`). That shows the output is kept and the work is
-  gone, but not that the program runs faster. The comparison has to
-  run the changed code. `--deterministic` draws the cards in
+  in `/api/status`). That is the evidence it is better. The comparison
+  has to run the changed code. `--deterministic` draws the cards in
   software, so a change to the ToadForce's OpenGL renderer is compared
   with `RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` and `renderer` checked
   ("The ToadForce card" in `docs/llm-debugging.md`), and one to the
   Voodoo cards' OpenGL path, which no deterministic run reaches, takes
   the form for runs that can't be deterministic (end of "Comparing
-  what two builds draw", below).
-- A change made for speed stays a draft until it is timed, whatever
-  the deterministic counts show: the program it is for, and each
-  program its "Regression check" lists, main against the branch on
-  the same machine and scene, with the machine quiet. For a change
-  that removes work, one run per build of each program is enough,
-  main first and at a fixed `--cycles`, and the description calls
-  the figures indicative. Later runs in a session tend to read slower
+  what two builds draw", below). A timing run then only puts a number
+  on the gain: one run per build on one scene that shows it is enough,
+  main first and at a fixed `--cycles`, and the description calls the
+  figure indicative. Later runs in a session tend to read slower
   whatever the build, so main first makes that drift count against
-  the branch. A regression program that the timing shows slower on
-  the branch is a regression to explain or fix before the pull
-  request leaves draft.
+  the branch.
+
+  This holds only for a change that removes work and adds none: the
+  counter counts the removed work itself, not which code ran, and no
+  path, the target's or another program's, gains a check, a lookup or
+  a larger table. A pull request that goes ready this way says why in
+  its description, every time: what the counter counts, and why the
+  change adds no work anywhere. Any other change made for speed (one
+  that moves work to cheaper code, trades one cost for another, or
+  adds a cost on a shared path while removing one on the target's)
+  stays a draft until it is timed: the program it is for and each
+  program its "Regression check" lists, main against the branch on the
+  same machine and scene, with the machine quiet. A regression program
+  that the timing shows slower on the branch is a regression to explain
+  or fix before the pull request leaves draft.
 - A timing series (several runs per build, the order alternated, the
   spread given) is for claims whose truth is the timing itself: a
   change that does the same work faster with no counter to show it, a
@@ -305,8 +313,10 @@ while it runs.
 - When the machine is busy (the user says so, or `rust-dos-lock status`
   shows others' emulators running for long), take no timing
   measurements. The deterministic evidence above doesn't depend on the
-  host's speed and goes on, but a change made for speed stays a draft
-  until its timings are run on a quiet machine.
+  host's speed and goes on. For a change that only removes work it is
+  enough for step 4, and the indicative figure joins the description
+  once the machine is quiet; any other change made for speed stays a
+  draft until its timings or its series are run.
 
 ## Comparing what two builds draw: deterministic runs
 
