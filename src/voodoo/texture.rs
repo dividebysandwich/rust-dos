@@ -644,4 +644,37 @@ mod tests {
         tmu.recompute(&reg);
         assert_eq!(tmu.lodoffset[1], 0x800 + 256 * 256 * 2);
     }
+
+    #[test]
+    fn multibase_levels_split_between_two_units() {
+        // Leadfoot's menu textures on a Voodoo 3 (#2187): a 5-6-5 texture
+        // of levels 256 to 32, the even ones on TMU 0 and the odd ones on
+        // TMU 1, each range at an address of its own. Glide 2's
+        // grTexMultibaseAddress writes each range's start less the bytes
+        // of the unit's levels before it (_grTexCalcBaseAddress), and the
+        // card adds them back.
+        let unit = |odd: bool, ranges: [u32; 4]| {
+            let mut reg = regs();
+            let mut tmu = Tmu::new(16 << 20, 0x100);
+            (tmu.v2, tmu.byte_base) = (true, true);
+            reg[0x100 + TEXTURE_MODE] = 10 << 8;
+            reg[0x100 + T_LOD] = 1 << 24 | 1 << 19 | (odd as u32) << 18 | 12 << 6;
+            let bases = [TEX_BASE_ADDR, TEX_BASE_ADDR_1, TEX_BASE_ADDR_2, TEX_BASE_ADDR_3_8];
+            for (r, base) in bases.into_iter().zip(ranges) {
+                reg[0x100 + r] = base;
+            }
+            tmu.recompute(&reg);
+            tmu
+        };
+        // TMU 0: GR_TEXBASE_256 at 0x640000 and GR_TEXBASE_64 at
+        // 0x6A4000, past level 0 (256x256).
+        let even = unit(false, [0x64_0000, 0, 0x6A_4000 - 256 * 256 * 2, 0]);
+        assert_eq!(even.lodmask, 0x155);
+        assert_eq!([even.lodoffset[0], even.lodoffset[2]], [0x64_0000, 0x6A_4000]);
+        // TMU 1: GR_TEXBASE_128 at 0x678000 and GR_TEXBASE_32_TO_1 at
+        // 0x680800, past level 1 (128x128).
+        let odd = unit(true, [0, 0x67_8000, 0, 0x68_0800 - 128 * 128 * 2]);
+        assert_eq!(odd.lodmask, 0x0AA);
+        assert_eq!([odd.lodoffset[1], odd.lodoffset[3]], [0x67_8000, 0x68_0800]);
+    }
 }
