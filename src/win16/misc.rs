@@ -360,7 +360,12 @@ pub static MMSYSTEM: Def = Def {
         rust("midiInReset", 311, "w", wmidi::midi_in_bad_handle),
         rust("midiInGetID", 312, "wp", wmidi::midi_in_bad_handle),
         rust("midiInMessage", 313, "wwll", wmidi::midi_in_bad_handle),
-        rust("OutputDebugStr", 30, "p", output_debug_str),
+        rust(
+            "OutputDebugStr",
+            30,
+            "p",
+            super::kernel::output_debug_string,
+        ),
         rust("mmioInstallIOProc", 1221, "lll", mmio_install_io_proc),
         win32("mmioSendMessage", 1222, "wwll", MM, "mmioSendMessage", b'w'),
     ],
@@ -2229,15 +2234,17 @@ fn mmio_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     None
 }
 
-/// WINMM's mmioClose returned (`mmio_close`).
+/// WINMM's mmioClose returned (`mmio_close`). The buffer goes once the
+/// file is closed: a file of a program's procedure is, whatever its
+/// MMIOM_CLOSE returned.
 pub(super) fn post_mmio_close(
     cpu: &mut Cpu,
     result: u32,
     data: &[u32],
     _: &mut Context,
 ) -> Option<u32> {
-    if result == 0
-        && let Some(&hmmio) = data.first()
+    if let Some(&hmmio) = data.first()
+        && wmmio::mmio_get_info(cpu, &[hmmio, 0, 0]) == Some(MMSYSERR_INVALHANDLE)
     {
         mmio_keep_buffer(cpu, hmmio, None);
     }
@@ -2588,15 +2595,6 @@ fn wing_bit_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, G, "BitBlt", &all, Vec::new())
 }
 
-/// OutputDebugStr(text): the text in the log, as KERNEL's
-/// OutputDebugString writes it.
-fn output_debug_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let text = super::string(cpu, args[0]);
-    cpu.bus
-        .log_string(&format!("[W16] Debug: {}", text.trim_end()));
-    Some(0)
-}
-
 // 16-bit I/O procedures. WINMM's mmio keeps the procedures and calls
 // them: a 16-bit one is installed and named in MMIOINFOs as its 32-bit
 // slot (`thunk::proc32`), which calls it with a 16-bit MMIOINFO and the
@@ -2608,9 +2606,11 @@ const MMIOM_OPEN: u32 = 3;
 const MMIOM_RENAME: u32 = 6;
 /// The size of an MMIOINFO16.
 const INFO16_SIZE: u32 = 66;
-/// The most a 16-bit procedure is asked to read or write at once: it may
-/// take the count as a word, and the buffer's alias covers 64 KB. Fewer
-/// bytes than were asked for is an answer mmio takes.
+/// What a 16-bit procedure is asked to read or write at once for a count
+/// that doesn't fit a word, as mmio's own read of the whole file asks:
+/// the procedure may take the count as a word, and the buffer's alias
+/// covers 64 KB. A count that fits goes as it is, as Windows passes the
+/// program's. Fewer bytes than were asked for is an answer mmio takes.
 const IO16_MAX: u32 = 0x8000;
 /// The most bytes of a file name copied to the 16-bit stack.
 const NAME16_MAX: usize = 260;
@@ -2664,7 +2664,14 @@ pub(super) fn call_io_proc16(cpu: &mut Cpu, thunk: &super::Thunk) {
         }
         MMIOM_READ | MMIOM_WRITE => {
             alias = super::flat::map_ls(cpu, p1);
-            (alias, p2.min(IO16_MAX))
+            if alias == 0 && p1 != 0 {
+                // No selector for the buffer: the call fails, as a
+                // procedure's -1 says, rather than give it a null one.
+                resume.gpr[thunk::EAX] = u32::MAX;
+                crate::win32::system::load_context(cpu, &resume);
+                return;
+            }
+            (alias, if p2 > 0xFFFF { IO16_MAX } else { p2 })
         }
         _ => (p1, p2),
     };

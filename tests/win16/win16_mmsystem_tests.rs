@@ -1615,21 +1615,25 @@ const MMIO_OPEN: u16 = 1210;
 const MMIO_CLOSE: u16 = 1211;
 const MMIO_READ: u16 = 1212;
 const MMIO_INSTALL_IO_PROC: u16 = 1221;
+const GET_SELECTOR_LIMIT: u16 = 188;
 
 /// Where the I/O procedure test keeps things: the file's name, its
 /// handle, what was read, the first byte of the name the procedure got,
-/// and how many times it was closed.
+/// how many times it was closed, and the selector of the buffer its last
+/// MMIOM_READ got.
 const IO_NAME: u16 = 0x40;
 const IO_HANDLE: u16 = 0x50;
 const IO_BUFFER: u16 = 0x60;
 const IO_NAME0: u16 = 0x70;
 const IO_CLOSES: u16 = 0x72;
+const IO_SEL: u16 = 0x74;
 
 /// A 16-bit I/O procedure, IOProc(lpmmioinfo, wMsg, lParam1, lParam2),
 /// Pascal's: MMIOM_OPEN keeps the name's first byte at IO_NAME0 and
 /// starts at 0 (adwInfo[0] is the place), MMIOM_READ gives "HELLO" at
-/// the place 0 and nothing after, moving lDiskOffset, and MMIOM_CLOSE
-/// counts at IO_CLOSES. DS is the program's, the stack's.
+/// the place 0 and nothing after, moving lDiskOffset, keeping the
+/// buffer's selector at IO_SEL, and MMIOM_CLOSE counts at IO_CLOSES. DS
+/// is the program's, the stack's.
 fn io_proc() -> Vec<u8> {
     let mut c: Vec<u8> = Vec::new();
     let mut to_ret0 = Vec::new();
@@ -1651,6 +1655,8 @@ fn io_proc() -> Vec<u8> {
     to_ret0.push(c.len() - 1);
     c.extend([0x85, 0xC0, 0x75, 0x00]); // test ax,ax (MMIOM_READ); jnz ret0
     to_ret0.push(c.len() - 1);
+    c.extend([0x8B, 0x46, 0x0C]); // mov ax,[bp+0Ch]: the buffer's selector
+    c.extend([0xA3, lo(IO_SEL), hi(IO_SEL)]); // mov [IO_SEL],ax
     c.extend([0xC4, 0x5E, 0x10]); // les bx,[bp+10h]
     c.extend([0x26, 0x83, 0x7F, 0x2C, 0x00, 0x75, 0x00]); // cmp word es:[bx+2Ch],0; jne ret0
     to_ret0.push(c.len() - 1);
@@ -1674,7 +1680,8 @@ fn io_proc() -> Vec<u8> {
 /// A Windows 3.1 program installs its own I/O procedure for 'TST ' and
 /// opens "X.TST+A": mmio calls the 16-bit procedure with the name and a
 /// 16-bit MMIOINFO, reads through it, and closes through it, and
-/// MMIO_FINDPROC gives the 16-bit procedure back. MMSYSTEM had no
+/// MMIO_FINDPROC gives the 16-bit procedure back. The selector a read's
+/// buffer is passed with is free once the read returns. MMSYSTEM had no
 /// mmioInstallIOProc, and a program that imports it, as The Magic School
 /// Bus Explores the Solar System's MSPAM.DLL does to read its sounds from
 /// its compound file, ended at its first call.
@@ -1684,6 +1691,7 @@ fn a_programs_own_io_procedure_reads_its_files() {
     let mut code = Code::new();
     let mut proc_at = Vec::new();
     set(&mut code, IO_CLOSES, 0);
+    set(&mut code, IO_SEL, 0);
     // mmioInstallIOProc('TST ', proc, MMIO_INSTALLPROC).
     code.push((fcc >> 16) as u16).push(fcc as u16);
     code.emit(&[0x0E]);
@@ -1706,6 +1714,11 @@ fn a_programs_own_io_procedure_reads_its_files() {
     expect_nonzero(&mut code, 2);
     code.emit(&[0xA3, lo(IO_HANDLE), hi(IO_HANDLE)]); // mov [IO_HANDLE],ax
     expect(&mut code, IO_NAME0, u16::from(b'X'), true, 3);
+    // GetSelectorLimit(the read's selector): 0, as it is free.
+    expect(&mut code, IO_SEL, 0, false, 11);
+    push_word(&mut code, IO_SEL);
+    code.call("KERNEL", GET_SELECTOR_LIMIT);
+    expect_ax(&mut code, 0, 10);
     // mmioRead(hmmio, IO_BUFFER, 5).
     push_word(&mut code, IO_HANDLE);
     code.emit(&[0x1E]).push(IO_BUFFER).push(0).push(5);
