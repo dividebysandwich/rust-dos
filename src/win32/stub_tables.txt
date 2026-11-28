@@ -6339,6 +6339,9 @@ midiInStop
 midiInReset
 midiInGetID
 midiInMessage
+OutputDebugStr
+mmioInstallIOProc
+mmioSendMessage
 
 MODULE LZEXPAND
 LZCopy

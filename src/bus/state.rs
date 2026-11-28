@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 4;
-const WIN32_VERSION: u16 = 119;
+const WIN32_VERSION: u16 = 120;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -99,9 +99,11 @@ const WIN32_VERSION: u16 = 119;
 /// (`dinput::WIDE_SAVED`), 71's to 116's no True Color desktop depths
 /// (`DesktopDepth::TrueColor24` and `TrueColor32`, which they load
 /// without), 71's to 117's not the order the Win16 selectors were freed in
-/// (`win16::ldt::FREED_SAVED`), and 71's to 118's no OLE standard font or
-/// picture objects (`oleaut32::font::FONTS_SAVED`).
-const WIN32_LOADS: [u16; 49] = [
+/// (`win16::ldt::FREED_SAVED`), 71's to 118's not the in-process servers a
+/// Win16 task's COMPOBJ loaded (`win16::ole2::SERVERS_SAVED`), and 71's to
+/// 119's no OLE standard font or picture objects
+/// (`oleaut32::font::FONTS_SAVED`).
+const WIN32_LOADS: [u16; 50] = [
     71,
     72,
     73,
@@ -150,6 +152,7 @@ const WIN32_LOADS: [u16; 49] = [
     116,
     117,
     118,
+    119,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1317,7 +1320,8 @@ mod tests {
         (116, 0x331A_F2D2_3CFD_2C62), // DirectInput's Unicode interfaces
         (117, 0x6D75_7369_BF80_C137), // the desktop depths of 24 and 32 bits
         (118, 0x014E_6DAC_6954_2375), // the order the Win16 selectors were freed in
-        (119, 0xD0DD_D3A1_067B_7926), // OLEAUT32's standard font and picture objects
+        (119, 0xA26B_235A_D4AE_6628), // the in-process servers a Win16 task's COMPOBJ loaded
+        (120, 0xCDA4_31D7_E708_A90D), // OLEAUT32's standard font and picture objects
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

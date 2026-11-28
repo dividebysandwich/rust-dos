@@ -1016,7 +1016,9 @@ fn set_swap_area_size(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(args[0] & 0xFFFF | 0x1000 << 16)
 }
 
-fn output_debug_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// OutputDebugString(text): the text in the log. MMSYSTEM's
+/// OutputDebugStr is the same function.
+pub(super) fn output_debug_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = super::string(cpu, args[0]);
     cpu.bus
         .log_string(&format!("[W16] Debug: {}", text.trim_end()));
