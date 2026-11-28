@@ -427,9 +427,11 @@ fn decodes(fourcc: u32, compression: u32) -> bool {
 /// uncompressed DIB of its size of 16, 24 or 32 bits, or of 8 bits
 /// with a colour table that can be read (`output_colours`). codec.rs
 /// gives a picture of 24 bits, which is written in the output's format,
-/// in 8 bits as the nearest of the DIB's colours. iccvid.dll gives 8
-/// bits dithered to a palette of its own, or the one
-/// ICM_DECOMPRESS_SET_PALETTE gives (#2202, #2325).
+/// in 8 bits as the nearest of the DIB's colours, but for Indeo 4, which
+/// writes indexes of its own palette or the nearest of the one
+/// ICM_DECOMPRESS_SET_PALETTE gave (`decompress_picture`). iccvid.dll
+/// gives 8 bits dithered to a palette of its own, or the one
+/// ICM_DECOMPRESS_SET_PALETTE gives (#2202).
 fn codec_formats(
     cpu: &mut Cpu,
     fourcc: u32,
@@ -458,7 +460,8 @@ fn codec_formats(
 /// The colours of the 8-bit DIB whose BITMAPINFO is at `output`, red,
 /// green and blue: biClrUsed of them, or 256 for 0. A picture these
 /// codecs decode goes out in 8 bits as the nearest of them
-/// (`from_rgb24`). None for a DIB whose colours can't be read.
+/// (`from_rgb24`), but Indeo 4's (`decompress_picture`). None for a DIB
+/// whose colours can't be read.
 fn output_colours(cpu: &mut Cpu, output: u32) -> Option<Vec<[u8; 3]>> {
     let info = read_info(cpu, output)?;
     let count = match info.clr_used {
@@ -817,8 +820,11 @@ fn decompress_get_format(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) ->
 /// BITMAPINFOHEADER at `output` with biClrUsed 256 in it. Only Indeo 4
 /// has one here (`indeo4::palette`): the static colours, its own 234
 /// and two blacks, and these 236 have PC_NOCOLLAPSE in rgbReserved, as
-/// IR41.DLL writes them. Civilization II asks for it before its intro
-/// and gives it back with ICM_DECOMPRESS_SET_PALETTE. The other codecs
+/// IR41.DLL writes them (Windows 98 SE's ir41_32.ax 4.31 writes the
+/// same colours, the two blacks without the flag). Both write it
+/// whatever biBitCount the output has, as here. Civilization II asks
+/// for it before its intro and gives it back with
+/// ICM_DECOMPRESS_SET_PALETTE. The other codecs
 /// answer ICERR_UNSUPPORTED: Cinepak's driver has a palette too, which
 /// DrawDib draws in (`cinepak::palette_8`), but not here (#2202).
 fn decompress_get_palette(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) -> u32 {

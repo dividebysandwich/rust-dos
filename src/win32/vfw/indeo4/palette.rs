@@ -28,7 +28,7 @@
 //!   colour, and take one of a neighbour's (`GRID`).
 //!
 //! The matrices start at the picture's top left pixel. That gives all
-//! but 10 of the 2,073,600 pixels of the 55 frames. The 10 are at the
+//! but 10 of the 2,112,000 pixels of the 55 frames. The 10 are at the
 //! two lattice points without a colour that the frames reach: of the
 //! pixels at (-2, 2), 86 take (-2, 1) and 4 (-1, 2); of those at
 //! (2, 1), 294 take (1, 1) and 6 (2, 0). The codec decides those by
@@ -36,6 +36,12 @@
 //! here each takes the neighbour most of its pixels took. The other
 //! five points without a colour, which the frames don't reach, take a
 //! neighbour of theirs the same way.
+//!
+//! Windows 98 SE's 32-bit ir41_32.ax (4.31), run the same way, gives the
+//! same palette and the same indexes for the frames it decodes as
+//! IR41.DLL does (all of the key frame and frame 30 at 320 by 120). Its
+//! later frames differ from IR41.DLL's in the decoded picture, which
+//! isn't the dither's doing.
 
 use super::Picture;
 
