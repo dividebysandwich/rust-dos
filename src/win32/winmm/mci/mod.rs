@@ -244,6 +244,8 @@ pub struct Parms {
     pub window_text: String,
     pub rect: [i32; 4],
     pub hdc: u32,
+    /// MCI_SETVIDEO's and MCI_SETAUDIO's value, for their `item`.
+    pub value: u32,
     /// Whether a digitalvideo device opens without a window: the device
     /// of a DirectShow graph whose pictures go to the program's own
     /// renderer (dshow/filter.rs), which plays only the sound.
@@ -309,12 +311,43 @@ pub struct Device {
 /// (`waveaudio::Wav::file_format`).
 pub const PROCEDURE_SAVED: u16 = 99;
 
+/// A device of an installable 16-bit MCI driver, which a Windows 3.1
+/// program opened through MMSYSTEM (win16/mcidrv.rs): its id, taken
+/// from those of `Mci::devices`, its process and the name commands find
+/// it by, and the driver: the handle its DriverProc is given, its
+/// module, DriverProc's 16:16 address and data segment, the id DRV_OPEN
+/// returned, the data of mciSetDriverData and the device type the driver
+/// gave (MCI_OPEN_DRIVER_PARMS's wType). `params` is the rest of its
+/// [mci] line until DRV_OPEN gets it. `open` once MCI_OPEN_DRIVER
+/// succeeded: commands go to the driver only then.
+#[derive(Clone, Debug, Default)]
+pub struct Driver16 {
+    pub id: u32,
+    pub pid: u32,
+    pub name: String,
+    pub handle: u32,
+    pub module: u32,
+    pub proc: u32,
+    pub ds: u32,
+    pub driver_id: u32,
+    pub data: u32,
+    pub kind: u32,
+    pub params: String,
+    pub open: bool,
+}
+
+/// The W32 version whose states keep the 16-bit MCI drivers' devices
+/// (`Mci::drivers16`).
+pub const DRIVERS16_SAVED: u16 = 121;
+
 /// MCI's state.
 #[derive(Clone, Debug, Default)]
 pub struct Mci {
     pub devices: Vec<Device>,
     /// The calls into USER32 the threads' commands make (video.rs).
     pub calls: Vec<video::Calls>,
+    /// The devices of 16-bit installable drivers.
+    pub drivers16: Since<DRIVERS16_SAVED, Vec<Driver16>>,
 }
 
 fn mci(cpu: &mut Cpu) -> &mut Mci {
@@ -331,6 +364,35 @@ fn find(cpu: &Cpu, id: u32) -> Option<usize> {
         .devices
         .iter()
         .position(|d| d.id == id && d.pid == pid && d.graph == 0)
+}
+
+/// The devices of 16-bit drivers.
+pub fn drivers16(cpu: &mut Cpu) -> &mut Vec<Driver16> {
+    &mut cpu.bus.win32.winmm.mci.drivers16
+}
+
+/// The lowest device id that no device has, of any process: Windows
+/// numbers the devices of all programs together.
+pub fn free_id(cpu: &Cpu) -> u32 {
+    let mci = &cpu.bus.win32.winmm.mci;
+    let mut id = 1;
+    while mci.devices.iter().any(|d| d.id == id) || mci.drivers16.iter().any(|d| d.id == id) {
+        id += 1;
+    }
+    id
+}
+
+/// The device of a 16-bit driver of the running process that `name`
+/// names.
+pub fn find_driver16_name(cpu: &Cpu, name: &str) -> Option<usize> {
+    let pid = crate::win32::user32::current_pid(cpu);
+    cpu.bus
+        .win32
+        .winmm
+        .mci
+        .drivers16
+        .iter()
+        .position(|d| d.pid == pid && d.name.eq_ignore_ascii_case(name))
 }
 
 /// The device of the running process that `name` names.
@@ -669,7 +731,7 @@ fn open_kind(
     } else {
         type_name(kind).to_string()
     };
-    if find_name(cpu, &name).is_some() {
+    if find_name(cpu, &name).is_some() || find_driver16_name(cpu, &name).is_some() {
         return if flags & MCI_OPEN_ALIAS != 0 {
             MCIERR_DUPLICATE_ALIAS
         } else {
@@ -690,10 +752,7 @@ fn open_kind(
         },
     };
     let pid = crate::win32::user32::current_pid(cpu);
-    let mut id = 1;
-    while cpu.bus.win32.winmm.mci.devices.iter().any(|d| d.id == id) {
-        id += 1;
-    }
+    let id = free_id(cpu);
     let time_format = match kind {
         MCI_DEVTYPE_CD_AUDIO => MCI_FORMAT_MSF,
         _ => MCI_FORMAT_MILLISECONDS,
@@ -800,16 +859,20 @@ pub fn sysinfo(cpu: &mut Cpu, kind: Option<u32>, flags: u32, p: &mut Parms) -> u
     // By its device type: AVIVideo and MPEGVideo are both digitalvideo.
     let kind = kind.map(device_type);
     let pid = crate::win32::user32::current_pid(cpu);
-    let open: Vec<String> = cpu
-        .bus
-        .win32
-        .winmm
-        .mci
+    let mci = &cpu.bus.win32.winmm.mci;
+    let drivers16 = mci
+        .drivers16
+        .iter()
+        .filter(|d| d.pid == pid && d.open)
+        .map(|d| (d.kind, &d.name));
+    let open: Vec<String> = mci
         .devices
         .iter()
         .filter(|d| d.pid == pid && d.graph == 0)
-        .filter(|d| kind.is_none_or(|k| device_type(d.kind) == k))
-        .map(|d| d.name.clone())
+        .map(|d| (device_type(d.kind), &d.name))
+        .chain(drivers16)
+        .filter(|&(t, _)| kind.is_none_or(|k| t == k))
+        .map(|(_, name)| name.clone())
         .collect();
     let types: Vec<String> = installed()
         .into_iter()
@@ -869,7 +932,7 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let size: u32 = match msg {
         MCI_OPEN | MCI_SYSINFO => 20,
         video::MCI_UPDATE => 24,
-        MCI_STATUS | video::MCI_WINDOW => 16,
+        MCI_STATUS | video::MCI_WINDOW | video::MCI_SETVIDEO | video::MCI_SETAUDIO => 16,
         MCI_PLAY | MCI_GETDEVCAPS | MCI_INFO => 12,
         MCI_SET | video::MCI_PUT | video::MCI_WHERE => 20,
         MCI_SEEK | MCI_STEP => 8,
@@ -952,6 +1015,12 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             p.track = r(cpu, 12);
         }
         MCI_GETDEVCAPS => p.item = r(cpu, 8),
+        // MCI_DGV_SETVIDEO_PARMS's and MCI_DGV_SETAUDIO_PARMS's item and
+        // value.
+        video::MCI_SETVIDEO | video::MCI_SETAUDIO => {
+            p.item = r(cpu, 4);
+            p.value = r(cpu, 8);
+        }
         MCI_SYSINFO => {
             p.number = r(cpu, 12);
             p.dev_type = r(cpu, 16);
@@ -1067,6 +1136,9 @@ pub fn mci_get_device_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if name.eq_ignore_ascii_case("all") {
         return Some(0xFFFF);
     }
+    if let Some(i) = find_driver16_name(cpu, &name) {
+        return Some(cpu.bus.win32.winmm.mci.drivers16[i].id);
+    }
     Some(find_name(cpu, &name).map_or(0, |i| device(cpu, i).id))
 }
 
@@ -1160,8 +1232,10 @@ pub fn next_due(cpu: &Cpu, pid: Option<u32>) -> Option<u64> {
         .min()
 }
 
-/// A process ended: its devices close.
+/// A process ended: its devices close. Its 16-bit drivers went with its
+/// memory.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
+    mci(cpu).drivers16.retain(|d| d.pid != pid);
     while let Some(i) = mci(cpu).devices.iter().position(|d| d.pid == pid) {
         device(cpu, i).pending = None;
         close_device(cpu, i);
@@ -1188,4 +1262,22 @@ crate::state_fields!(Device {
     graph,
     procedure_data
 });
-crate::state_fields!(Mci { devices, calls });
+crate::state_fields!(Driver16 {
+    id,
+    pid,
+    name,
+    handle,
+    module,
+    proc,
+    ds,
+    driver_id,
+    data,
+    kind,
+    params,
+    open
+});
+crate::state_fields!(Mci {
+    devices,
+    calls,
+    drivers16
+});

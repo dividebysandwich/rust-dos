@@ -29,6 +29,7 @@ mod kernel;
 pub(crate) mod ldt;
 mod local;
 mod lz;
+mod mcidrv;
 mod message;
 mod misc;
 mod notify;
@@ -37,12 +38,14 @@ mod ole2;
 mod ole2disp;
 pub(crate) mod resource;
 mod setupx;
+mod storage;
 pub mod task;
 pub(crate) mod thunk;
 mod typelib;
 mod typelib_invoke;
 pub(crate) mod universal;
 mod user;
+mod vfw;
 
 pub use builtin::{function_name, trap_name};
 

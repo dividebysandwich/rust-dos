@@ -276,6 +276,21 @@ impl Codec {
         }
     }
 
+    /// The last picture of an Indeo 4 decoder as ir41.dll gives it in 8
+    /// bits in its own palette (`indeo4::palette`), `zoom` times its
+    /// size: rows of indexes from the top. None for another codec or a
+    /// picture of another size.
+    pub fn indeo_4_indexes(&self, width: u32, height: u32, zoom: u32) -> Option<Vec<u8>> {
+        match self.0.as_ref()? {
+            Decoder::Indeo4(d) => {
+                let p = d.picture()?;
+                ((p.width, p.height) == (width as usize, height as usize))
+                    .then(|| super::indeo4::palette::indexes(p, zoom as usize))
+            }
+            _ => None,
+        }
+    }
+
     /// The last picture as a bottom-up 24-bit DIB, if it is `width` by
     /// `height`.
     pub fn picture(&self, width: u32, height: u32) -> Option<Vec<u8>> {

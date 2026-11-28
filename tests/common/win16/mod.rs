@@ -200,6 +200,55 @@ fn build(
     b.build()
 }
 
+/// A library (a DLL) named `name` whose code is `code`, with the flags
+/// `CODE`, its LibMain at the code's first byte, and a data segment of
+/// 100h bytes, its own. The functions at the offsets of `exports` are
+/// ordinals 1, 2 and on, exported by their names, which the code finds
+/// its data segment's selector by itself, through a relocation.
+pub fn library(name: &str, code: &Code, exports: &[(&str, u16)]) -> Vec<u8> {
+    let mut b = ne::Builder::new(name, ne::LIBMODULE | ne::SINGLEDATA);
+    for (i, m) in code.modules.iter().enumerate() {
+        let number = b.import_module(m);
+        assert_eq!(number as usize, i + 1, "the module reference of {m}");
+    }
+    let relocations = code
+        .calls
+        .iter()
+        .map(|&(module, ordinal, offset)| ne::Relocation {
+            source: ne::ADDR_FARPTR,
+            additive: false,
+            offset,
+            target: ne::Target::Ordinal { module, ordinal },
+        })
+        .chain(code.fixups.iter().cloned())
+        .collect();
+    let text = b.segment(ne::SegmentSpec {
+        data: code.bytes.clone(),
+        flags: CODE,
+        alloc: 0,
+        relocations,
+    });
+    let data = b.segment(ne::SegmentSpec {
+        data: Vec::new(),
+        flags: ne::SEG_DATA | 0x0C00,
+        alloc: 0x100,
+        relocations: Vec::new(),
+    });
+    for (i, &(export, offset)) in exports.iter().enumerate() {
+        let entry = ne::Entry::Code {
+            segment: text as u8,
+            offset,
+            flags: ne::ENTRY_EXPORTED,
+            moveable: true,
+        };
+        b.entry(i as u16 + 1, entry);
+        b.export(export, i as u16 + 1, true);
+    }
+    b.auto_data(data, 0, 0);
+    b.entry_point(text, 0);
+    b.build()
+}
+
 fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
     let base = PathBuf::from("target/test_win16").join(name);
     let _ = fs::remove_dir_all(&base);

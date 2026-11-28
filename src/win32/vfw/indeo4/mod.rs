@@ -15,6 +15,7 @@
 //! stays the one before, as with the other codecs (`codec.rs`).
 
 mod dsp;
+pub mod palette;
 mod tables;
 
 use dsp::Transform;

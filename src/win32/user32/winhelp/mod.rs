@@ -12,9 +12,13 @@
 //!
 //! What the viewer keeps is in `Help`, out of save states: a viewer
 //! open when a state is saved is an empty window after it is loaded.
+//!
+//! C:\WINDOWS\WINHELP.EXE and WINHLP32.EXE open a help file in the same
+//! viewer, for a command line or a shortcut that names one (`program`).
 
 pub mod hlpfile;
 pub mod layout;
+pub mod program;
 
 use std::collections::HashMap;
 
@@ -82,6 +86,7 @@ const VK_BACK: u32 = 0x08;
 /// WinHelpA's commands.
 const HELP_CONTEXT: u32 = 0x0001;
 const HELP_QUIT: u32 = 0x0002;
+const HELP_CONTENTS: u32 = 0x0003;
 const HELP_SETCONTENTS: u32 = 0x0005;
 const HELP_CONTEXTPOPUP: u32 = 0x0008;
 const HELP_COMMAND: u32 = 0x0102;
@@ -1077,7 +1082,13 @@ pub fn frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 None => task::start(cpu, task::WINHELP, vec![K_FOCUS, topic], 0),
             }
         }
-        WM_DESTROY if ours => {
+        WM_DESTROY => {
+            // WINHELP.EXE's viewer ends the program, also as an empty
+            // window after a state is loaded, which isn't `ours`.
+            program::closed(cpu);
+            if !ours {
+                return defwnd::def_window_proc(cpu, args);
+            }
             if let Some(v) = user(cpu).help.viewer.take() {
                 free(cpu, v);
             }

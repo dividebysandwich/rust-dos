@@ -3,10 +3,11 @@
 //! Manager group made through DDEML as InstallShield makes one and
 //! through raw DDE messages, a file copied by SHFileOperationA,
 //! FindExecutableA following the registry's associations, Notepad
-//! showing the file WinExec gives it, and ShellExecuteA starting a DOS
-//! program and a PIF in a working folder. Each runs on the interpreter
-//! and on the dynamic recompiler. The programs are PE files made with
-//! rust-dos-pe's builder, their code assembled with iced.
+//! showing the file WinExec gives it, WinHelp opening a help file, and
+//! ShellExecuteA starting a DOS program and a PIF in a working folder.
+//! Each runs on the interpreter and on the dynamic recompiler. The
+//! programs are PE files made with rust-dos-pe's builder, their code
+//! assembled with iced.
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{CoreMode, Cpu, HostConsole};
@@ -269,9 +270,12 @@ fn program_manager_makes_a_group_through_ddeml() {
     const APPCMD_CLIENTONLY: i32 = 0x10;
     const CP_WINANSI: i32 = 1004;
     const XTYP_EXECUTE: i32 = 0x4050;
-    // The second item's program has a space in its path and no quotes.
-    let command =
-        b"[CreateGroup(Games)][AddItem(C:\\T.EXE,Test)][AddItem(C:\\SUB DIR\\G.EXE -x,Game)]\0";
+    // The second item's program has a space in its path and no quotes;
+    // the third's command line is in quotes as a whole, as The Magic
+    // School Bus Explores the Solar System's setup adds its help.
+    let command = b"[CreateGroup(Games)][AddItem(C:\\T.EXE,Test)]\
+        [AddItem(C:\\SUB DIR\\G.EXE -x,Game)]\
+        [AddItem(\"WINHELP.EXE C:\\T.HLP\",Help)]\0";
     let mut data = vec![0u8; 0x100];
     // 0x00: the instance, 0x04: the result.
     put(&mut data, 0x10, b"PROGMAN\0");
@@ -352,6 +356,13 @@ fn program_manager_makes_a_group_through_ddeml() {
         let text = String::from_utf8_lossy(&link);
         assert!(text.contains("C:\\SUB DIR\\G.EXE"), "{core:?}: {text:?}");
         assert!(!text.contains("DIR\\G.EXE -x"), "{core:?}: {text:?}");
+        // WinHelp in the Windows directory, the help file its argument.
+        let item = "WINDOWS\\Start Menu\\Programs\\Games\\Help.lnk";
+        let link = fs::read(host_file("progman", item).expect(item)).unwrap();
+        let text = String::from_utf8_lossy(&link);
+        assert!(text.contains("C:\\WINDOWS\\WINHELP.EXE\0"), "{core:?}: {text:?}");
+        assert!(text.contains("\x08\0C:\\T.HLP"), "{core:?}: {text:?}");
+        assert!(!text.contains("EXE C:"), "{core:?}: {text:?}");
     }
 }
 
@@ -976,6 +987,121 @@ fn notepad_shows_a_readme_that_winexec_opens() {
         run_to_exit(&mut cpu);
         assert_eq!(printed(&cpu), "Hello\r\nthere", "{core:?}");
         assert_eq!(cpu.errorlevel, 0x3F, "{core:?}");
+    }
+}
+
+/// A Windows 3.1 help file with one topic, titled `title`: the header,
+/// the directory, |SYSTEM and |TOPIC, uncompressed.
+fn help_file(title: &str) -> Vec<u8> {
+    let le16 = |v: &mut Vec<u8>, x: u16| v.extend_from_slice(&x.to_le_bytes());
+    let le32 = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+    // An internal file: the space it has, the space it uses, a flag.
+    let internal = |content: &[u8]| {
+        let mut v = Vec::new();
+        le32(&mut v, content.len() as u32);
+        le32(&mut v, content.len() as u32);
+        v.push(0);
+        v.extend_from_slice(content);
+        v
+    };
+    // |SYSTEM: Windows 3.1's (minor 21), flags 0 for no compression.
+    let mut system = Vec::new();
+    for x in [0x036C, 21, 1, 0, 0, 0] {
+        le16(&mut system, x);
+    }
+    // |TOPIC: a block header, then the topic's header record (type 2):
+    // its sizes, no next record, its text after 0x21, no browse links.
+    let text = [title.as_bytes(), b"\0"].concat();
+    let mut record = Vec::new();
+    le32(&mut record, 0x21 + text.len() as u32);
+    le32(&mut record, text.len() as u32);
+    le32(&mut record, 0);
+    le32(&mut record, 0xFFFF_FFFF);
+    le32(&mut record, 0x21);
+    record.push(2);
+    le32(&mut record, 0);
+    le32(&mut record, 0xFFFF_FFFF);
+    le32(&mut record, 0xFFFF_FFFF);
+    record.extend_from_slice(&text);
+    let mut topic = vec![0u8; 12];
+    topic.extend_from_slice(&record);
+    topic.resize(0x1000, 0);
+    let files = [("|SYSTEM", internal(&system)), ("|TOPIC", internal(&topic))];
+    // The file: a 16-byte header, the internal files, the directory.
+    let mut out = vec![0u8; 16];
+    let mut entries = Vec::new();
+    for (name, file) in &files {
+        entries.extend_from_slice(name.as_bytes());
+        entries.push(0);
+        le32(&mut entries, out.len() as u32);
+        out.extend_from_slice(file);
+    }
+    // The directory, a B+ tree of one level: its header, then page 0
+    // with the entries and no next page.
+    let page_size = 0x400u16;
+    let mut tree = vec![0u8; 38];
+    tree[0..2].copy_from_slice(&0x293Bu16.to_le_bytes());
+    tree[4..6].copy_from_slice(&page_size.to_le_bytes());
+    tree[32..34].copy_from_slice(&1u16.to_le_bytes());
+    let mut page = vec![0u8; 8];
+    page[2..4].copy_from_slice(&(files.len() as u16).to_le_bytes());
+    page[6..8].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    page.extend_from_slice(&entries);
+    page.resize(page_size as usize, 0);
+    tree.extend_from_slice(&page);
+    let directory = out.len() as u32;
+    out.extend_from_slice(&internal(&tree));
+    out[0..4].copy_from_slice(&0x0003_5F3Fu32.to_le_bytes());
+    out[4..8].copy_from_slice(&directory.to_le_bytes());
+    out
+}
+
+/// C:\WINDOWS\WINHELP.EXE, as a shortcut or the DOS prompt runs it with
+/// a help file: the file opens in the help viewer, and closing the
+/// viewer ends the program. With a file that isn't a help file it ends
+/// at once, no viewer opened. WINHLP32.EXE is there too.
+#[test]
+fn winhelp_opens_the_help_file_its_command_line_names() {
+    const WM_CLOSE: i32 = 0x10;
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0x00, b"C:\\WINDOWS\\WINHLP32.EXE\0");
+    put(&mut data, 0x20, b"winhelp C:\\T.EXE\0");
+    put(&mut data, 0x40, b"winhelp C:\\T.HLP\0");
+    put(&mut data, 0x60, b"MS_WINHELP\0");
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.dll",
+            &["ExitProcess", "GetFileAttributesA", "WinExec"],
+        ),
+        ("USER32.dll", &["FindWindowA", "PostMessageA"]),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[l.at(0)])?;
+        check_eax(a, 0x20, 0)?;
+        // Not a help file: WINHELP ends, with no window.
+        call(a, l.import(2), &[l.at(0x20), 1])?;
+        check_eax(a, 33, 1)?;
+        call(a, l.import(3), &[l.at(0x60), 0])?;
+        check_eax(a, 0, 2)?;
+        // The help file: the viewer's window, until it is closed.
+        call(a, l.import(2), &[l.at(0x40), 1])?;
+        check_eax(a, 33, 3)?;
+        call(a, l.import(3), &[l.at(0x60), 0])?;
+        a.mov(esi, eax)?;
+        check_nonzero(a, 4)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(WM_CLOSE)?;
+        a.push(esi)?;
+        a.call(l.import(4))?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let files = [("T.EXE", code.clone()), ("T.HLP", help_file("Test"))];
+        let mut cpu = machine("winhelp", core, &files);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0x1F, "{core:?}: {}", printed(&cpu));
     }
 }
 

@@ -1467,7 +1467,10 @@ program's own bursts and copies, which may be the same frames drawn in video
 memory before they were shown. Start the emulator with
 `RUST_DOS_AUTO_TRACE=1` to have every measurement and the speed it chose
 printed to stderr, with `longest_frame`, the longest host frame during the
-measurement (`none` in a frontend that doesn't time its frames).
+measurement (`none` in a frontend that doesn't time its frames), and each
+frame of a step up's watch (`[auto] watch from`): how far behind the wall
+clock it left the host, the late frames in a row, whether the pacer
+dropped a backlog, and the frames on time in a row.
 
 ### Where the emulator's time goes (profiling)
 

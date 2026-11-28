@@ -1626,6 +1626,70 @@ fn a_peek_message_loop_is_not_proven_again_where_its_timer_comes() {
     assert_eq!(stats.failures, 0, "{stats:?}");
 }
 
+/// Shadow of the Horned Rat's wait on its screens (#1284), as the game
+/// makes it in USER32: SwapMouseButton(FALSE) twice, GetCursorPos,
+/// GetWindowRect of the desktop, PtInRect of the cursor in that
+/// rectangle and GetAsyncKeyState(VK_RETURN) in every pass, for 200 ms
+/// by GetTickCount. None changes anything but the POINT and the RECT
+/// written, so the passes are skipped, and come out the same as when
+/// they all run. The program ends with 0x2A only if the cursor was in
+/// the rectangle.
+#[test]
+fn a_win32_loop_that_asks_where_the_cursor_is_on_a_window_is_skipped() {
+    let names: &[&str] = &[
+        "GetDesktopWindow",
+        "SwapMouseButton",
+        "GetCursorPos",
+        "GetWindowRect",
+        "PtInRect",
+        "GetAsyncKeyState",
+    ];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names), ("KERNEL32.DLL", &["GetTickCount"])];
+    // The POINT at 0, the RECT at 16, PtInRect's answer at 32.
+    let image = program(BASE, false, imports, &[0; 48], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let tick = l.import(names.len());
+        let mut spin = a.create_label();
+        let mut outside = a.create_label();
+        a.call(f("GetDesktopWindow"))?;
+        a.mov(esi, eax)?;
+        a.call(tick)?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        for _ in 0..2 {
+            a.push(0)?;
+            a.call(f("SwapMouseButton"))?;
+        }
+        a.push(l.data)?;
+        a.call(f("GetCursorPos"))?;
+        a.push(l.data + 16)?;
+        a.push(esi)?;
+        a.call(f("GetWindowRect"))?;
+        // The POINT by value: y, then x, then the RECT.
+        a.push(dword_ptr(l.at(4)))?;
+        a.push(dword_ptr(l.at(0)))?;
+        a.push(l.data + 16)?;
+        a.call(f("PtInRect"))?;
+        a.mov(dword_ptr(l.at(32)), eax)?;
+        // VK_RETURN.
+        a.push(0x0D)?;
+        a.call(f("GetAsyncKeyState"))?;
+        a.call(tick)?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.cmp(dword_ptr(l.at(32)), 1)?;
+        a.jne(outside)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut outside)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("cursor_on_window", image);
+    assert!(stats.skipped > 100 * ms, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips idle loops and one that doesn't,
 /// in lockstep, up to its exit with 0x2A: the skips found and the
 /// instructions in a millisecond.
@@ -21287,10 +21351,10 @@ fn cinepak_frame(flags: u8, chunks: &[Vec<u8>]) -> Vec<u8> {
 /// and codebooks from frame to frame, so a frame that skips a block
 /// gives the block it had. A null frame (ICDECOMPRESS_NULLFRAME) keeps
 /// the picture whatever its lpInput holds: here the key frame, which
-/// would undo the second. ICM_DECOMPRESS_GET_FORMAT gives 24 bits. For
-/// an 8-bit output ICLocate finds none, though on Windows iccvid.dll
-/// decodes to a palette of its own (#2202). The program ends with a bit
-/// set for each check that held.
+/// would undo the second. ICM_DECOMPRESS_GET_FORMAT gives 24 bits.
+/// ICLocate finds iccvid.dll for an 8-bit output too
+/// (`icdecompress_maps_frames_to_an_8_bit_dibs_colours`). The program
+/// ends with a bit set for each check that held.
 #[test]
 fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     let kernel32: &[&str] = &["ExitProcess"];
@@ -21336,7 +21400,7 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
         push_args(a, &[vidc, 0, at(0), at(OUT8), 2])?;
         a.call(f("ICLocate"))?;
         a.test(eax, eax)?;
-        bit_if_equal(a, 0)?;
+        a.setnz(bl)?;
         push_args(a, &[vidc, 0, at(0), at(OUT), 2])?;
         a.call(f("ICLocate"))?;
         a.mov(esi, eax)?;
@@ -21381,6 +21445,180 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     });
     let code = run_family("icdecompress_cvid", &[("T.EXE", program)]);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+/// ICDecompress decodes Cinepak to an 8-bit DIB in the colours of its
+/// table: each pixel is the index of the nearest colour. The table here
+/// has black, grey 90 and grey 200, so the key frame's grey 200 is index
+/// 2 and the next frame's grey 90 index 1. Windows's Cinepak codec
+/// dithers to a palette of its own (#2202); Indeo 4's gives indexes of
+/// its own palette, which `icm_decompress_get_palette_gives_indeo_4s`
+/// checks. The program ends with a bit set for each check that held.
+#[test]
+fn icdecompress_maps_frames_to_an_8_bit_dibs_colours() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICDecompress", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT8: usize = 0x100;
+    const FRAMES: usize = 0x200;
+    const BITS: usize = 0x300;
+    let mut data = bitmap_info(8, 4, 24, b"cvid");
+    data.resize(OUT8, 0);
+    let mut out8 = bitmap_info(8, 4, 8, &[0; 4]);
+    out8[32..36].copy_from_slice(&3u32.to_le_bytes()); // biClrUsed
+    data.extend(out8);
+    data.extend_from_slice(&[0, 0, 0, 0, 90, 90, 90, 0, 200, 200, 200, 0]);
+    data.resize(FRAMES, 0);
+    let books = cinepak_part(0x26, &[], &[200; 4]);
+    data.extend(cinepak_frame(0, &[books, cinepak_part(0x32, &[], &[0, 0])]));
+    data.resize(FRAMES + 0x40, 0);
+    let update = cinepak_part(0x27, &[], &[0x80, 0, 0, 0, 90, 90, 90, 90]);
+    let blocks = cinepak_part(0x31, &[], &[0x40, 0, 0, 0, 0]);
+    data.extend(cinepak_frame(1, &[update, blocks]));
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 32]);
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[i32::from_le_bytes(*b"vidc"), 0, at(0), at(OUT8), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setnz(bl)?;
+        let decompress = |a: &mut CodeAssembler, frame: usize| {
+            push_args(a, &[0, 0, at(0), at(frame), at(OUT8), at(BITS)])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICDecompress"))?;
+            a.add(esp, 24)?;
+            a.cmp(eax, 0)
+        };
+        // Rows of 8 one-byte pixels: the left block's four, then the
+        // right block's.
+        let pixels = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 8 * y + x));
+        decompress(a, FRAMES)?;
+        bit_if_equal(a, 1)?;
+        a.cmp(pixels(0, 0), 0x0202_0202)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(pixels(3, 4), 0x0202_0202)?;
+        bit_if_equal(a, 3)?;
+        decompress(a, FRAMES + 0x40)?;
+        bit_if_equal(a, 4)?;
+        a.cmp(pixels(0, 0), 0x0202_0202)?;
+        bit_if_equal(a, 5)?;
+        a.cmp(pixels(0, 4), 0x0101_0101)?;
+        bit_if_equal(a, 6)?;
+        // Nothing written past the 32 bytes of the picture.
+        a.cmp(byte_ptr(l.at(BITS as u32 + 32)), 0)?;
+        bit_if_equal(a, 7)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompress_8_bits", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+/// ICM_DECOMPRESS_GET_PALETTE, which Civilization II sends Indeo 4
+/// before it plays its intro into an 8-bit WinG DIB, gives the codec's
+/// palette after the output's BITMAPINFOHEADER and sets biClrUsed to
+/// 256, as Video for Windows 1.1e's IR41.DLL does on Windows 95: the
+/// static colours at 0 to 9 and 246 to 255, the codec's 234 colours at
+/// 10, the darkest a grey of 25, and two blacks at 244 and 245, all 236
+/// with PC_NOCOLLAPSE (4) in rgbReserved. ICM_DECOMPRESS_SET_PALETTE
+/// takes that palette back, and 0 for the codec's own. Cinepak answers
+/// ICERR_UNSUPPORTED to GET_PALETTE (#2202). The program ends with the
+/// number of the first check that failed, or 0.
+#[test]
+fn icm_decompress_get_palette_gives_indeo_4s() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICOpen", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const CINEPAK: usize = 0x600;
+    let mut data = bitmap_info(320, 120, 24, b"IV41");
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(320, 120, 8, &[0; 4]));
+    data.extend_from_slice(&[0xCC; 1024]);
+    data.resize(CINEPAK, 0);
+    data.extend(bitmap_info(8, 4, 24, b"cvid"));
+    const ICM_DECOMPRESS_SET_PALETTE: i32 = 0x401D;
+    const ICM_DECOMPRESS_GET_PALETTE: i32 = 0x401E;
+    const ICERR_UNSUPPORTED: i32 = -1;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        let vidc = i32::from_le_bytes(*b"vidc");
+        let send = |a: &mut CodeAssembler, msg: i32, dw1: i32, dw2: i32| {
+            push_args(a, &[0, msg, dw1, dw2])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICSendMessage"))
+        };
+        // The number of the first check that failed, in ebx.
+        let check = |a: &mut CodeAssembler, n: i32| {
+            let mut held = a.create_label();
+            a.je(held)?;
+            a.test(ebx, ebx)?;
+            a.jnz(held)?;
+            a.mov(ebx, n)?;
+            a.set_label(&mut held)?;
+            a.nop()
+        };
+        let quad = |n: usize| dword_ptr(l.at((OUT + 40 + 4 * n) as u32));
+        a.xor(ebx, ebx)?;
+        push_args(a, &[vidc, i32::from_le_bytes(*b"iv41"), 2])?;
+        a.call(f("ICOpen"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setz(al)?;
+        a.cmp(al, 0)?;
+        check(a, 1)?;
+        send(a, ICM_DECOMPRESS_GET_PALETTE, at(0), at(OUT))?;
+        a.cmp(eax, 0)?;
+        check(a, 2)?;
+        a.cmp(dword_ptr(l.at((OUT + 32) as u32)), 256)?;
+        check(a, 3)?;
+        a.cmp(quad(0), 0)?;
+        check(a, 4)?;
+        a.cmp(quad(10), 0x0419_1919)?;
+        check(a, 5)?;
+        // The last of the codec's colours, (183, 236, 255).
+        a.cmp(quad(243), 0x04B7_ECFF)?;
+        check(a, 6)?;
+        a.cmp(quad(245), 0x0400_0000)?;
+        check(a, 7)?;
+        a.cmp(quad(255), 0x00FF_FFFF)?;
+        check(a, 8)?;
+        send(a, ICM_DECOMPRESS_SET_PALETTE, at(OUT), 0)?;
+        a.cmp(eax, 0)?;
+        check(a, 9)?;
+        send(a, ICM_DECOMPRESS_SET_PALETTE, 0, 0)?;
+        a.cmp(eax, 0)?;
+        check(a, 10)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        push_args(a, &[vidc, i32::from_le_bytes(*b"cvid"), 2])?;
+        a.call(f("ICOpen"))?;
+        a.mov(esi, eax)?;
+        send(a, ICM_DECOMPRESS_GET_PALETTE, at(CINEPAK), at(OUT))?;
+        a.cmp(eax, ICERR_UNSUPPORTED)?;
+        check(a, 11)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icm_get_palette", &[("T.EXE", program)]);
+    assert_eq!(code, 0, "the first check that failed");
 }
 
 /// ICSendMessage's ICDecompressEx messages, as Leadfoot plays its Indeo
@@ -21636,7 +21874,7 @@ fn an_oledlg_function_not_written_ends_the_program_naming_it() {
 /// A function of OLEPRO32.DLL that isn't written yet and returns an
 /// HRESULT fails with E_NOTIMPL when guest code (a DLL of the
 /// `win32_dlls` folder) calls it, popping its arguments: 0 would be
-/// S_OK, and the caller would use the font it didn't get.
+/// S_OK, and the caller would use the class object it didn't get.
 #[test]
 fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     let call_font = |a: &mut CodeAssembler, l: &Layout| {
@@ -21653,7 +21891,7 @@ fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     let dll = module_image(
         DLL_BASE,
         Some("OLEUSER.DLL"),
-        &[("OLEPRO32.DLL", &["#253"])],
+        &[("OLEPRO32.DLL", &["#256"])],
         &[0; 0x10],
         &[("", &main), ("CallFont", &call_font)],
         &[],
@@ -21808,6 +22046,86 @@ fn deleteobject_deletes_a_memory_dc_and_keeps_a_window_dc() {
     let mut cpu = machine_with("deleteobject_dc", &[("T.EXE", exe)]);
     assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
     assert_eq!(cpu.errorlevel, 0x1F);
+}
+
+/// The stock 1x1 bitmap a memory DC starts with goes back into two DCs
+/// at once, as it does when a program puts each DC's old bitmap back to
+/// free its own: Windows keeps a program's bitmap to one DC, but not
+/// that one. Civilization II's Civilopedia stops with "Internal Error"
+/// when the second SelectObject fails. A program selects a bitmap of
+/// its own into each of two memory DCs, tries the first DC's into the
+/// second, and then selects the bitmap each replaced back. Its exit
+/// code: one bit each for the two old bitmaps being one, the first
+/// SelectObject of it back, the second, DeleteObject of each of its own
+/// bitmaps, and the first DC's bitmap refused by the second DC.
+#[test]
+fn the_default_bitmap_goes_back_into_two_dcs() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "CreateCompatibleBitmap",
+        "SelectObject",
+        "DeleteObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let bit = |a: &mut CodeAssembler, n: u32| -> Result<(), IcedError> {
+            a.neg(eax)?;
+            a.sbb(eax, eax)?;
+            a.and(eax, 1 << n)?;
+            a.or(ebx, eax)
+        };
+        a.xor(ebx, ebx)?;
+        // esi, edi: the DCs; [esp+0], [esp+4]: their bitmaps; [esp+8],
+        // [esp+12]: the bitmaps those replaced.
+        a.sub(esp, 16)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(edi, eax)?;
+        for (dc, at) in [(esi, 0), (edi, 4)] {
+            a.push(8)?;
+            a.push(8)?;
+            a.push(dc)?;
+            a.call(f("CreateCompatibleBitmap"))?;
+            a.mov(dword_ptr(esp + at), eax)?;
+            a.push(eax)?;
+            a.push(dc)?;
+            a.call(f("SelectObject"))?;
+            a.mov(dword_ptr(esp + at + 8), eax)?;
+        }
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, dword_ptr(esp + 12))?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 0)?;
+        a.push(dword_ptr(esp))?;
+        a.push(edi)?;
+        a.call(f("SelectObject"))?;
+        a.cmp(eax, 0)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 5)?;
+        for (dc, at, n) in [(esi, 8, 1), (edi, 12, 2)] {
+            a.push(dword_ptr(esp + at))?;
+            a.push(dc)?;
+            a.call(f("SelectObject"))?;
+            bit(a, n)?;
+        }
+        for (at, n) in [(0, 3), (4, 4)] {
+            a.push(dword_ptr(esp + at))?;
+            a.call(f("DeleteObject"))?;
+            bit(a, n)?;
+        }
+        a.add(esp, 16)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let mut cpu = machine_with("default_bitmap_two_dcs", &[("T.EXE", exe)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x3F);
 }
 
 /// A program adds F.FON, a file of two sizes of the face "Test Face",

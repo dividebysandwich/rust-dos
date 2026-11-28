@@ -21,5 +21,6 @@ mod game_fixes_tests;
 mod game_suite;
 mod games_tests;
 mod layout_tests;
+mod report_tests;
 mod run_lock_tests;
 mod savestate_tests;

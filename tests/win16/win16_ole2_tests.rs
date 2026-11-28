@@ -7,6 +7,7 @@
 
 use crate::win16;
 
+use iced_x86::code_asm::*;
 use rust_dos_ne as ne;
 use win16::{CODE, Code, program, run};
 
@@ -133,7 +134,7 @@ fn put_text(code: &mut Code, at: u16, text: &[u8]) {
 /// allocator from CoGetMalloc and a block from it, BSTRs, a VARIANT
 /// changed to text, numbers from and to text, an interface's GUID
 /// imported as a variable, StringFromCLSID, the locale, and a compound
-/// file, which the built-in Windows doesn't make (E_NOTIMPL).
+/// file.
 #[test]
 fn a_vb4_programs_ole_calls_work() {
     let mut code = Code::new();
@@ -257,14 +258,16 @@ fn a_vb4_programs_ole_calls_work() {
     code.call("OLE2NLS", GET_USER_DEFAULT_LCID);
     expect_dx_ax(&mut code, 0x0409, 27);
 
-    // StgCreateDocfile(name, mode, 0, &storage): E_NOTIMPL, and NULL.
-    set(&mut code, OUT, 1);
+    // StgCreateDocfile(name, mode, 0, &storage): S_OK, and a storage.
+    set(&mut code, OUT + 2, 0);
     push_ds(&mut code, TEXT);
     code.push(0).push(0x1012).push(0).push(0);
     push_ds(&mut code, OUT);
     code.call("STORAGE", STG_CREATE_DOCFILE);
-    expect_dx_ax(&mut code, 0x8000_4001, 28);
-    expect(&mut code, OUT, 0, 29);
+    expect_dx_ax(&mut code, 0, 28);
+    code.emit(&[0x83, 0x3E, lo(OUT + 2), hi(OUT + 2), 0x00]); // cmp word [..],0
+    code.emit(&[0x75, 0x06]) // jne over the exit
+        .emit(&[0xB0, 29, 0xB4, 0x4C, 0xCD, 0x21]);
 
     code.emit(&[0xB0, 0x00]).exit_al();
     let (exit, log) = run("ole2_vb4_calls", program(&code, CODE));
@@ -928,5 +931,691 @@ fn a_program_raises_an_error_object() {
     code.emit(&[0xB0, 0x00]).exit_al();
 
     let (exit, log) = run("ole2_error_info", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+// In-process servers.
+
+/// SRV.DLL's data: the class factory object and the object it makes,
+/// their vtables, the factory's reference count, how many objects it
+/// made, and what DllCanUnloadNow returns.
+const SRV_FACTORY: u16 = 0x10;
+const SRV_OBJECT: u16 = 0x14;
+const SRV_FACTORY_VTABLE: u16 = 0x20;
+const SRV_OBJECT_VTABLE: u16 = 0x40;
+const SRV_REFS: u16 = 0x60;
+const SRV_MADE: u16 = 0x62;
+const SRV_CAN_UNLOAD: u16 = 0x64;
+
+/// A function of SRV.DLL: the prologue the loader patches to load the
+/// library's data segment ("mov ax,ds; nop"), a frame, DS the
+/// library's, the body, and a far return taking `ret` bytes off.
+fn server_function(
+    body: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+    ret: u16,
+) -> Vec<u8> {
+    let mut a = CodeAssembler::new(16).unwrap();
+    a.db(&[0x8C, 0xD8, 0x90]).unwrap();
+    a.push(bp).unwrap();
+    a.mov(bp, sp).unwrap();
+    a.push(ds).unwrap();
+    a.mov(ds, ax).unwrap();
+    body(&mut a).unwrap();
+    a.pop(ds).unwrap();
+    a.pop(bp).unwrap();
+    if ret == 0 {
+        a.retf().unwrap();
+    } else {
+        a.retf_1(ret as u32).unwrap();
+    }
+    a.assemble(0).unwrap()
+}
+
+/// DX:AX E_NOINTERFACE.
+fn e_nointerface(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.mov(ax, 0x4002)?;
+    a.mov(dx, 0x8000)
+}
+
+/// DX:AX S_OK.
+fn s_ok(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.xor(ax, ax)?;
+    a.xor(dx, dx)
+}
+
+/// SRV.DLL, an in-process server as AVIFILE.DLL of Video for Windows
+/// 1.1 is one: its LibMain fills in the vtables of its class factory
+/// and of the object the factory makes; DllGetClassObject (Pascal's)
+/// gives the factory for IClassFactory, with a reference;
+/// CreateInstance (C's, as all methods) gives the object and counts it;
+/// DllCanUnloadNow returns the word at SRV_CAN_UNLOAD. Its functions
+/// are exported, so the loader patches their prologues.
+fn server_library() -> Vec<u8> {
+    let get_class_object = server_function(
+        |a| {
+            let mut other = a.create_label();
+            let mut done = a.create_label();
+            // riid at BP+10: IClassFactory, {00000001-...}.
+            a.les(bx, dword_ptr(bp + 10))?;
+            a.cmp(word_ptr(bx).es(), 1)?;
+            a.jne(other)?;
+            a.les(bx, dword_ptr(bp + 6))?;
+            a.mov(word_ptr(bx).es(), SRV_FACTORY as u32)?;
+            a.mov(word_ptr(bx + 2).es(), ds)?;
+            a.inc(word_ptr(SRV_REFS as u32))?;
+            s_ok(a)?;
+            a.jmp(done)?;
+            a.set_label(&mut other)?;
+            e_nointerface(a)?;
+            a.set_label(&mut done)?;
+            a.nop()
+        },
+        12,
+    );
+    let can_unload_now = server_function(
+        |a| {
+            a.mov(ax, word_ptr(SRV_CAN_UNLOAD as u32))?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+    let query_interface = server_function(e_nointerface, 0);
+    let factory_add_ref = server_function(
+        |a| {
+            a.inc(word_ptr(SRV_REFS as u32))?;
+            a.mov(ax, word_ptr(SRV_REFS as u32))?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+    let factory_release = server_function(
+        |a| {
+            a.dec(word_ptr(SRV_REFS as u32))?;
+            a.mov(ax, word_ptr(SRV_REFS as u32))?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+    // CreateInstance(this, outer, riid, ppv): ppv at BP+18.
+    let create_instance = server_function(
+        |a| {
+            a.les(bx, dword_ptr(bp + 18))?;
+            a.mov(word_ptr(bx).es(), SRV_OBJECT as u32)?;
+            a.mov(word_ptr(bx + 2).es(), ds)?;
+            a.inc(word_ptr(SRV_MADE as u32))?;
+            s_ok(a)
+        },
+        0,
+    );
+    let lock_server = server_function(s_ok, 0);
+    let one = server_function(
+        |a| {
+            a.mov(ax, 1)?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+
+    // The functions follow a jump to LibMain, which is made last, when
+    // their offsets are known.
+    let functions = [
+        get_class_object,
+        can_unload_now,
+        query_interface,
+        factory_add_ref,
+        factory_release,
+        create_instance,
+        lock_server,
+        one,
+    ];
+    let mut offsets = Vec::new();
+    let mut body = Vec::new();
+    for f in &functions {
+        offsets.push(3 + body.len() as u16);
+        body.extend_from_slice(f);
+    }
+    let [_, _, qi, f_add, f_rel, create, lock, one] = offsets[..] else {
+        unreachable!()
+    };
+    let mut a = CodeAssembler::new(16).unwrap();
+    let mut far = |at: u16, offset: u16| {
+        a.mov(word_ptr(at as u32), offset as u32).unwrap();
+        a.mov(word_ptr(at as u32 + 2), cs).unwrap();
+    };
+    for (i, f) in [qi, f_add, f_rel, create, lock].into_iter().enumerate() {
+        far(SRV_FACTORY_VTABLE + 4 * i as u16, f);
+    }
+    for (i, f) in [qi, one, one].into_iter().enumerate() {
+        far(SRV_OBJECT_VTABLE + 4 * i as u16, f);
+    }
+    for (object, vtable) in [
+        (SRV_FACTORY, SRV_FACTORY_VTABLE),
+        (SRV_OBJECT, SRV_OBJECT_VTABLE),
+    ] {
+        a.mov(word_ptr(object as u32), vtable as u32).unwrap();
+        a.mov(word_ptr(object as u32 + 2), ds).unwrap();
+    }
+    a.mov(word_ptr(SRV_CAN_UNLOAD as u32), 1u32).unwrap();
+    a.mov(ax, 1).unwrap();
+    a.retf().unwrap();
+    let lib_main = a.assemble(0).unwrap();
+    let mut text = vec![0xE9]; // jmp near over the functions
+    text.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    text.extend_from_slice(&body);
+    text.extend_from_slice(&lib_main);
+
+    let mut b = ne::Builder::new("SRV", ne::LIBMODULE | ne::SINGLEDATA | ne::PROTMODE);
+    let code = b.segment(ne::SegmentSpec {
+        data: text,
+        flags: CODE,
+        alloc: 0,
+        relocations: Vec::new(),
+    });
+    let data = b.segment(ne::SegmentSpec {
+        data: vec![0; 0x70],
+        flags: ne::SEG_DATA | 0x0C00,
+        alloc: 0x100,
+        relocations: Vec::new(),
+    });
+    b.auto_data(data, 0, 0);
+    b.entry_point(code, 0);
+    for (i, &offset) in offsets.iter().enumerate() {
+        let entry = ne::Entry::Code {
+            segment: code as u8,
+            offset,
+            flags: ne::ENTRY_EXPORTED,
+            moveable: true,
+        };
+        b.entry(i as u16 + 1, entry);
+    }
+    b.export("DllGetClassObject", 1, false);
+    b.export("DllCanUnloadNow", 2, false);
+    b.build()
+}
+
+/// A GUID's 16 bytes put at `at` of the data segment.
+fn put_guid(code: &mut Code, at: u16, guid: [u8; 16]) {
+    for (i, pair) in guid.chunks(2).enumerate() {
+        set(
+            code,
+            at + 2 * i as u16,
+            u16::from_le_bytes([pair[0], pair[1]]),
+        );
+    }
+}
+
+/// End with `fail` unless the word at ES:`at` is `value`.
+fn expect_es(code: &mut Code, at: u16, value: u16, fail: u8) {
+    // cmp word es:[at],value
+    code.emit(&[0x26, 0x81, 0x3E, lo(at), hi(at), lo(value), hi(value)]);
+    or_fail(code, fail);
+}
+
+/// CoCreateInstance and CoGetClassObject start a class's in-process
+/// server, as AVIFILE.DLL asks COMPOBJ for the AVI file handler it
+/// registers itself: the DLL named in the registry's
+/// CLSID\{...}\InprocServer is loaded, its LibMain run, and its
+/// DllGetClassObject called. The task holds the DLL once, however often
+/// it was asked; CoFreeUnusedLibraries frees it when DllCanUnloadNow
+/// says S_OK, and the last CoUninitialize whatever it says. A class
+/// with no server in the registry is REGDB_E_CLASSNOTREG, and so is one
+/// whose server is a built-in module without DllGetClassObject.
+#[test]
+fn co_create_instance_starts_an_inproc_server() {
+    const CO_INITIALIZE: u16 = 2;
+    const CO_UNINITIALIZE: u16 = 3;
+    const CO_GET_CLASS_OBJECT: u16 = 7;
+    const CO_CREATE_INSTANCE: u16 = 13;
+    const CO_FREE_UNUSED_LIBRARIES: u16 = 17;
+    const REG_SET_VALUE: u16 = 5; // SHELL
+    const GET_MODULE_HANDLE: u16 = 47; // KERNEL
+    const RELEASE: u8 = 2;
+
+    const OUT2: u16 = 0x14;
+    const CLSID: u16 = 0x20;
+    const KEY: u16 = 0x30;
+    const DLL: u16 = 0x70;
+    const NAME: u16 = 0x78;
+    const IID_ICLASSFACTORY: u16 = 0x80;
+    const IID_IUNKNOWN_AT: u16 = 0x90;
+    const OTHER: u16 = 0xA0;
+    const KEY2: u16 = 0xB0;
+    const OLE2_DLL: u16 = 0xF0;
+
+    // {0BADC0DE-1234-5678-9ABC-DEF012345678}, and one no server has.
+    const GUID: [u8; 16] = [
+        0xDE, 0xC0, 0xAD, 0x0B, 0x34, 0x12, 0x78, 0x56, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56,
+        0x78,
+    ];
+    let mut other = GUID;
+    other[15] = 0x79;
+    let ole = |d1: u8| {
+        let mut g = [0; 16];
+        g[0] = d1;
+        g[8] = 0xC0;
+        g[15] = 0x46;
+        g
+    };
+
+    let mut code = Code::new();
+    put_guid(&mut code, CLSID, GUID);
+    put_guid(&mut code, IID_ICLASSFACTORY, ole(1));
+    put_guid(&mut code, IID_IUNKNOWN_AT, ole(0));
+    put_guid(&mut code, OTHER, other);
+    put_text(
+        &mut code,
+        KEY,
+        b"CLSID\\{0BADC0DE-1234-5678-9ABC-DEF012345678}\\InprocServer",
+    );
+    put_text(&mut code, DLL, b"srv.dll");
+    put_text(&mut code, NAME, b"SRV");
+    put_text(
+        &mut code,
+        KEY2,
+        b"CLSID\\{0BADC0DE-1234-5678-9ABC-DEF012345679}\\InprocServer",
+    );
+    put_text(&mut code, OLE2_DLL, b"ole2.dll");
+
+    // RegSetValue(HKEY_CLASSES_ROOT, key, REG_SZ, "srv.dll", 7): the
+    // server registered, as AVIFILE's entry point registers itself.
+    code.push(0).push(1);
+    push_ds(&mut code, KEY);
+    code.push(0).push(1);
+    push_ds(&mut code, DLL);
+    code.push(0).push(7).call("SHELL", REG_SET_VALUE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // CoInitialize(NULL).
+    code.push(0).push(0).call("COMPOBJ", CO_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, IID_IUnknown,
+    // &out): the server's object, one made, the factory released.
+    push_ds(&mut code, CLSID);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0, 3);
+    les_bx(&mut code, OUT);
+    code.emit(&[0x81, 0xFB, lo(SRV_OBJECT), hi(SRV_OBJECT)]); // cmp bx,SRV_OBJECT
+    or_fail(&mut code, 4);
+    expect_es(&mut code, SRV_MADE, 1, 5);
+    expect_es(&mut code, SRV_REFS, 0, 6);
+
+    // CoGetClassObject(clsid, CLSCTX_INPROC_SERVER, NULL,
+    // IID_IClassFactory, &out2): the factory, with a reference, which
+    // the program releases.
+    push_ds(&mut code, CLSID);
+    code.push(0).push(1).push(0).push(0);
+    push_ds(&mut code, IID_ICLASSFACTORY);
+    push_ds(&mut code, OUT2);
+    code.call("COMPOBJ", CO_GET_CLASS_OBJECT);
+    expect_dx_ax(&mut code, 0, 7);
+    les_bx(&mut code, OUT2);
+    code.emit(&[0x81, 0xFB, lo(SRV_FACTORY), hi(SRV_FACTORY)]); // cmp bx,SRV_FACTORY
+    or_fail(&mut code, 8);
+    expect_es(&mut code, SRV_REFS, 1, 9);
+    call_object(&mut code, OUT2, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 0, 10);
+
+    // CoFreeUnusedLibraries while DllCanUnloadNow says S_FALSE: the
+    // server stays.
+    code.call("COMPOBJ", CO_FREE_UNUSED_LIBRARIES);
+    push_ds(&mut code, NAME);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x85, 0xC0]) // test ax,ax
+        .emit(&[0x75, 0x06]) // jnz over the exit
+        .emit(&[0xB0, 11, 0xB4, 0x4C, 0xCD, 0x21]);
+
+    // Once it says S_OK, the server goes: the task held it once.
+    les_bx(&mut code, OUT);
+    let (l, h) = (lo(SRV_CAN_UNLOAD), hi(SRV_CAN_UNLOAD));
+    code.emit(&[0x26, 0xC7, 0x06, l, h, 0, 0]); // mov word es:[..],0
+    code.call("COMPOBJ", CO_FREE_UNUSED_LIBRARIES);
+    push_ds(&mut code, NAME);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x85, 0xC0]); // test ax,ax
+    or_fail(&mut code, 12);
+
+    // A class with no server: REGDB_E_CLASSNOTREG.
+    push_ds(&mut code, OTHER);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0x8004_0154, 13);
+
+    // A class served by a built-in module whose DllGetClassObject the
+    // built-in Windows lacks, as Windows registers OLE 2's own classes
+    // with OLE2.DLL: still REGDB_E_CLASSNOTREG, the program going on.
+    code.push(0).push(1);
+    push_ds(&mut code, KEY2);
+    code.push(0).push(1);
+    push_ds(&mut code, OLE2_DLL);
+    code.push(0).push(8).call("SHELL", REG_SET_VALUE);
+    expect_dx_ax(&mut code, 0, 16);
+    push_ds(&mut code, OTHER);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0x8004_0154, 17);
+
+    // The server loaded again, and freed by the last CoUninitialize
+    // though DllCanUnloadNow says S_FALSE, as CoFreeAllLibraries frees
+    // it.
+    push_ds(&mut code, CLSID);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0, 14);
+    code.call("COMPOBJ", CO_UNINITIALIZE);
+    push_ds(&mut code, NAME);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x85, 0xC0]); // test ax,ax
+    or_fail(&mut code, 15);
+
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let exe = program(&code, CODE);
+    let (exit, log) = win16::run_with("ole2_inproc_server", exe, |_, dir| {
+        std::fs::write(dir.join("SRV.DLL"), server_library()).unwrap();
+    });
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// STORAGE's functions and the methods of its objects.
+const STG_OPEN_STORAGE: u16 = 3;
+const STG_IS_STORAGE_FILE: u16 = 5;
+const CREATE_STREAM: u8 = 3;
+const OPEN_STREAM: u8 = 4;
+const ENUM_ELEMENTS: u8 = 11;
+const READ: u8 = 3;
+const WRITE: u8 = 4;
+const STREAM_STAT: u8 = 12;
+const NEXT: u8 = 3;
+
+/// TITLE.TDF in `dir`: a compound file with a stream "Contents" of 11
+/// bytes and a storage "Sub", as a Windows 3.1 title keeps its data.
+fn title_file(dir: &std::path::Path) {
+    let mut file = cfb::create(dir.join("TITLE.TDF")).unwrap();
+    let mut stream = file.create_stream("/Contents").unwrap();
+    std::io::Write::write_all(&mut stream, b"HELLO WORLD").unwrap();
+    drop(stream);
+    file.create_storage("/Sub").unwrap();
+    file.flush().unwrap();
+}
+
+/// push ds; pop es; mov bx,`at`.
+fn es_bx_ds(code: &mut Code, at: u16) {
+    code.emit(&[0x1E, 0x07, 0xBB, lo(at), hi(at)]);
+}
+
+/// StgOpenStorage(path at `path`, NULL, STGM_SHARE_DENY_WRITE, NULL, 0,
+/// &storage at `out`), as Pascal pushes it.
+fn open_title(code: &mut Code, path: u16, out: u16) {
+    push_ds(code, path);
+    code.push(0).push(0).push(0).push(0x20);
+    code.push(0).push(0).push(0).push(0);
+    push_ds(code, out);
+    code.call("STORAGE", STG_OPEN_STORAGE);
+}
+
+/// IStorage::OpenStream(name at `name`, NULL, STGM_SHARE_EXCLUSIVE, 0,
+/// &stream at `out`) of the storage at `storage`.
+fn open_stream(code: &mut Code, storage: u16, name: u16, out: u16) {
+    call_object(
+        code,
+        storage,
+        OPEN_STREAM,
+        |c| {
+            push_ds(c, out);
+            c.push(0).push(0).push(0).push(0x10).push(0).push(0);
+            push_ds(c, name);
+        },
+        10,
+    );
+}
+
+/// IStorage::EnumElements(0, NULL, 0, &enumerator at `out`).
+fn enum_elements(code: &mut Code, storage: u16, out: u16) {
+    call_object(
+        code,
+        storage,
+        ENUM_ELEMENTS,
+        |c| {
+            push_ds(c, out);
+            c.push(0).push(0).push(0).push(0).push(0).push(0);
+        },
+        8,
+    );
+}
+
+/// IEnumSTATSTG::Next(count, STATSTGs at `stats`, &fetched at `got`).
+fn next(code: &mut Code, enumerator: u16, count: u16, stats: u16, got: u16) {
+    call_object(
+        code,
+        enumerator,
+        NEXT,
+        |c| {
+            push_ds(c, got);
+            push_ds(c, stats);
+            c.push(0).push(count);
+        },
+        6,
+    );
+}
+
+/// IStream::Stat(&stat at `stats`, STATFLAG_DEFAULT) of the stream at
+/// `stream`.
+fn stream_stat(code: &mut Code, stream: u16, stats: u16) {
+    call_object(
+        code,
+        stream,
+        STREAM_STAT,
+        |c| {
+            c.push(0).push(0);
+            push_ds(c, stats);
+        },
+        4,
+    );
+}
+
+/// End with `fail` unless the first letters of the names of the two
+/// STATSTGs at `stats` are C and S, in either order: "Contents" and
+/// "Sub".
+fn expect_both_names(code: &mut Code, stats: u16, fail: u8) {
+    les_bx(code, stats);
+    code.emit(&[0x26, 0x8A, 0x07]); // mov al,es:[bx]
+    les_bx(code, stats + 72);
+    code.emit(&[0x26, 0x02, 0x07]) // add al,es:[bx]
+        .emit(&[0x3C, b'C' + b'S']); // cmp al,'C'+'S'
+    or_fail(code, fail);
+}
+
+/// A Windows 3.1 title reads its compound file through STORAGE, as The
+/// Magic School Bus Explores the Solar System reads MSBSOLAR.TDF:
+/// StgOpenStorage, a stream opened, read and its Stat with its name in
+/// ANSI, the storage's elements enumerated, StgIsStorageFile. Then a
+/// new docfile made with a stream written, which the file has after
+/// the last Release.
+#[test]
+fn a_program_reads_and_writes_compound_files() {
+    const STORAGE: u16 = 0x10;
+    const STREAM: u16 = 0x14;
+    const ENUMERATOR: u16 = 0x18;
+    const COUNT: u16 = 0x1C;
+    const PATH: u16 = 0x20;
+    const NAME: u16 = 0x30;
+    const BUFFER: u16 = 0x40;
+    const OTHER: u16 = 0x50;
+    const STATS: u16 = 0x60;
+    let mut code = Code::new();
+    code.push(0).push(0).call("OLE2", OLE_INITIALIZE);
+    put_text(&mut code, PATH, b"C:\\TITLE.TDF");
+    put_text(&mut code, NAME, b"Contents");
+
+    open_title(&mut code, PATH, STORAGE);
+    expect_dx_ax(&mut code, 0, 1);
+    open_stream(&mut code, STORAGE, NAME, STREAM);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // IStream::Read(buffer, 16, &count): the stream's 11 bytes.
+    call_object(
+        &mut code,
+        STREAM,
+        READ,
+        |c| {
+            push_ds(c, COUNT);
+            c.push(0).push(16);
+            push_ds(c, BUFFER);
+        },
+        6,
+    );
+    expect_dx_ax(&mut code, 0, 3);
+    expect(&mut code, COUNT, 11, 4);
+    es_bx_ds(&mut code, BUFFER);
+    expect_es_bx(&mut code, 0, b'H', 5);
+    expect_es_bx(&mut code, 10, b'D', 6);
+
+    // IStream::Stat: a stream (2) of 11 bytes, its name ANSI text.
+    stream_stat(&mut code, STREAM, STATS);
+    expect_dx_ax(&mut code, 0, 7);
+    expect(&mut code, STATS + 4, 2, 8);
+    expect(&mut code, STATS + 8, 11, 9);
+    les_bx(&mut code, STATS);
+    expect_es_bx(&mut code, 0, b'C', 10);
+    expect_es_bx(&mut code, 7, b's', 11);
+    expect_es_bx(&mut code, 8, 0, 12);
+
+    // EnumElements, then Next(2): both elements, a stream (2) and a
+    // storage (1); Next(1) after them: S_FALSE and none.
+    enum_elements(&mut code, STORAGE, ENUMERATOR);
+    expect_dx_ax(&mut code, 0, 13);
+    next(&mut code, ENUMERATOR, 2, STATS, COUNT);
+    expect_dx_ax(&mut code, 0, 14);
+    expect(&mut code, COUNT, 2, 15);
+    code.emit(&[0xA1, lo(STATS + 4), hi(STATS + 4)]) // mov ax,[type]
+        .emit(&[0x03, 0x06, lo(STATS + 76), hi(STATS + 76)]) // add ax,[type]
+        .emit(&[0x3D, 3, 0]); // cmp ax,3
+    or_fail(&mut code, 16);
+    expect_both_names(&mut code, STATS, 17);
+    next(&mut code, ENUMERATOR, 1, STATS, COUNT);
+    expect_dx_ax(&mut code, 1, 18);
+    expect(&mut code, COUNT, 0, 19);
+    for object in [ENUMERATOR, STREAM, STORAGE] {
+        call_object(&mut code, object, RELEASE, |_| {}, 0);
+    }
+
+    // StgIsStorageFile: S_OK for the docfile, S_FALSE for the program.
+    push_ds(&mut code, PATH);
+    code.call("STORAGE", STG_IS_STORAGE_FILE);
+    expect_dx_ax(&mut code, 0, 20);
+    put_text(&mut code, OTHER, b"C:\\T.EXE");
+    push_ds(&mut code, OTHER);
+    code.call("STORAGE", STG_IS_STORAGE_FILE);
+    expect_dx_ax(&mut code, 1, 21);
+
+    // StgCreateDocfile("C:\NEW.STG", STGM_CREATE | STGM_READWRITE |
+    // STGM_SHARE_EXCLUSIVE), CreateStream("Data"), Write("ABC").
+    put_text(&mut code, PATH, b"C:\\NEW.STG");
+    put_text(&mut code, NAME, b"Data");
+    put_text(&mut code, BUFFER, b"ABC");
+    push_ds(&mut code, PATH);
+    code.push(0).push(0x1012).push(0).push(0);
+    push_ds(&mut code, STORAGE);
+    code.call("STORAGE", STG_CREATE_DOCFILE);
+    expect_dx_ax(&mut code, 0, 22);
+    call_object(
+        &mut code,
+        STORAGE,
+        CREATE_STREAM,
+        |c| {
+            push_ds(c, STREAM);
+            c.push(0).push(0).push(0).push(0).push(0).push(0x1012);
+            push_ds(c, NAME);
+        },
+        10,
+    );
+    expect_dx_ax(&mut code, 0, 23);
+    call_object(
+        &mut code,
+        STREAM,
+        WRITE,
+        |c| {
+            c.push(0).push(0).push(0).push(3);
+            push_ds(c, BUFFER);
+        },
+        6,
+    );
+    expect_dx_ax(&mut code, 0, 24);
+    for object in [STREAM, STORAGE] {
+        call_object(&mut code, object, RELEASE, |_| {}, 0);
+    }
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let mut dir = std::path::PathBuf::new();
+    let (exit, log) = win16::run_with("ole2_storage", program(&code, CODE), |_, d| {
+        title_file(d);
+        dir = d.to_path_buf();
+    });
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+    let mut file = cfb::open(dir.join("NEW.STG")).unwrap();
+    let mut data = Vec::new();
+    let mut stream = file.open_stream("/Data").unwrap();
+    std::io::Read::read_to_end(&mut stream, &mut data).unwrap();
+    assert_eq!(data, b"ABC");
+}
+
+/// The names in STATSTGs are the program's to free with the allocator
+/// CoGetMalloc gives it, so they come from the program's own allocator
+/// when OleInitialize was given one: Stat asks its Alloc for one block,
+/// and IEnumSTATSTG::Next for one for each element, in turn.
+#[test]
+fn storage_names_take_the_programs_allocator() {
+    const STATS: u16 = 0x10;
+    const STORAGE: u16 = 0xA0;
+    const STREAM: u16 = 0xA4;
+    const ENUMERATOR: u16 = 0xA8;
+    const COUNT: u16 = 0xAC;
+    const PATH: u16 = 0xDC;
+    const NAME: u16 = 0xEA;
+    let mut code = Code::new();
+    counting_allocator(&mut code);
+    push_ds(&mut code, COUNTER);
+    code.call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+    put_text(&mut code, PATH, b"C:\\TITLE.TDF");
+    put_text(&mut code, NAME, b"Contents");
+    open_title(&mut code, PATH, STORAGE);
+    expect_dx_ax(&mut code, 0, 2);
+    open_stream(&mut code, STORAGE, NAME, STREAM);
+    expect_dx_ax(&mut code, 0, 3);
+
+    stream_stat(&mut code, STREAM, STATS);
+    expect_dx_ax(&mut code, 0, 4);
+    expect(&mut code, ALLOCS, 1, 5);
+    expect(&mut code, COUNTER_ASKED, 9, 6);
+    les_bx(&mut code, STATS);
+    expect_es_bx(&mut code, 0, b'C', 7);
+    expect_es_bx(&mut code, 8, 0, 8);
+
+    enum_elements(&mut code, STORAGE, ENUMERATOR);
+    expect_dx_ax(&mut code, 0, 9);
+    next(&mut code, ENUMERATOR, 2, STATS, COUNT);
+    expect_dx_ax(&mut code, 0, 10);
+    expect(&mut code, COUNT, 2, 11);
+    expect(&mut code, ALLOCS, 3, 12);
+    expect_both_names(&mut code, STATS, 13);
+    for object in [ENUMERATOR, STREAM, STORAGE] {
+        call_object(&mut code, object, RELEASE, |_| {}, 0);
+    }
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let (exit, log) = win16::run_with("ole2_storage_app_malloc", program(&code, CODE), |_, d| {
+        title_file(d)
+    });
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }

@@ -393,6 +393,10 @@ against that DLL's results in `undname_vc6.txt`).
   window, a multi-line edit control with the file's text. Started by
   WinExec or CreateProcessA, it is a process of its own and stays open
   after the program that started it ends, as on Windows 98.
+  `WINHELP.EXE` and `WINHLP32.EXE` are the same message loop around
+  WinHelpMain (`user32/winhelp/program.rs`), which opens the help file
+  the command line names in WinHelpA's viewer; closing the viewer ends
+  the program.
 - The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for
   Win32, as Windows 98 SE's does (`wnaspi32.rs`). Copy protections read
   their discs that way: SafeDisc 2 loads it to check the CD. On Windows
@@ -433,9 +437,12 @@ All output goes through the emulated video hardware (`screen.rs`):
   characters, code page 1252's other letters and its Spanish and French
   punctuation, the Central European and Baltic letters with a stroke, and
   the Latin letters with accents built from them. A letter that code page
-  1252 lacks is as wide as its glyph there. The characters code page 437
-  lacks (Central European, Cyrillic, Greek, Turkish and Baltic letters) are
-  drawn from FreeDOS's CPIDOS fonts in the same three sizes, which
+  1252 lacks is as wide as its glyph there. The System font's 16-pixel
+  size, VGASYS.FON's, is drawn with the glyphs of Wine's System font
+  (`gdi32/system16.rs`, from `tools/gen_system_glyphs.py`), which has
+  VGASYS.FON's widths. The characters code page 437 lacks (Central
+  European, Cyrillic, Greek, Turkish and Baltic letters) are drawn from
+  FreeDOS's CPIDOS fonts in the same three sizes, which
   `tools/gen_cpi_glyphs.py` extracts into `video/assets/CPIDOS_glyphs.bin`.
   A font's bytes are those of its character set's code page; the raster
   faces have the system locale's character set, Arial, Times New Roman and

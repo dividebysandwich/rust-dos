@@ -19,6 +19,11 @@ ways:
   started from it runs with the profile's settings, and Rust-DOS doesn't
   ask the almanac for it.
 
+A report can also be sent from the host's command line, without starting
+the emulator: `rust-dos report` sends the settings a configuration or a
+game profile would start the game with
+([Reporting a game to the almanac](../CONFIGURATION.md#reporting-a-game-to-the-almanac)).
+
 Rust-DOS finds a game in the almanac by the name, size and checksums of the
 program file started last: at its prompt, or on the built-in Windows from
 Explorer, a game's launcher or its autorun. `almanac_auto` takes the
@@ -232,6 +237,12 @@ opcode, `win32_version=98se` when a message names the version, more
   set. On `svga_voodoo3` and `svga_toadforce` the game sets its 16-bit
   mode on the display card itself, which DirectShow then reads, so the
   movies play without the setting.
+* **Prince of Persia 3D**: `machine=svga_voodoo3`, `cpu=pentium_ii`,
+  `memsize=128`. After the game, its setup offers QuickTime 4, DirectX
+  6.1 and Windows Media Player 6. Install QuickTime, which plays the
+  game's movies; without it the game skips them. Skip the other two
+  ([runtimes a setup
+  offers](builtin-windows.md#runtimes-a-setup-offers)).
 * **Rage of Mages** (GOG): `cpu=pentium_ii`. The game needs a Pentium; on
   the default 486 the map's unexplored areas show dark blue instead of
   black. Copy the game's folder into a folder of drive C:, such as

@@ -25,12 +25,14 @@
 //!   and BAR 1 its linear frame buffer, so reading and writing it is
 //!   the first kind's.
 //!
-//! The desktop is 32 bits a pixel on the first kind, and 16 (5-6-5) on
-//! the second, as Windows 95 with a Voodoo3 was usually set up; it is at
-//! the start of video memory. With `win32_depth=8` it is 8 bits a pixel
-//! on both, its colours GDI's system palette, which the DAC (or the
-//! card's lookup table) holds, and with `win32_depth=16` 16 bits a pixel
-//! (5-6-5) on both. Its own size is 640x480, or the one of
+//! The desktop is 32 bits a pixel on the first and third kinds (24 on
+//! an S3 ViRGE), and 16 (5-6-5) on the second, as Windows 95 with a
+//! Voodoo3 was usually set up; it is at the start of video memory. With
+//! `win32_depth=8` it is 8 bits a pixel on all, its colours GDI's system
+//! palette, which the DAC (or the card's lookup table) holds, with
+//! `win32_depth=16` 16 bits a pixel (5-6-5) on all, and with `24` or
+//! `32` that depth where the adapter has it, else the adapter's True
+//! Color depth (`true_color`). Its own size is 640x480, or the one of
 //! `DESKTOP_SIZES` the `win32_desktop` setting names, as Display
 //! Properties set it on Windows. ChangeDisplaySettings can make it one
 //! of the other `DESKTOP_SIZES` at the same depth, until it gives the
@@ -129,25 +131,64 @@ pub fn linear_memory(cpu: &mut Cpu) {
 }
 
 /// The desktop's mode: its size, its own (`win32_desktop`) unless
-/// ChangeDisplaySettings set another (`set_desktop_size`), at 8 bits a
-/// pixel with `win32_depth=8` and 16 with `win32_depth=16`, else 16 on
-/// the card, 24 (packed) on an S3 ViRGE, whose VESA BIOS has that
-/// instead of 32, and 32 on the others.
+/// ChangeDisplaySettings set another (`set_desktop_size`), at the bits a
+/// pixel of `win32_depth` (`desktop_bpp`).
 pub fn desktop(cpu: &Cpu) -> Mode {
-    use crate::config::DesktopDepth;
-    let bpp = match cpu.bus.win32.desktop_depth {
-        DesktopDepth::Palette => 8,
-        DesktopDepth::HighColor => 16,
-        DesktopDepth::Adapter if is_card(cpu) => 16,
-        DesktopDepth::Adapter if cpu.bus.vga.adapter.is_virge() => 24,
-        DesktopDepth::Adapter => 32,
-    };
+    let bpp = desktop_bpp(cpu);
     let (width, height) = desktop_size(&cpu.bus.win32);
     Mode {
         width,
         height,
         bpp,
         pitch: width * bpp / 8,
+    }
+}
+
+/// The desktop's bits a pixel: 8 with `win32_depth=8`, 16 with `16`,
+/// and with `24` or `32` that depth if the adapter's True Color has it
+/// (`true_color`), else the adapter's. With `auto` it is 16 on the
+/// card and the True Color depth on the others.
+pub fn desktop_bpp(cpu: &Cpu) -> u32 {
+    use crate::config::DesktopDepth;
+    match cpu.bus.win32.desktop_depth {
+        DesktopDepth::Palette => 8,
+        DesktopDepth::HighColor => 16,
+        DesktopDepth::Adapter if is_card(cpu) => 16,
+        DesktopDepth::Adapter | DesktopDepth::TrueColor24 | DesktopDepth::TrueColor32 => {
+            true_color(cpu)
+        }
+    }
+}
+
+/// The adapter's True Color depth: 24 bits a pixel (packed) on an S3
+/// ViRGE, whose VESA BIOS has that instead of 32, and 32 on the others.
+/// 3dfx's Banshee and Voodoo3 driver lists desktops of 8, 16 and 32 bits
+/// a pixel, and no 24, though the card can show one; the ToadForce has
+/// no 24-bit format.
+pub fn true_color(cpu: &Cpu) -> u32 {
+    if !is_card(cpu) && cpu.bus.vga.adapter.is_virge() {
+        24
+    } else {
+        32
+    }
+}
+
+/// Log that the desktop has the adapter's True Color depth instead of
+/// the one `win32_depth` asks for, which the adapter hasn't: as the
+/// first program starts.
+pub fn log_depth_fallback(cpu: &mut Cpu) {
+    use crate::config::DesktopDepth;
+    let asked = match cpu.bus.win32.desktop_depth {
+        DesktopDepth::TrueColor24 => 24,
+        DesktopDepth::TrueColor32 => 32,
+        _ => return,
+    };
+    let bpp = desktop_bpp(cpu);
+    if bpp != asked {
+        cpu.bus.log_string(&format!(
+            "[W32] win32_depth={asked}: the display adapter has no {asked}-bit desktop, so it is \
+             {bpp} bits a pixel"
+        ));
     }
 }
 
@@ -412,9 +453,7 @@ fn banshee_ramp_config(cpu: &Cpu) -> Option<u32> {
 /// The VBE mode of a size and depth, the list's or one of DirectDraw's
 /// own (`SIZES`), by a number no mode of the list has.
 fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
-    let packed = cpu.bus.vga.adapter.is_virge();
-    let truecolor = if packed { 24 } else { 32 };
-    if ![8, 16, truecolor].contains(&bpp) {
+    if ![8, 16, true_color(cpu)].contains(&bpp) {
         return None;
     }
     let adapter = cpu.bus.vga.adapter;
@@ -1390,6 +1429,49 @@ mod tests {
             let want = t.clock as f64 / (t.h[3] as f64 * t.v[3] as f64);
             let got = cpu.bus.voodoo.as_ref().unwrap().refresh_hz();
             assert!((got - want).abs() < 0.1, "{w}x{h} at {hz}: {got}");
+        }
+    }
+
+    #[test]
+    fn the_desktop_has_24_or_32_bits_where_the_adapter_has_them() {
+        use crate::config::DesktopDepth as Depth;
+        use crate::video::adapter::{Adapter, VideoSetup};
+        // auto, 24 and 32: 3dfx's driver has no 24-bit desktop, the
+        // ViRGE's VESA BIOS no 32-bit mode, the ToadForce no 24-bit
+        // format.
+        for (adapter, depths) in [
+            (Adapter::Voodoo3, [16, 32, 32]),
+            (Adapter::S3, [32, 32, 32]),
+            (Adapter::S3Virge, [24, 24, 24]),
+            (Adapter::ToadForce, [32, 32, 32]),
+        ] {
+            let asked = [Depth::Adapter, Depth::TrueColor24, Depth::TrueColor32];
+            let cases = asked
+                .into_iter()
+                .zip(depths)
+                .chain([(Depth::Palette, 8), (Depth::HighColor, 16)]);
+            for (depth, bpp) in cases {
+                let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+                let setup = VideoSetup {
+                    adapter,
+                    ..Default::default()
+                };
+                crate::video::bios::install(&mut cpu.bus, setup);
+                if adapter == Adapter::Voodoo3 {
+                    cpu.bus
+                        .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+                }
+                cpu.bus.win32.desktop_depth = depth;
+                let want = Mode {
+                    width: 640,
+                    height: 480,
+                    bpp,
+                    pitch: 640 * bpp / 8,
+                };
+                assert_eq!(desktop(&cpu), want, "{adapter:?} {depth:?}");
+                set_desktop_mode(&mut cpu);
+                assert_eq!(mode(&cpu), Some(want), "{adapter:?} {depth:?}");
+            }
         }
     }
 

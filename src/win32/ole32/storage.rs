@@ -431,6 +431,25 @@ fn object_of(cpu: &mut Cpu, this: u32, kind: u32) -> Option<u32> {
     Some(id)
 }
 
+/// Whether `this` is an IStorage, IStream or IEnumSTATSTG of a docfile
+/// that the program still holds: false once its last Release freed it.
+/// The 16-bit STORAGE (win16/storage.rs) frees its own object of one
+/// then.
+pub fn is_object(cpu: &mut Cpu, this: u32) -> bool {
+    [STORAGE, STREAM, ENUM]
+        .into_iter()
+        .any(|kind| object_of(cpu, this, kind).is_some())
+}
+
+/// Whether `this` is a docfile's IStream whose element is still there:
+/// S_OK, or the HRESULT its methods fail with.
+pub fn stream_state(cpu: &mut Cpu, this: u32) -> u32 {
+    match live(cpu, this, STREAM) {
+        Ok(_) => S_OK,
+        Err(e) => e,
+    }
+}
+
 /// The object of `this` of `kind` whose element is still there: its id,
 /// or the HRESULT to fail with.
 fn live(cpu: &mut Cpu, this: u32, kind: u32) -> Result<u32, u32> {
@@ -1632,13 +1651,23 @@ pub fn enum_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             continue;
         }
         let at = out + n * STATSTG_SIZE as u32;
-        if !cpu.bus.guest_probe(at, STATSTG_SIZE, true) {
-            return Some(STG_E_INVALIDPOINTER);
+        let error = if !cpu.bus.guest_probe(at, STATSTG_SIZE, true) {
+            STG_E_INVALIDPOINTER
+        } else if !write_stat(cpu, doc_id, index, 0, at, 0) {
+            E_OUTOFMEMORY
+        } else {
+            n += 1;
+            continue;
+        };
+        // A failed call gives the caller nothing to free: the names of
+        // the STATSTGs written so far go back to the allocator.
+        for k in 0..n {
+            let name_at = out + k * STATSTG_SIZE as u32;
+            let name = cpu.bus.guest_read_32(name_at);
+            super::task_free(cpu, name);
+            cpu.bus.guest_write_32(name_at, 0);
         }
-        if !write_stat(cpu, doc_id, index, 0, at, 0) {
-            return Some(E_OUTOFMEMORY);
-        }
-        n += 1;
+        return Some(error);
     }
     if fetched != 0 {
         com::write_out(cpu, fetched, n);

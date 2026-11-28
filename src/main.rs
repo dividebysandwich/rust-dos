@@ -28,6 +28,7 @@ mod display;
 mod input;
 mod main_almanac;
 mod main_host;
+mod main_report;
 mod monitor_power;
 mod parent_watch;
 mod run_lock;
@@ -130,6 +131,7 @@ fn main() -> Result<ExitCode, String> {
                 }
             }
         }
+        Some(Command::Report(report)) => std::process::exit(main_report::report(&args, report)),
         None => {}
     }
     if let Some(port) = args.relay {

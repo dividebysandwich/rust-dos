@@ -69,6 +69,64 @@ The registry is the file `C:\REGISTRY.REG`, REGEDIT4 text that can be
 read and edited by hand. It is made the first time a program uses the
 registry.
 
+### Runtimes a setup offers
+
+Many setups offer to install runtimes from the CD after the game:
+DirectX, QuickTime, a media player, codecs, a browser. Whatever they
+copy, the built-in Windows keeps its own DLLs. A DLL it has, loaded by
+its name or from the system folder, is the built-in one, and COM makes
+its built-in classes before any server the registry names for them.
+The installer's copies stay on drive C:, where a program that opens the
+file or asks for its version sees them, but they don't run. A DLL the
+built-in Windows doesn't have runs from the copy its installer leaves,
+so a runtime is worth installing when it brings what the built-in
+Windows lacks:
+
+- **DirectX and DirectX Media:** skip them. The built-in Windows has
+  DirectX 8.0a, or 8.1 with `win32_version=98` or `98se`, and DirectX
+  6.1's DirectShow, and the registry gives that version at every start.
+  The setup of an older DirectX that checks the version, as the DirectX
+  6.1 on Prince of Persia 3D's CD does, ends at once and copies nothing.
+  DirectX Media's DirectAnimation isn't built in, and the package of
+  Media Player 6 that brings it doesn't install (below).
+- **QuickTime:** install it when the game has QuickTime movies (`.mov`
+  files). It isn't part of Windows, and Prince of Persia 3D, for one,
+  skips its movies without it. QuickTime 4's and 5's installers run.
+  QuickTime 5's shows its licence in Dutch at first (#1478): pick
+  English in the language list at its bottom left.
+- **Windows Media Player 6 (`MPFULL.EXE`):** skip it. Its setup stops
+  at each of its parts with "Missing entry:LaunchINFSection", as the
+  built-in ADVPACK.DLL doesn't install INF sections yet (#2271), and
+  copies nothing into the system folder. Movies a game plays through
+  DirectShow or Video for Windows don't need it.
+- **Internet Explorer 4 or 5:** skip it. Its setup installs through the
+  same ADVPACK functions as Media Player's. A game that loads
+  `WININET.DLL` while it runs, as Myth III does, goes on without it
+  (#1491).
+- **Indeo codecs and Video for Windows 1.1e:** skip them for a 32-bit
+  game. The built-in Video for Windows (MSVFW32 and AVIFIL32), which
+  DirectShow plays through too, decodes Indeo 3, 4 and 5, Cinepak and
+  Microsoft Video 1 itself, whatever SYSTEM.INI lists, and never loads
+  a codec's DLL: a codec installed for any other format isn't used
+  either. A setup that installs and registers a codec, as Leadfoot's
+  runs `regsvr32 /s ir50_32.dll`, still works. A 16-bit game, made for
+  Windows 3.1 or, as Civilization II, for Windows 3.1 and 95, gets
+  Video for Windows 1.1e from its setup, since the built-in Windows has
+  no 16-bit MSVIDEO.DLL or AVIFILE.DLL yet. Let the setup install it,
+  as a game that imports those DLLs doesn't start without them, but
+  its movies don't play on it yet: Civilization II stops at start with
+  a notice about its video setup (#2306).
+- **Visual Basic runtimes:** install one when a program says it needs
+  `MSVBVM50.DLL` or `MSVBVM60.DLL`, which the built-in Windows doesn't
+  have. If the package's setup doesn't run, open it with 7-Zip and copy
+  that DLL into the program's folder.
+- **InstallShield's engine and Windows Installer:** let the setup
+  install them. The setup itself runs on them: Windows Installer
+  (`INSTMSIA.EXE`) and InstallShield's scripting runtime
+  (`isscript.msi`) install, and the setup goes on.
+- **Acrobat Reader:** skip it. It only shows the manual; open the PDF
+  file from the CD on your own computer instead.
+
 ## What differs from Windows 98
 
 ### How an install differs
@@ -170,6 +228,16 @@ button). The text, in the system's fixed font, scrolls and can be
 selected and copied. Notepad's menus aren't there, so nothing can be
 saved, and a file that isn't there opens an empty window instead of
 asking whether to make it.
+
+### Help files
+
+`C:\WINDOWS\WINHELP.EXE` and `WINHLP32.EXE` are there, as on Windows
+98, and open a Windows 3.1 help file (`.HLP`) in the same viewer a
+game's Help menu opens: `C:\WINDOWS\WINHELP C:\GAME\README.HLP` at
+the DOS prompt, or a shortcut a setup made for it. The DOS prompt comes
+back once the viewer is closed. The command line's options (`-k`, `-n` and the
+others) aren't read, and WINHELP without a file ends at once instead of
+showing an empty window.
 
 ### Registry Editor
 
