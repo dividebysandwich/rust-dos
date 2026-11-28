@@ -28,7 +28,7 @@ mod moniker;
 mod propvariant;
 mod persist;
 mod rpc;
-mod storage;
+pub(crate) mod storage;
 pub mod stream;
 
 pub use calls::step;
@@ -738,11 +738,11 @@ fn factory_lock_server(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// A block of the process heap for the task allocator, or 0.
-pub(super) fn task_alloc(cpu: &mut Cpu, size: u32) -> u32 {
+pub(crate) fn task_alloc(cpu: &mut Cpu, size: u32) -> u32 {
     super::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size.max(1))).unwrap_or(0)
 }
 
-pub(super) fn task_free(cpu: &mut Cpu, at: u32) {
+pub(crate) fn task_free(cpu: &mut Cpu, at: u32) {
     if at != 0 {
         super::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, at));
     }

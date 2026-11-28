@@ -1713,6 +1713,8 @@ fn the_desktop_depth_is_read() {
         ("auto", DesktopDepth::Adapter),
         ("8", DesktopDepth::Palette),
         ("16", DesktopDepth::HighColor),
+        ("24", DesktopDepth::TrueColor24),
+        ("32", DesktopDepth::TrueColor32),
     ] {
         let text = format!("[emulator]\nwin32_depth={value}\n");
         let config = parse(&text, Path::new("/cfg"), None);
@@ -1721,8 +1723,11 @@ fn the_desktop_depth_is_read() {
         assert_eq!(settings.win32_depth, depth);
         assert_eq!(depth.name(), value);
     }
-    let config = parse("[emulator]\nwin32_depth=24\n", Path::new("/cfg"), None);
-    assert_eq!(config.warnings.len(), 1);
+    for value in ["15", "64", "true"] {
+        let text = format!("[emulator]\nwin32_depth={value}\n");
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 1, "{value}");
+    }
 }
 
 #[test]

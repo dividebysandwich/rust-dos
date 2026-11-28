@@ -345,7 +345,9 @@ oleaut32, olepro32, opengl32, shell32, user32's dialogs, list boxes,
 combo boxes, scroll bars and winhlp32, version, avifil32, msvfw32,
 quartz and winmm's mmio. comctl32's standard toolbar bitmaps
 (src/win32/comctl32/res) are Wine's. Copyright the Wine project
-authors, listed in Wine's AUTHORS file.
+authors, listed in Wine's AUTHORS file. The glyphs of the System font
+(src/win32/gdi32/system16.rs) are those of Wine's fonts/system.sfd,
+Copyright (C) 2004 Huw D M Davies, Dmitry Timoshkov.
 
 FFmpeg (https://ffmpeg.org/): the Indeo Video 4 decoder
 (src/win32/vfw/indeo4) follows libavcodec's indeo4.c, ivi.c, ivi_dsp.c
