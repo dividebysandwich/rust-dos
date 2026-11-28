@@ -283,6 +283,13 @@ pub(super) fn create_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(INVALID_HANDLE_VALUE);
     }
     let name = string_at(cpu, name)?;
+    // A VxD's name opens it whatever the other arguments say.
+    if let Some(vxd) = super::device::open(cpu, &name, disposition) {
+        return Some(vxd.unwrap_or_else(|code| {
+            set_error(cpu, code);
+            INVALID_HANDLE_VALUE
+        }));
+    }
     if !(CREATE_NEW..=TRUNCATE_EXISTING).contains(&disposition)
         || (disposition == TRUNCATE_EXISTING && access & GENERIC_WRITE == 0)
         || share & FILE_SHARE_DELETE != 0

@@ -51,6 +51,10 @@ struct Log {
     /// Runs whose vertices the host was to transform (`Run::geometry`).
     /// This host draws none of their triangles.
     transformed_runs: u32,
+    /// The ends of runs of commands (`submit`), and the batches drawn
+    /// by the last of them.
+    submits: u32,
+    submitted_batches: u32,
 }
 
 /// Picks the states a host refuses, and why.
@@ -544,6 +548,12 @@ impl Host for TestHost {
         found.is_some_and(|c| c.ahead || !pages.changed(gpu::range(&c.surface), &mut c.stamp))
     }
 
+    fn submit(&mut self) {
+        let mut log = self.log.borrow_mut();
+        log.submits += 1;
+        log.submitted_batches = log.batches;
+    }
+
     fn forget(&mut self) {
         self.log.borrow_mut().forgets += 1;
         self.copies.clear();
@@ -824,6 +834,23 @@ fn triangles(rig: &mut Rig) {
         (RS_DESTBLEND, 6),
     ]);
     assert_eq!(rig.draw(5, &square(30.0, 0x8000_00FF)), 0);
+}
+
+#[test]
+fn each_run_of_commands_ends_with_its_draws_handed_to_the_gpu() {
+    let (mut rig, log) = hosted(takes_all);
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    let submits = log.borrow().submits;
+    assert!(submits > 0);
+    // The run's draw is drawn by the host before the run ends, and the
+    // host is told the run ended after it: the GPU starts on the
+    // triangles while the program runs on, not when it reads them.
+    assert_eq!(rig.draw(4, &corner(2.0, 2.0, 40.0, 0.5, 0xFFFF_0000)), 0);
+    let l = log.borrow();
+    assert_eq!(l.submits, submits + 1);
+    assert!(l.batches > 0);
+    assert_eq!(l.submitted_batches, l.batches);
 }
 
 #[test]

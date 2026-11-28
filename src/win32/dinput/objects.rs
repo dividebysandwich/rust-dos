@@ -284,10 +284,52 @@ pub fn in_class_8(ty: u32, filter: u32) -> Option<bool> {
 /// The size of DIDEVICEINSTANCEA, DirectX 5's and 3's.
 pub const INSTANCE_SIZE: u32 = 580;
 pub const INSTANCE_SIZE_DX3: u32 = 560;
+/// What DIDEVICEINSTANCEW's two names of MAX_PATH WCHARs add.
+const INSTANCE_WIDER: u32 = 2 * MAX_PATH;
+/// The sizes DIDEVICEINSTANCE has, and whether each is the W form's.
+pub const INSTANCE_SIZES: [(u32, bool); 4] = [
+    (INSTANCE_SIZE, false),
+    (INSTANCE_SIZE_DX3, false),
+    (INSTANCE_SIZE + INSTANCE_WIDER, true),
+    (INSTANCE_SIZE_DX3 + INSTANCE_WIDER, true),
+];
 
-/// The DIDEVICEINSTANCEA of a device of `kind` with `shape`, `size`
-/// bytes of it, as DirectInput `version` describes it.
-pub fn instance(kind: u32, shape: (u32, u32), size: u32, version: u32) -> Vec<u8> {
+/// The length of the names in the structures, in characters.
+const MAX_PATH: u32 = 260;
+
+/// The size of the structure of `size` bytes in its other form: the A
+/// one of a W one (`wide`), which has its `names` names in WCHARs.
+const fn ansi_size(size: u32, wide: bool, names: u32) -> u32 {
+    if wide { size - names * MAX_PATH } else { size }
+}
+
+/// The W form of the A structure `a`, whose names of MAX_PATH
+/// characters are at `names`, `size` bytes of it: each name's
+/// characters as WCHARs, and the size in its first DWORD.
+fn widen(a: &[u8], names: &[usize], size: u32) -> Vec<u8> {
+    let mut w = Vec::with_capacity(size as usize);
+    let mut from = 0;
+    for &at in names {
+        w.extend_from_slice(&a[from..at]);
+        for &c in &a[at..at + MAX_PATH as usize] {
+            w.extend_from_slice(&u16::from(c).to_le_bytes());
+        }
+        from = at + MAX_PATH as usize;
+    }
+    w.extend_from_slice(&a[from..]);
+    w[0..4].copy_from_slice(&size.to_le_bytes());
+    w
+}
+
+/// The DIDEVICEINSTANCE of a device of `kind` with `shape`, `size` bytes
+/// of it, as DirectInput `version` describes it: the W form if `wide`.
+pub fn instance(kind: u32, shape: (u32, u32), size: u32, version: u32, wide: bool) -> Vec<u8> {
+    let b = instance_a(kind, shape, ansi_size(size, wide, 2), version);
+    if wide { widen(&b, &[40, 300], size) } else { b }
+}
+
+/// The DIDEVICEINSTANCEA, `size` bytes of it.
+fn instance_a(kind: u32, shape: (u32, u32), size: u32, version: u32) -> Vec<u8> {
     let mut b = vec![0u8; size as usize];
     b[0..4].copy_from_slice(&size.to_le_bytes());
     b[4..20].copy_from_slice(&instance_guid(kind).0);
@@ -324,10 +366,25 @@ pub fn instance(kind: u32, shape: (u32, u32), size: u32, version: u32) -> Vec<u8
 /// The size of DIDEVICEOBJECTINSTANCEA, DirectX 5's and 3's.
 pub const OBJECT_SIZE: u32 = 316;
 pub const OBJECT_SIZE_DX3: u32 = 292;
+/// The sizes DIDEVICEOBJECTINSTANCE has, and whether each is the W
+/// form's, whose name is MAX_PATH WCHARs.
+pub const OBJECT_SIZES: [(u32, bool); 4] = [
+    (OBJECT_SIZE, false),
+    (OBJECT_SIZE_DX3, false),
+    (OBJECT_SIZE + MAX_PATH, true),
+    (OBJECT_SIZE_DX3 + MAX_PATH, true),
+];
 
-/// The DIDEVICEOBJECTINSTANCEA of `obj` of a device of `kind`, where the
-/// data format has it at `ofs`, `size` bytes of it.
-pub fn object_instance(kind: u32, obj: &Obj, ofs: u32, size: u32) -> Vec<u8> {
+/// The DIDEVICEOBJECTINSTANCE of `obj` of a device of `kind`, where the
+/// data format has it at `ofs`, `size` bytes of it: the W form if
+/// `wide`.
+pub fn object_instance(kind: u32, obj: &Obj, ofs: u32, size: u32, wide: bool) -> Vec<u8> {
+    let b = object_instance_a(kind, obj, ofs, ansi_size(size, wide, 1));
+    if wide { widen(&b, &[32], size) } else { b }
+}
+
+/// The DIDEVICEOBJECTINSTANCEA, `size` bytes of it.
+fn object_instance_a(kind: u32, obj: &Obj, ofs: u32, size: u32) -> Vec<u8> {
     let mut b = vec![0u8; size as usize];
     b[0..4].copy_from_slice(&size.to_le_bytes());
     b[4..20].copy_from_slice(&obj.guid.0);
