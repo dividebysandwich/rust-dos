@@ -1155,8 +1155,8 @@ fn expect_es(code: &mut Code, at: u16, value: u16, fail: u8) {
 /// CLSID\{...}\InprocServer is loaded, its LibMain run, and its
 /// DllGetClassObject called. The task holds the DLL once, however often
 /// it was asked; CoFreeUnusedLibraries frees it when DllCanUnloadNow
-/// says S_OK. A class with no server in the registry is
-/// REGDB_E_CLASSNOTREG.
+/// says S_OK, and the last CoUninitialize whatever it says. A class
+/// with no server in the registry is REGDB_E_CLASSNOTREG.
 #[test]
 fn co_create_instance_starts_an_inproc_server() {
     const CO_INITIALIZE: u16 = 2;
@@ -1275,7 +1275,21 @@ fn co_create_instance_starts_an_inproc_server() {
     code.call("COMPOBJ", CO_CREATE_INSTANCE);
     expect_dx_ax(&mut code, 0x8004_0154, 13);
 
+    // The server loaded again, and freed by the last CoUninitialize
+    // though DllCanUnloadNow says S_FALSE, as CoFreeAllLibraries frees
+    // it.
+    push_ds(&mut code, CLSID);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0, 14);
     code.call("COMPOBJ", CO_UNINITIALIZE);
+    push_ds(&mut code, NAME);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x85, 0xC0]); // test ax,ax
+    or_fail(&mut code, 15);
+
     code.emit(&[0xB0, 0x00]).exit_al();
 
     let exe = program(&code, CODE);
