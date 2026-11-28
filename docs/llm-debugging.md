@@ -1373,9 +1373,9 @@ the software rasterizer's. A game that detects no card usually left
   OpenGL couldn't take it.
 - **2D on the CPU:** `banshee.plain_copy_pixels` counts the pixels the
   2D engine copied in the card's memory as plain copies (ROP CCh, no
-  colour key, source and destination in one format of 8, 16 or 32
-  bits), which it copies a run at a time instead of through the raster
-  operation for each pixel.
+  colour key or transparent mono pattern, source and destination in one
+  format of 8, 16 or 32 bits), which it copies a run at a time instead
+  of through the raster operation for each pixel.
 - **Memory:** `/api/mem` reads the card's window (`phys:D0000000`, 16 MB):
   registers at +0, the frame buffer at +400000h (2048 bytes a row of
   16-bit pixels), texture memory at +800000h (write-only; reads give FFh).

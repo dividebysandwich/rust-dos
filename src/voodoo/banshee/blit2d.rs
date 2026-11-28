@@ -2543,6 +2543,62 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn plain_copies_across_the_memory_end() {
+        // 16-bit copies whose destination rows run past the memory's end
+        // and on from its start, with a pixel that straddles the end,
+        // from a source whose negative x reads from before its start,
+        // linear and tiled, left to right and right to left. The plain
+        // way stops its runs at the end and draws what the raster
+        // operation's way (a twin with a source colour key that keys
+        // nothing) draws.
+        const SIZE: u32 = 1 << 16;
+        let mut n = Numbers(2268);
+        // Row 0's byte 101 (linear) or 61 (tiled), the second byte of
+        // pixel 50 or 30, is the memory's first.
+        for (dst, tiled) in [(SIZE - 101, false), (SIZE - 61, true)] {
+            for right_to_left in [false, true] {
+                let (mut e, _) = engine();
+                let ram = Vram::new(SIZE as usize);
+                let fill: Vec<u8> = (0..SIZE).map(|_| n.next() as u8).collect();
+                ram.write_bytes(0, &fill);
+                let twin_ram = Vram::new(SIZE as usize);
+                twin_ram.write_bytes(0, &fill);
+                let stride = if tiled { 1 } else { 1024 };
+                e.write(&ram, 0x14, COL_16BPP | stride);
+                e.write(&ram, 0x10, dst | (tiled as u32) << 31);
+                e.write(&ram, 0x54, COL_16BPP | 1024);
+                e.write(&ram, 0x34, 7);
+                e.write(&ram, 0x08, 0);
+                e.write(&ram, 0x0C, 200 | 200 << 16);
+                e.write(&ram, 0x68, 100 | 3 << 16);
+                let (src_x, dst_x, dx) = if right_to_left {
+                    (91, 99, COMMAND_DX)
+                } else {
+                    (-8, 0, 0)
+                };
+                e.write(&ram, 0x5C, src_x as u32 & 0x1FFF);
+                e.write(&ram, 0x6C, dst_x);
+                let mut twin = e.clone();
+                twin.write(&twin_ram, 0x38, CMDEXTRA_SRC_COLORKEY);
+                twin.write(&twin_ram, 0x18, 0xFF_FFFF);
+                twin.write(&twin_ram, 0x1C, 0);
+                let command = 0xCC << 24 | dx | COMMAND_INITIATE | CMD_SCREEN_TO_SCREEN;
+                e.write(&ram, 0x70, command);
+                twin.write(&twin_ram, 0x70, command);
+                let what = format!("{dst:#x} {tiled} {right_to_left}");
+                assert_eq!(e.plain_pixels, 300, "{what}");
+                assert_eq!(twin.plain_pixels, 0, "{what}");
+                assert_eq!(e.touched, twin.touched, "{what}");
+                assert!(e.touched.iter().any(|&(_, end)| end > SIZE), "{what}");
+                let (a, b) = (ram.to_bytes(), twin_ram.to_bytes());
+                let at = (0..a.len()).find(|&at| a[at] != b[at]);
+                assert_eq!(at, None, "{what}");
+                assert_ne!(a, fill, "{what}");
+            }
+        }
+    }
+
+    #[test]
     fn footprints_of_register_writes_that_run_nothing() {
         let (mut e, ram) = engine();
         setup_16(&mut e, &ram);
