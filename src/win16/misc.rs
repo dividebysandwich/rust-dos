@@ -2043,10 +2043,15 @@ fn mmio_keep_buffer(cpu: &mut Cpu, hmmio: u32, entry: Option<[u32; 4]>) {
     }
 }
 
-/// How many 64 KB tiles the buffer at the 16:16 `segptr` has: those of
-/// the global block it starts, or one.
+/// How many 64 KB tiles the buffer at the 16:16 `segptr` reaches from
+/// its selector: those its limit covers, up to the most a block has, and
+/// one for a selector that isn't there. Each selector of a huge block
+/// has a limit to the block's end, so this holds for a buffer in any
+/// tile of one, a global block's or not.
 fn mmio_tiles(cpu: &Cpu, segptr: u32) -> u32 {
-    super::global::get(cpu, (segptr >> 16) as u16).map_or(1, |a| u32::from(a.selectors.max(1)))
+    super::selector_base(cpu, (segptr >> 16) as u16)
+        .map_or(1, |(_, limit, _)| (limit >> 16) + 1)
+        .min(u32::from(super::ldt::tiles(u32::MAX)))
 }
 
 /// A flat pointer into the file's buffer as a 16:16 one. A buffer past
