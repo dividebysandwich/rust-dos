@@ -206,13 +206,18 @@ pub fn advise_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             };
             Next::call(method, &[sink, s + A_IID, s + A_OUT], 1)
         }
-        _ => {
+        1 => {
             let got = cpu.bus.guest_read_32(s + A_OUT);
             if value >> 31 != 0 || got == 0 {
                 return Next::Done(CONNECT_E_CANNOTCONNECT);
             }
             let Some(sinks) = sinks(cpu, kind, id, point) else {
-                return Next::Done(CONNECT_E_CANNOTCONNECT);
+                // The object went during QueryInterface: the reference it
+                // gave goes too.
+                return match crate::win32::ole32::method(cpu, got, RELEASE) {
+                    Some(release) => Next::call(release, &[got], 2),
+                    None => Next::Done(CONNECT_E_CANNOTCONNECT),
+                };
             };
             let i = match sinks.iter().position(|&x| x == 0) {
                 Some(i) => {
@@ -227,6 +232,7 @@ pub fn advise_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             com::write_out(cpu, cookie, i as u32 + 1);
             Next::Done(S_OK)
         }
+        _ => Next::Done(CONNECT_E_CANNOTCONNECT),
     }
 }
 
@@ -262,11 +268,14 @@ pub fn enum_connections(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(if any { E_NOTIMPL } else { OLE_E_NOCONNECTION })
 }
 
-/// A property `dispid` of an object changed: its IPropertyNotifySinks
-/// hear of it through OnChanged, then its IFontEventsDisps through
-/// FontChanged with the property's name `name`. S_OK when they have.
+/// A property `dispid` of the object `id` of `kind` changed: its
+/// IPropertyNotifySinks hear of it through OnChanged, then its
+/// IFontEventsDisps through FontChanged with the property's name `name`.
+/// S_OK when they have.
 pub fn notify(
     cpu: &mut Cpu,
+    kind: u32,
+    id: usize,
     dispid: u32,
     notify: &[u32],
     events: &[u32],
@@ -282,7 +291,14 @@ pub fn notify(
     } else {
         super::new_bstr(cpu, name)
     };
-    let mut vars = vec![super::NOTIFY, dispid, name, notify.len() as u32];
+    let mut vars = vec![
+        super::NOTIFY,
+        dispid,
+        name,
+        notify.len() as u32,
+        kind,
+        id as u32,
+    ];
     vars.extend(notify);
     vars.extend(events);
     task::start(cpu, task::OLEAUT32_OBJECTS, vars, N_SCRATCH)
@@ -296,22 +312,35 @@ const N_PARAMS: u32 = 32;
 const N_SCRATCH: u32 = 48;
 
 /// NOTIFY: variables the DISPID, the name's BSTR (0 without
-/// IFontEventsDisps), the count of IPropertyNotifySinks, and the sinks,
-/// those first.
+/// IFontEventsDisps), the count of IPropertyNotifySinks, the object's
+/// kind and id, and the sinks, those first. The list holds no references
+/// of its own, so a sink an earlier sink's call unadvised, which went
+/// with its last reference, is passed over.
 pub fn notify_step(cpu: &mut Cpu, t: &mut Task) -> Next {
-    const FIRST: usize = 4;
-    let i = FIRST + t.step as usize;
+    const FIRST: usize = 6;
     let (dispid, name, notify) = (t.var(1), t.var(2), t.var(3) as usize);
-    if i >= t.vars.len() {
-        if name != 0 {
-            super::free_bstr(cpu, name);
+    let (kind, id) = (t.var(4), t.var(5) as usize);
+    let mut step = t.step as usize;
+    let sink = loop {
+        let i = FIRST + step;
+        if i >= t.vars.len() {
+            if name != 0 {
+                super::free_bstr(cpu, name);
+            }
+            return Next::Done(S_OK);
         }
-        return Next::Done(S_OK);
-    }
-    let sink = t.vars[i];
-    if i < FIRST + notify {
+        // The IPropertyNotifySinks are those of the first point.
+        let point = if step < notify { 0 } else { font::FONT_EVENTS };
+        step += 1;
+        let sink = t.vars[i];
+        if sinks(cpu, kind, id, point).is_some_and(|s| s.contains(&sink)) {
+            break sink;
+        }
+    };
+    let next = step as u16;
+    if step <= notify {
         let method = crate::win32::ole32::method(cpu, sink, ON_CHANGED).unwrap_or(0);
-        return Next::call(method, &[sink, dispid], t.step + 1);
+        return Next::call(method, &[sink, dispid], next);
     }
     let s = t.scratch;
     cpu.bus.guest_fill(s, N_SCRATCH as usize, 0);
@@ -333,6 +362,6 @@ pub fn notify_step(cpu: &mut Cpu, t: &mut Task) -> Next {
             0,
             0,
         ],
-        t.step + 1,
+        next,
     )
 }
