@@ -133,7 +133,8 @@ that it improves on main. Steps, in this order:
    branch, and compare with main.
 4. Mark it ready for review only when that shows a clear improvement on
    main: a speed-up you measured, against main on the same machine and
-   scene; less work for the same output, counted in deterministic runs;
+   scene; less work for the same output, counted in deterministic runs,
+   for a change that removes work and adds none on a hot path (below);
    a bug that main has and the branch fixes, seen in the game; or
    behaviour closer to the real hardware or the real Windows, shown by
    a test or a comparison with it. Put the evidence in the description.
@@ -175,10 +176,10 @@ that it improves on main. Steps, in this order:
 
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs
-a decision with no clearly better option, or is far beyond the change's
-scope; say which in a comment on it. When several agents work together,
-the one coordinating them marks pull requests ready, not the agents
-doing the work.
+a decision with no clearly better option, is far beyond the change's
+scope, or is a timing that waits for a quiet machine; say which in a
+comment on it. When several agents work together, the one coordinating
+them marks pull requests ready, not the agents doing the work.
 
 ## Comments on issues: other people's issues need approval
 
@@ -221,19 +222,43 @@ while it runs.
   figure indicative. Later runs in a session tend to read slower
   whatever the build, so main first makes that drift count against
   the branch.
+
+  Going ready on the counter alone holds only for a change that removes
+  work and adds none on a hot path: the counter counts each instance of
+  the removed work (a bus call, a read-back, an upload), and nothing new
+  runs per instruction, per memory access, per pixel or per triangle, or
+  on a path that programs the change isn't for go through. A test that
+  decides when to skip the work (a dirty flag, a comparison with what was
+  sent last) is allowed where the removed work used to run, once a call,
+  an upload, a frame or a message: it costs a few instructions against
+  the thousands it saves. A pull request that goes ready this way says
+  why in its description: what the counter counts, and where the change
+  adds code and why that path isn't hot.
+
+  Any other change made for speed (one that moves work to cheaper code,
+  trades one cost for another, or adds a check, a lookup or a larger
+  table on a hot path) still shows its output unchanged by the
+  comparison above, and stays a draft until it is timed: the program it
+  is for and each program its "Regression check" lists, main against
+  the branch on the same machine and scene, with the machine quiet. One
+  run per build per program is enough, main first. A program that reads
+  more than about 2 % slower on the branch gets pairs of runs with the
+  order alternated until the means settle, and the description gives
+  them and their spread. A regression program that stays slower is a
+  regression to explain or fix before the pull request leaves draft.
 - A timing series (several runs per build, the order alternated, the
   spread given) is for claims whose truth is the timing itself: a
   change that does the same work faster with no counter to show it, a
-  change that trades one cost for another, a gain close to the spread
-  of the runs, a change to how `cycles=auto` picks its speed, or a
-  figure the description quotes as a size. Keep even a series short: a
-  fixed window of a minute or so after a fixed warm-up, the builds and
-  states prepared under the shared lock first, and the exclusive lock
-  asked for only when no emulator holds the lock, with `--wait` so a
-  long holder makes the run give up and retry instead of stalling
-  everyone behind it. A waiting exclusive request already keeps new
-  shared jobs out, so without `--wait` a measurement queued behind a
-  long run holds up every build and test that comes after it.
+  gain close to the spread of the runs, a change to how `cycles=auto`
+  picks its speed, or a figure the description quotes as a size. Keep
+  even a series short: a fixed window of a minute or so after a fixed
+  warm-up, the builds and states prepared under the shared lock first,
+  and the exclusive lock asked for only when no emulator holds the
+  lock, with `--wait` so a long holder makes the run give up and retry
+  instead of stalling everyone behind it. A waiting exclusive request
+  already keeps new shared jobs out, so without `--wait` a measurement
+  queued behind a long run holds up every build and test that comes
+  after it.
 - A save state made by main can carry main's state of the thing the
   change moves into the branch's run: a texture's placement in the
   card's memory, for one. Compare from states each build saved itself,
@@ -302,12 +327,13 @@ while it runs.
   from documentation, as one did for #2046 in #2076. Its source and
   output go in the pull request.
 - When the machine is busy (the user says so, or `rust-dos-lock status`
-  shows others' emulators running for long), take no timing
-  measurements. The deterministic evidence above doesn't depend on the
-  host's speed and goes on. For a change that removes work it is
-  enough for step 4, and the indicative figure joins the description
-  once the machine is quiet; a change whose claim is the timing itself
-  stays a draft until its series is run.
+  shows others' emulators running for long), take no timing measurements.
+  The deterministic evidence above doesn't depend on the host's speed and
+  goes on. For a change that removes work and adds none on a hot path
+  it is enough for step 4, and the indicative figure joins the
+  description once the machine is quiet; any other change made for
+  speed stays a draft until its timings are run, and a change whose
+  claim is the timing itself until its series is run.
 
 ## Comparing what two builds draw: deterministic runs
 
