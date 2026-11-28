@@ -40,7 +40,10 @@
 //! timeGetTime read the emulated clock in milliseconds, with no device or
 //! state of their own, so a pass that calls them is the same pass again
 //! until the next millisecond. The passes skipped end before it, and the
-//! loop is proven again from there (`clock_read`).
+//! loop is proven again from there (`clock_read`). A pass that uses the
+//! time it read, or reads QueryPerformanceCounter, whose count moves on
+//! every microsecond, is proven over counts (`count`), which follows the
+//! clock's value through the pass's arithmetic.
 //!
 //! **Where loops come from.** A head is armed at the service trap where the
 //! BIOS keyboard's status call found no key, the built-in Windows's clock
@@ -356,6 +359,11 @@ pub struct Observe {
     failed: Cell<Option<&'static str>>,
     /// The blocks written since the last look.
     chunks: Vec<u32>,
+    /// The kernel objects of the built-in Windows that the services the
+    /// proof followed took or changed (`changes_object`), each with its
+    /// state before the first of them, which every visit of the head has
+    /// to find again.
+    objects: Vec<(u32, Option<crate::win32::object::Kind>)>,
     phase: Phase,
     /// The millisecond the first read of the built-in Windows's clock since
     /// the base found (`clock_read`), up to which its passes read the same.
@@ -456,10 +464,10 @@ pub struct Observe {
     /// The function running set EAX to the value it returns
     /// (`returned`).
     service_returned: bool,
-    /// The function running read the built-in Windows' clock as the value
-    /// it returns (`tick_count`): the milliseconds, the instruction count
-    /// it read them at, and when they move on.
-    service_clock: Option<(u32, u64, u64)>,
+    /// The function running read one of the built-in Windows' clocks as
+    /// the value it returns or into its caller's RAM (`tick_count`,
+    /// `performance_count`).
+    service_clock: Option<count::ClockRead>,
     /// The function running was Win16Return, which loaded the 16-bit
     /// context with DX:AX the value in EAX if true (`resumed16`).
     resumed16: Option<bool>,
@@ -505,6 +513,7 @@ impl Default for Observe {
             peeked: false,
             failed: Cell::new(None),
             chunks: Vec::new(),
+            objects: Vec::new(),
             phase: Phase::Off,
             clock_read: None,
             polls_at: [Poll::default(); POLL_HEADS],
@@ -785,6 +794,7 @@ impl Observe {
         self.on = false;
         self.failed.set(None);
         self.chunks.clear();
+        self.objects.clear();
         self.phase = Phase::Off;
         self.forget_ports();
         self.tainted = false;
@@ -1258,6 +1268,40 @@ pub fn nested<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     value
 }
 
+/// The built-in Windows' service running is about to take or change the
+/// kernel object `id` (a wait that ends at once takes a mutex, an
+/// auto-reset event's signal or a semaphore's count; ReleaseMutex and
+/// SetEvent change it). Its state before the first such change in the
+/// proof is kept, and every later visit of the head has to find it so
+/// (`objects_as_before`): the service may then say it changed nothing
+/// but RAM and registers (`pure_call`), since each pass leaves the object
+/// as it found it, as Zanzarah's frame wait does with a mutex it takes
+/// and releases in every pass (#1240).
+///
+/// That is all a skip has to keep of the object. No other thread runs
+/// during a proof's passes or the passes skipped, which end by the next
+/// timer event, so no other thread sees the object meanwhile; a change
+/// that ends another thread's wait isn't followed. The skip ends at a
+/// visit of the head, where the object is as it was before the passes.
+pub fn changes_object(cpu: &mut Cpu, id: u32) {
+    if !cpu.bus.observe.on || cpu.bus.observe.objects.iter().any(|&(o, _)| o == id) {
+        return;
+    }
+    let kind = cpu.bus.win32.objects.get(id).map(|o| o.kind.clone());
+    cpu.bus.observe.objects.push((id, kind));
+}
+
+/// The kernel objects the proof's services changed are as they were
+/// before the first change (`changes_object`).
+fn objects_as_before(cpu: &Cpu) -> bool {
+    let objects = &cpu.bus.win32.objects;
+    cpu.bus
+        .observe
+        .objects
+        .iter()
+        .all(|(id, kind)| objects.get(*id).map(|o| &o.kind) == kind.as_ref())
+}
+
 /// The service `pure_call` follows started the running thread's turn
 /// over, now.
 pub fn turn_started(cpu: &mut Cpu) {
@@ -1279,22 +1323,71 @@ pub fn tick_count(cpu: &mut Cpu) -> u32 {
     let ms = (micros / 1000) as u32;
     if cpu.bus.observe.on {
         let next = cpu.bus.clock.icount_at_micros((micros / 1000 + 1) * 1000);
-        let o = &mut cpu.bus.observe;
-        let follows = match &o.phase {
-            Phase::Count { head, .. } => {
-                !o.plain_clock.iter().any(|p| p.head == *head && p.left > 0)
-            }
-            _ => false,
-        };
-        if follows && o.nesting == 0 {
-            o.service_clock = Some((ms, cpu.bus.clock.icount, next));
-            pure_call(cpu, None);
-        } else {
-            pure_call(cpu, Some(next));
-        }
-        reads_arguments(cpu);
+        clock_service(cpu, count::Source::Millis, ms as u64, next, None);
     }
     ms
+}
+
+/// The rate of the built-in Windows' performance counter
+/// (QueryPerformanceFrequency): the PIT's, as on Windows 95.
+pub const PERFORMANCE_FREQUENCY: u64 = 1_193_182;
+
+/// The performance counter at `micros` microseconds of the machine's
+/// clock.
+fn performance_ticks(micros: u64) -> u64 {
+    (micros as u128 * PERFORMANCE_FREQUENCY as u128 / 1_000_000) as u64
+}
+
+/// The machine's clock in the performance counter's ticks, as
+/// QueryPerformanceCounter reads it, which writes it to the eight bytes
+/// at the linear address `into`. The service changes nothing but those,
+/// and what it read stays the same until the next microsecond, when the
+/// count moves on. A pass `Phase::Count` records follows the count where
+/// the service writes it, and the passes after it read it anew, as Bink's
+/// timer does in Zanzarah's frame wait (#2252). Before that the passes
+/// hold up to the next microsecond, which the call's own stalls outlast:
+/// no pass skips by it, but the bytes the count moved on lead the proof
+/// to count them (`compare`). A pass that counts and can't follow the
+/// count ends the proof, which a hold would let run on at every chance
+/// without skipping a pass or backing off.
+pub fn performance_count(cpu: &mut Cpu, into: u32) -> u64 {
+    let micros = cpu.bus.clock.now_micros();
+    let ticks = performance_ticks(micros);
+    if cpu.bus.observe.on {
+        let next = cpu.bus.clock.icount_at_micros(micros + 1);
+        clock_service(cpu, count::Source::Performance, ticks, next, Some(into));
+    }
+    ticks
+}
+
+/// The service running read clock `source`, as `value`, which it reads
+/// until the instruction count `next`, into EAX or the eight bytes at
+/// the linear address `into` (`tick_count`, `performance_count`).
+fn clock_service(cpu: &mut Cpu, source: count::Source, value: u64, next: u64, into: Option<u32>) {
+    let o = &mut cpu.bus.observe;
+    let counting = matches!(o.phase, Phase::Count { .. });
+    let follows = match &o.phase {
+        Phase::Count { head, .. } => !o.plain_clock.iter().any(|p| p.head == *head && p.left > 0),
+        _ => false,
+    };
+    if counting && source == count::Source::Performance && !(follows && o.nesting == 0) {
+        // Held to its next microsecond, no pass would skip
+        // (`performance_count`).
+        return;
+    }
+    if follows && o.nesting == 0 {
+        o.service_clock = Some(count::ClockRead {
+            source,
+            value,
+            at: cpu.bus.clock.icount,
+            next,
+            into,
+        });
+        pure_call(cpu, None);
+    } else {
+        pure_call(cpu, Some(next));
+    }
+    reads_arguments(cpu);
 }
 
 /// Win16Return loaded the 16-bit context that called 32-bit code, with
@@ -1562,6 +1655,9 @@ fn visit(cpu: &mut Cpu, now: u64) {
         // A pass read the PIT's count without latching it.
         return o.fail("port read");
     }
+    if !objects_as_before(cpu) {
+        return cpu.bus.observe.fail("object");
+    }
     let mut key = cpu.idle_key();
     if cpu.bus.observe.tainted {
         key.regs.gpr[0] &= !0xFF;
@@ -1599,6 +1695,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
             o.started = now;
             o.failed.set(None);
             o.chunks.clear();
+            o.objects.clear();
             o.forget_ports();
             let until = now + PROOF_LIMIT;
             let Some(shape) = o.shapes.iter().find(|s| s.head == head) else {

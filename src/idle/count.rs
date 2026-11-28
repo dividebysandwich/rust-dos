@@ -18,7 +18,9 @@
 //! - MOV, PUSH and POP copy them, between registers and RAM;
 //! - INC, DEC, ADD and SUB move them on, by a constant or by a value the
 //!   counts don't reach;
-//! - CMP and TEST compare them with such a value, and set flags.
+//! - CMP and TEST compare them with such a value, and set flags;
+//! - ADC, SBB, NEG, NOT, AND, OR, XOR, MUL, DIV, CWD and CDQ work them
+//!   out as the CPU does.
 //!
 //! Anything else that reads a tainted cell ends the proof: a count used
 //! as an address, an argument of a built-in service, or the operand of
@@ -158,7 +160,9 @@ pub(super) fn set_cell(cpu: &mut Cpu, cell: Cell, value: u8) {
 /// upper half there (AH, DX or EDX), and DIV takes the dividend's upper
 /// half from it and leaves the remainder there. ADC and SBB take the carry
 /// the recorded pass had, which the passes after it have too: a count
-/// that set it sets it as it did there (`Model::checks`).
+/// that set it sets it as it did there (`Model::checks`). `Extend` is CWD
+/// and CDQ, which fill DX or EDX (the destination) with the sign of AX or
+/// EAX (the source).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum CountOp {
     Mov,
@@ -175,6 +179,7 @@ enum CountOp {
     Xor,
     Mul,
     Div,
+    Extend,
     Cmp,
     Test,
 }
@@ -233,6 +238,10 @@ impl CountOp {
                 let flags = crate::instructions::arith::division_flags(q, r, bits);
                 Some((Some(q), Some(r), flags))
             }
+            CountOp::Extend => {
+                let sign = src >> (8 * size as u32 - 1) != 0;
+                Some((Some(if sign { m } else { 0 }), None, 0))
+            }
             CountOp::Cmp => Some((None, None, alu::sub(size, dst, src, false).1)),
             CountOp::Test => Some((None, None, alu::logic(size, dst & src))),
         }
@@ -242,7 +251,7 @@ impl CountOp {
     fn sets(self) -> u32 {
         use crate::cpu::alu::{ARITH, CF, OF};
         match self {
-            CountOp::Mov | CountOp::Not => 0,
+            CountOp::Mov | CountOp::Not | CountOp::Extend => 0,
             CountOp::Inc | CountOp::Dec => ARITH & !CF,
             CountOp::Mul => CF | OF,
             _ => ARITH,
@@ -250,7 +259,7 @@ impl CountOp {
     }
 
     fn reads_dst(self) -> bool {
-        self != CountOp::Mov
+        !matches!(self, CountOp::Mov | CountOp::Extend)
     }
 
     fn writes_dst(self) -> bool {
@@ -352,15 +361,54 @@ enum Step {
     Op(Counting),
     /// A value that doesn't come from the counts was written to the cell.
     Kill(Cell),
-    /// The built-in Windows' clock in milliseconds was read into the four
-    /// cells from `cell` (EAX), `offset` instructions after the pass
-    /// started, and was `value`: the passes after it read it at the same
-    /// place in them, each the value the clock has then (`Model::run`).
+    /// One of the built-in Windows' clocks, `source`, was read into the
+    /// `size` cells from `cell` (EAX for the milliseconds, the caller's
+    /// RAM for the performance counter), `offset` instructions after the
+    /// pass started, and was `value`: the passes after it read it at the
+    /// same place in them, each the value the clock has then
+    /// (`Model::run`).
     Clock {
         cell: Cell,
+        size: u8,
+        source: Source,
         offset: u64,
-        value: u32,
+        value: u64,
     },
+}
+
+/// A read of a clock by the service running, which a pass `Phase::Count`
+/// records may follow (`after_service`): the clock, what it read, the
+/// instruction count it read it at and the first one at which it reads
+/// otherwise, and where it goes: EAX, as the value the service returns,
+/// or the eight bytes at the linear address `into`.
+#[derive(Clone, Copy)]
+pub(super) struct ClockRead {
+    pub(super) source: Source,
+    pub(super) value: u64,
+    pub(super) at: u64,
+    pub(super) next: u64,
+    pub(super) into: Option<u32>,
+}
+
+/// A clock of the built-in Windows that a pass may read (`Step::Clock`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Source {
+    /// The milliseconds of GetTickCount and timeGetTime.
+    Millis,
+    /// The ticks of QueryPerformanceCounter (`idle::performance_count`).
+    Performance,
+}
+
+impl Source {
+    /// What the clock reads at instruction count `icount`, as the
+    /// services read it.
+    fn at(self, cpu: &Cpu, icount: u64) -> u64 {
+        let micros = cpu.bus.clock.micros_at(icount);
+        match self {
+            Source::Millis => (micros / 1000) as u32 as u64,
+            Source::Performance => super::performance_ticks(micros),
+        }
+    }
 }
 
 /// The pass `Phase::Count` records.
@@ -537,6 +585,7 @@ fn operation(cpu: &Cpu, instr: &Instruction) -> Option<Operation> {
         (Mnemonic::Neg, 1) => CountOp::Neg,
         (Mnemonic::Not, 1) => CountOp::Not,
         (Mnemonic::Mul, 1) => CountOp::Mul,
+        (Mnemonic::Cwd | Mnemonic::Cdq, 0) => CountOp::Extend,
         (Mnemonic::Div, 1) => CountOp::Div,
         (Mnemonic::Add, 2) => CountOp::Add,
         (Mnemonic::Sub, 2) => CountOp::Sub,
@@ -550,6 +599,18 @@ fn operation(cpu: &Cpu, instr: &Instruction) -> Option<Operation> {
         _ => return None,
     };
     let carry = cpu.get_cpu_flag(crate::cpu::CpuFlags::CF);
+    if op == CountOp::Extend {
+        // DX or EDX, from AX or EAX.
+        let size = if mnemonic == Mnemonic::Cdq { 4 } else { 2 };
+        return Some(Operation {
+            op,
+            size,
+            dst: Place::Reg(reg_cell(2)),
+            src: Place::Reg(reg_cell(0)),
+            hi: None,
+            carry,
+        });
+    }
     if op.has_hi() {
         // AL, AX or EAX by the operand's size, and the upper half in AH,
         // DX or EDX.
@@ -992,6 +1053,8 @@ enum Run {
     Kill(usize),
     Clock {
         slot: usize,
+        size: u8,
+        source: Source,
         offset: u64,
     },
 }
@@ -1028,6 +1091,13 @@ fn read_operand(state: &State, (slot, fixed): (Option<usize>, u32), size: u8) ->
 /// Writes `value`'s `size` bytes into `state` from `slot`, where both are
 /// there.
 fn write_value(state: &mut State, slot: Option<usize>, value: Option<u32>, size: u8) {
+    if let Some(value) = value {
+        write_wide(state, slot, Some(value as u64), size);
+    }
+}
+
+/// `write_value` of up to eight bytes, as a clock's.
+fn write_wide(state: &mut State, slot: Option<usize>, value: Option<u64>, size: u8) {
     if let (Some(value), Some(slot)) = (value, slot) {
         for i in 0..size as usize {
             state[slot + i] = Some((value >> (8 * i)) as u8);
@@ -1046,7 +1116,7 @@ impl Model {
                     }
                 }
                 Step::Kill(cell) => cells.push(*cell),
-                Step::Clock { cell, .. } => cells.extend(*cell..cell + 4),
+                Step::Clock { cell, size, .. } => cells.extend(*cell..cell + *size as Cell),
             }
         }
         cells.sort_unstable();
@@ -1065,8 +1135,16 @@ impl Model {
                     carry: c.carry,
                 },
                 Step::Kill(cell) => Run::Kill(slot(*cell)),
-                &Step::Clock { cell, offset, .. } => Run::Clock {
+                &Step::Clock {
+                    cell,
+                    size,
+                    source,
+                    offset,
+                    ..
+                } => Run::Clock {
                     slot: slot(cell),
+                    size,
+                    source,
                     offset,
                 },
             })
@@ -1080,11 +1158,11 @@ impl Model {
         }
     }
 
-    /// Where the pass reads the built-in Windows' clock: the instructions
-    /// from its start.
-    fn clock_offsets(&self) -> impl Iterator<Item = u64> + '_ {
+    /// Where the pass reads the built-in Windows' clocks: which, and the
+    /// instructions from its start.
+    fn clock_reads(&self) -> impl Iterator<Item = (Source, u64)> + '_ {
         self.runs.iter().filter_map(|run| match *run {
-            Run::Clock { offset, .. } => Some(offset),
+            Run::Clock { source, offset, .. } => Some((source, offset)),
             _ => None,
         })
     }
@@ -1098,25 +1176,28 @@ impl Model {
         state
     }
 
-    /// Run the pass on `state`, with `clock(offset)` the milliseconds the
-    /// built-in Windows' clock has `offset` instructions after the pass
-    /// started, calling `each` with every operation's index, the
+    /// Run the pass on `state`, with `clock(source, offset)` what the
+    /// built-in Windows' clock `source` reads `offset` instructions after
+    /// the pass started, calling `each` with every operation's index, the
     /// destination's, source's and `hi`'s values it found and the flags it
     /// set; stops where `each` returns false, or where an operation raises
     /// an exception. Whether it ran to the end.
     fn run(
         &self,
         state: &mut State,
-        clock: impl Fn(u64) -> u32,
+        clock: impl Fn(Source, u64) -> u64,
         mut each: impl FnMut(usize, [u32; 3], u32) -> bool,
     ) -> bool {
         let mut index = 0;
         for run in &self.runs {
             match *run {
                 Run::Kill(s) => state[s] = None,
-                Run::Clock { slot, offset } => {
-                    write_value(state, Some(slot), Some(clock(offset)), 4)
-                }
+                Run::Clock {
+                    slot,
+                    size,
+                    source,
+                    offset,
+                } => write_wide(state, Some(slot), Some(clock(source, offset)), size),
                 Run::Op {
                     op,
                     size,
@@ -1220,9 +1301,14 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
         .collect();
     // The clock as the pass read it, which the model reads from the
     // emulated clock at the same places.
-    let clock = |offset: u64| clock_at(cpu, base.icount + offset);
+    let clock = |source: Source, offset: u64| source.at(cpu, base.icount + offset);
     let clocked = pass.steps.iter().all(|s| match *s {
-        Step::Clock { offset, value, .. } => clock(offset) == value,
+        Step::Clock {
+            source,
+            offset,
+            value,
+            ..
+        } => clock(source, offset) == value,
         _ => true,
     });
     let mask = |size: u8| crate::cpu::alu::size_mask(size);
@@ -1322,12 +1408,6 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
     );
 }
 
-/// The milliseconds the built-in Windows' clock reads at instruction count
-/// `icount`, as `idle::tick_count` reads them.
-fn clock_at(cpu: &Cpu, icount: u64) -> u32 {
-    (cpu.bus.clock.micros_at(icount) / 1000) as u32
-}
-
 /// What `counted_passes` found.
 pub(super) struct Counted {
     /// The passes that run as the recorded one.
@@ -1353,19 +1433,19 @@ pub(super) fn counted_passes(
     period: u64,
 ) -> Counted {
     let state = model.seeded(|c| value_now(cpu, c));
-    passes_from(model, state, most, |pass, offset| {
-        clock_at(cpu, from + pass * period + offset)
+    passes_from(model, state, most, |pass, source, offset| {
+        source.at(cpu, from + pass * period + offset)
     })
 }
 
-/// `counted_passes` from the counts in `state`, where `clock(p, offset)` is
-/// what pass `p` reads of the clock `offset` instructions from its start,
-/// which never goes back as `p` goes on.
+/// `counted_passes` from the counts in `state`, where `clock(p, source,
+/// offset)` is what pass `p` reads of the clock `source` `offset`
+/// instructions from its start, which never goes back as `p` goes on.
 fn passes_from(
     model: &Model,
     mut state: State,
     most: u64,
-    clock: impl Fn(u64, u64) -> u32,
+    clock: impl Fn(u64, Source, u64) -> u64,
 ) -> Counted {
     let mut done = state.clone();
     let mut passes = 0;
@@ -1378,13 +1458,18 @@ fn passes_from(
     // A try that skips gives them all back.
     let mut tries = DRIFT_TRIES;
     // What pass `p` reads of the clock, at each place it reads it.
-    let reads = |p: u64| -> Vec<u32> { model.clock_offsets().map(|o| clock(p, o)).collect() };
+    let reads = |p: u64| -> Vec<u64> {
+        model
+            .clock_reads()
+            .map(|(source, offset)| clock(p, source, offset))
+            .collect()
+    };
     while passes < most {
         let ran = passes;
-        let clock = |offset: u64| clock(ran, offset);
+        let clock = |source: Source, offset: u64| clock(ran, source, offset);
         let mut left = head_flags;
         modelled += 1;
-        let same = model.run(&mut state, &clock, |i, _, flags| {
+        let same = model.run(&mut state, clock, |i, _, flags| {
             let (live, seen, out) = model.checks[i];
             left = (left.0 | out, left.1 & !out | flags & out);
             flags & live == seen
@@ -1406,6 +1491,13 @@ fn passes_from(
             continue;
         }
         let this = reads(ran);
+        // Fewer than two read what it read, as in every pass that reads
+        // the performance counter, whose count moves on within the call:
+        // no search.
+        if reads(ran + 2) != this {
+            done.clone_from(&state);
+            continue;
+        }
         let mut same = rest;
         if reads(ran + same) != this {
             let mut differ = same;
@@ -1426,7 +1518,7 @@ fn passes_from(
             // they leave, as it runs any other: the flags the passes leave
             // the head are those of the last, which `Drift::of` doesn't
             // hold to stay the same.
-            match drift::Drift::of(model, &done, &state, &clock) {
+            match drift::Drift::of(model, &done, &state, clock) {
                 Some(drift) if drift.bound >= 2 => {
                     let skip = drift.bound.min(same) - 1;
                     state = drift.after(&state, skip);
@@ -1471,11 +1563,14 @@ pub(super) fn registers_read(cpu: &mut Cpu) {
 /// of the free stack below its caller's top.
 ///
 /// The built-in Windows' clock read by a function that returns it
-/// (`idle::tick_count`) becomes a count in EAX, which the passes after it
-/// read anew (`Step::Clock`). A Win16 stub that called 32-bit code may
-/// leave no count in a register: the registers 16-bit code goes on with
-/// are those it had there, but for DX:AX, which Win16Return sets
-/// (`idle::resumed16`), from a count in EAX where it holds one.
+/// (`idle::tick_count`) becomes a count in EAX, and the performance
+/// counter QueryPerformanceCounter writes to its caller's RAM
+/// (`idle::performance_count`) counts in those eight bytes; the passes
+/// after it read them anew (`Step::Clock`). A Win16 stub that called
+/// 32-bit code may leave no count in a register: the registers 16-bit
+/// code goes on with are those it had there, but for DX:AX, which
+/// Win16Return sets (`idle::resumed16`), from a count in EAX where it
+/// holds one.
 pub(super) fn after_service(cpu: &mut Cpu) {
     // A count in EAX is gone where the function returned a value there,
     // and may be anything where it didn't.
@@ -1485,9 +1580,13 @@ pub(super) fn after_service(cpu: &mut Cpu) {
     let dx = reg_cell(2)..reg_cell(2) + 2;
     let returns = |c: &Cell| (eax.start..eax.start + 2).contains(c) || dx.contains(c);
     let value = cpu.eax();
+    let clock = cpu.bus.observe.service_clock.take();
+    // Where a clock read into the caller's RAM went, if one run of it.
+    let into = clock
+        .and_then(|c| c.into)
+        .and_then(|lin| ram_at(cpu, lin, 8, true));
     let o = &mut cpu.bus.observe;
     let returned = o.service_returned;
-    let clock = o.service_clock.take();
     let resumed = o.resumed16.take();
     let regs = o.service_regs;
     let Phase::Count { pass, base, .. } = &mut o.phase else {
@@ -1495,20 +1594,39 @@ pub(super) fn after_service(cpu: &mut Cpu) {
     };
     let base = base.icount;
     let stub16 = pass.stub16;
+    // A clock read into EAX or into the caller's RAM, which the passes
+    // after it read anew.
+    let mut in_eax = false;
     let mut clocked = false;
     let mut moved = false;
-    match clock {
-        Some((ms, at, _)) if returned && value == ms => {
-            pass.steps.push(Step::Clock {
-                cell: eax.start,
-                offset: at - base,
-                value,
-            });
-            pass.tainted.extend(eax.clone());
-            clocked = true;
+    if let Some(c) = clock {
+        let step = |cell: Cell, size: u8| Step::Clock {
+            cell,
+            size,
+            source: c.source,
+            offset: c.at - base,
+            value: c.value,
+        };
+        match (c.into, into) {
+            (None, _) if returned && value as u64 == c.value => {
+                pass.steps.push(step(eax.start, 4));
+                pass.tainted.extend(eax.clone());
+                in_eax = true;
+                clocked = true;
+            }
+            (Some(_), Some(Place::Ram(at))) => {
+                // The service wrote the bytes, which settle as an
+                // instruction's writes do (`settle`).
+                let at = at as Cell;
+                pass.steps.push(step(at, 8));
+                pass.deferred.extend(at..at + 8);
+                clocked = true;
+            }
+            _ => {}
         }
-        _ if returned => pass.kill(eax.clone()),
-        _ => {}
+    }
+    if returned && !in_eax {
+        pass.kill(eax.clone());
     }
     if let Some(as_is) = resumed {
         if pass.any(&eax) {
@@ -1556,7 +1674,10 @@ pub(super) fn after_service(cpu: &mut Cpu) {
     // anything in AX, BX, CX and DX.
     let thunked = stub16 && !crate::win16::in_16bit_code(cpu);
     let o = &mut cpu.bus.observe;
-    o.clock_modelled |= clocked;
+    // `idle::clock_read` takes this after GetTickCount and timeGetTime
+    // alone: a read of the performance counter would leave it for the
+    // next of them.
+    o.clock_modelled |= in_eax;
     let Phase::Count { pass, .. } = &mut o.phase else {
         return;
     };
@@ -1579,7 +1700,7 @@ pub(super) fn after_service(cpu: &mut Cpu) {
                 pass.any(&cells) && cpu.reg(GPR32[i]) != o.service_regs[i]
             })
     } else {
-        !clocked && pass.any(&eax)
+        !in_eax && pass.any(&eax)
             || (3..8).any(|i| {
                 let cells = reg_cell(i)..reg_cell(i) + 4;
                 pass.any(&cells) && cpu.reg(GPR32[i]) != o.service_regs[i]
@@ -1597,12 +1718,18 @@ pub(super) fn after_service(cpu: &mut Cpu) {
             pass.kill(cells);
         }
     }
-    if clock.is_some() && !clocked {
-        // A read of the clock the passes can't follow: they hold up to its
-        // next millisecond.
-        let next = clock.map_or(0, |(_, _, next)| next);
+    if let Some(c) = clock
+        && !clocked
+    {
         let o = &mut cpu.bus.observe;
-        o.holds_until = Some(o.holds_until.map_or(next, |h| h.min(next)));
+        if c.source == Source::Performance {
+            // Its bytes aren't one run of RAM. Held to its next
+            // microsecond, no pass would skip (`idle::performance_count`).
+            return o.opaque();
+        }
+        // A read of the clock the passes can't follow: they hold up to
+        // when it reads otherwise.
+        o.holds_until = Some(o.holds_until.map_or(c.next, |h| h.min(c.next)));
     }
     let o = &cpu.bus.observe;
     let Phase::Count { pass, .. } = &o.phase else {

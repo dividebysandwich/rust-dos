@@ -39,6 +39,7 @@ const DISPATCH_MESSAGE: u16 = 114;
 const GLOBAL_ALLOC: u16 = 15;
 const GLOBAL_LOCK: u16 = 18;
 const YIELD: u16 = 29;
+const GET_MODULE_USAGE: u16 = 48;
 const WIN_EXEC: u16 = 166;
 
 /// Window styles.
@@ -1375,25 +1376,28 @@ fn exit_windows_exec_runs_the_dos_program_after_windows() {
     let params = code.here();
     code.emit(b"/X\0");
     code.patch(params_at, params);
-    let dos = [
-        0x81, 0x3E, 0x82, 0x00, 0x2F, 0x58, // cmp word [82h],"/X"
-        0xB8, 0x5A, 0x4C, // mov ax,4C5Ah
-        0x74, 0x02, // je +2
-        0xB0, 0x5B, // mov al,5Bh
-        0xCD, 0x21, // int 21h
-    ];
     let (exit, log) = run_with_prompts("exit_windows_exec", program(&code, CODE), 2, |_, dir| {
-        std::fs::write(dir.join("D.COM"), dos).unwrap();
+        std::fs::write(dir.join("D.COM"), D_COM).unwrap();
     });
     assert_eq!(exit, 0x5A, "{log}");
 }
 
-#[test]
-fn exit_windows_exec_runs_nothing_when_a_window_refuses() {
-    // The program's window refuses WM_QUERYENDSESSION, so
-    // ExitWindowsExec("C:\D.COM", "") returns FALSE: exit code 7. 9 is a
-    // call that returned TRUE, 2 and 3 calls that failed before. The
-    // command line must not be left to run at the prompt.
+/// The DOS program ExitWindowsExec runs in these tests, C:\D.COM: it
+/// ends with 5Ah when its command line is "/X", else with 5Bh.
+const D_COM: [u8; 15] = [
+    0x81, 0x3E, 0x82, 0x00, 0x2F, 0x58, // cmp word [82h],"/X"
+    0xB8, 0x5A, 0x4C, // mov ax,4C5Ah
+    0x74, 0x02, // je +2
+    0xB0, 0x5B, // mov al,5Bh
+    0xCD, 0x21, // int 21h
+];
+
+/// A program whose top-level window, of the class NOEND, refuses
+/// WM_QUERYENDSESSION when its lParam is 0, as Windows 3.1's and
+/// Windows 98's are for a 16-bit ExitWindows. It ends with 2 or 3 when
+/// the class or the window can't be made. The code goes on after the
+/// window is made.
+fn refusing_window() -> Program {
     const WM_QUERYENDSESSION: u8 = 0x11;
     const WC: u8 = 0x20;
     let mut p = Program::default();
@@ -1426,21 +1430,18 @@ fn exit_windows_exec_runs_nothing_when_a_window_refuses() {
         .call("USER", CREATE_WINDOW)
         .emit(&[0x0B, 0xC0, 0x75, 0x06])
         .emit(&[0xB0, 3, 0xB4, 0x4C, 0xCD, 0x21]);
-    p.push_string(b"C:\\D.COM\0");
-    p.push_string(b"\0");
-    p.code
-        .call("USER", EXIT_WINDOWS_EXEC)
-        .emit(&[0x0B, 0xC0, 0x74, 0x04]) // or ax,ax; jz refused
-        .emit(&[0xB0, 0x09, 0xEB, 0x02]) // mov al,9; jmp done
-        .emit(&[0xB0, 0x07]) // refused: mov al,7
-        .exit_al();
-    // The window procedure: 0 for WM_QUERYENDSESSION, DefWindowProc's
-    // answer for the rest.
+    let go_on = p.code.here() + 1;
+    p.code.emit(&[0xE9, 0x00, 0x00]); // jmp over the procedure
+    // The window procedure: 0 for WM_QUERYENDSESSION with lParam 0,
+    // DefWindowProc's answer for the rest.
     let proc = p.code.here();
     p.code
         .emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
         .emit(&[0x83, 0x7E, 0x0C, WM_QUERYENDSESSION]) // cmp word [bp+0Ch],11h
-        .emit(&[0x75, 0x08]) // jne default
+        .emit(&[0x75, 0x10]) // jne default
+        .emit(&[0x8B, 0x46, 0x06]) // mov ax,[bp+6]
+        .emit(&[0x0B, 0x46, 0x08]) // or ax,[bp+8]
+        .emit(&[0x75, 0x08]) // jnz default
         .emit(&[0x31, 0xC0, 0x31, 0xD2]) // xor ax,ax; xor dx,dx
         .emit(&[0x5D, 0xCA, 0x0A, 0x00]) // pop bp; retf 0Ah
         .emit(&[
@@ -1456,9 +1457,108 @@ fn exit_windows_exec_runs_nothing_when_a_window_refuses() {
     let name = p.code.here();
     p.code.emit(b"NOEND\0");
     p.code.patch(name_at, name);
-    let (exit, log) = run("exit_windows_exec_refused", p.build());
-    assert_eq!(exit, 7, "{log}");
+    let here = p.code.here();
+    p.code.patch(go_on, here.wrapping_sub(go_on + 2));
+    p
+}
+
+#[test]
+fn exit_windows_exec_does_not_ask_the_calling_tasks_windows() {
+    // Windows 98 leaves the calling task's windows out of a 16-bit
+    // ExitWindows: a probe whose own window refuses WM_QUERYENDSESSION
+    // calls ExitWindows(0, 0) on Windows 98 SE, and its window gets no
+    // message while Windows shuts down (#1542). Microsoft Test's frame
+    // refuses while its script runs, and Microsoft Setup's scripts call
+    // ExitWindowsExec from that script to restart Windows.
+    //
+    // T.EXE's own window refuses, and ExitWindowsExec("C:\D.COM", "/X")
+    // ends Windows all the same: D.COM runs and ends with 5Ah. 7 is a
+    // call that returned FALSE, 9 one that returned TRUE.
+    let mut p = refusing_window();
+    p.push_string(b"C:\\D.COM\0");
+    p.push_string(b"/X\0");
+    p.code
+        .call("USER", EXIT_WINDOWS_EXEC)
+        .emit(&[0x0B, 0xC0, 0x74, 0x04]) // or ax,ax; jz refused
+        .emit(&[0xB0, 0x09, 0xEB, 0x02]) // mov al,9; jmp done
+        .emit(&[0xB0, 0x07]) // refused: mov al,7
+        .exit_al();
+    let (exit, log) = run_with_prompts("exit_windows_exec_own", p.build(), 2, |_, dir| {
+        std::fs::write(dir.join("D.COM"), D_COM).unwrap();
+    });
+    assert_eq!(exit, 0x5A, "{log}");
+}
+
+/// T.EXE: the window of `refusing_window`, then it starts C:\X.EXE and
+/// yields until X has ended, and ends with 20h (4 when X didn't start).
+fn refusing_task() -> Vec<u8> {
+    const X: u8 = 0x50;
+    let mut p = refusing_window();
+    p.push_string(b"C:\\X.EXE\0");
+    p.code
+        .push(1)
+        .call("KERNEL", WIN_EXEC)
+        .emit(&[0x3D, 0x20, 0x00, 0x73, 0x06]) // cmp ax,20h; jae started
+        .emit(&[0xB0, 0x04, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0xA3, X, 0x00]); // started: mov [X],ax
+    let wait = p.code.here();
+    p.code
+        .call("KERNEL", YIELD)
+        .emit(&[0xFF, 0x36, X, 0x00]) // push word [X]
+        .call("KERNEL", GET_MODULE_USAGE)
+        .emit(&[0x0B, 0xC0]); // or ax,ax
+    let back = wait.wrapping_sub(p.code.here() + 2) as u8;
+    p.code.emit(&[0x75, back]); // jnz wait
+    p.code.emit(&[0xB0, 0x20]).exit_al();
+    p.build()
+}
+
+/// X.EXE: `call` pushes its arguments and calls ExitWindows or
+/// ExitWindowsExec; X ends with 7 when the call returned FALSE, 9 when
+/// it returned TRUE.
+fn ending_task(call: impl FnOnce(&mut Program)) -> Vec<u8> {
+    let mut p = Program::default();
+    call(&mut p);
+    p.code
+        .emit(&[0x0B, 0xC0, 0x74, 0x04]) // or ax,ax; jz refused
+        .emit(&[0xB0, 0x09, 0xEB, 0x02]) // mov al,9; jmp done
+        .emit(&[0xB0, 0x07]) // refused: mov al,7
+        .exit_al();
+    p.build_named("X")
+}
+
+#[test]
+fn exit_windows_exec_runs_nothing_when_another_tasks_window_refuses() {
+    // T.EXE's window refuses WM_QUERYENDSESSION, so X.EXE's
+    // ExitWindowsExec("C:\D.COM", "/X") returns FALSE and X ends with 7.
+    // The command line must not be left to run at the prompt.
+    let x = ending_task(|p| {
+        p.push_string(b"C:\\D.COM\0");
+        p.push_string(b"/X\0");
+        p.code.call("USER", EXIT_WINDOWS_EXEC);
+    });
+    let (exit, log) = run_with("exit_windows_exec_refused", refusing_task(), |_, dir| {
+        std::fs::write(dir.join("X.EXE"), x).unwrap();
+        std::fs::write(dir.join("D.COM"), D_COM).unwrap();
+    });
+    assert_eq!(exit, 0x20, "{log}");
+    assert!(ended_with(&log, 7), "{log}");
     assert!(!log.contains("ExitWindowsExec: DOS runs"), "{log}");
+}
+
+#[test]
+fn exit_windows_asks_another_tasks_window_with_lparam_0() {
+    // ExitWindows(0, 0) from a 16-bit task asks the other tasks' windows
+    // with lParam 0, as Windows 98 SE does (#1542's probe): T.EXE's
+    // window refuses only then, and X.EXE's call returns FALSE.
+    let x = ending_task(|p| {
+        p.code.push(0).push(0).push(0).call("USER", EXIT_WINDOWS);
+    });
+    let (exit, log) = run_with("exit_windows_refused", refusing_task(), |_, dir| {
+        std::fs::write(dir.join("X.EXE"), x).unwrap();
+    });
+    assert_eq!(exit, 0x20, "{log}");
+    assert!(ended_with(&log, 7), "{log}");
 }
 
 #[test]

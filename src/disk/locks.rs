@@ -181,7 +181,7 @@ impl DiskController {
         let count = if write {
             if count == 0 { 0xFFFF } else { count }
         } else {
-            let size = self.sft_entry(sft).map_or(0, |e| e.size);
+            let size = self.file_size(sft).unwrap_or(0);
             count.min(size.saturating_sub(at))
         };
         let Some(len) = count.checked_sub(1) else {

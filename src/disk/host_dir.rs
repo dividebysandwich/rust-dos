@@ -20,9 +20,14 @@ use web_time::Instant;
 /// installer copying into a folder keeps its time recent for minutes, and
 /// polls for each file before it writes it: Fields of Fire's setup looked
 /// up 2,000 missing names a second in a folder of 500 files, each of them
-/// read and sorted three times. Folders that only a backend reaches (the
-/// libretro frontend's, a write overlay's layer) aren't kept: their times
-/// aren't known.
+/// read and sorted three times. A write overlay's folder (a layer, which
+/// game profiles mount their drives through) has the later time of its
+/// folders above and below (`hostfs::folder_time`), and is kept the same
+/// way: read afresh, each of MechCommander's opens during a mission's load
+/// took 1.5 to 3.7 ms reading the six folders on its path, several hundred
+/// of them in a few seconds, which held single host frames for up to
+/// 150 ms (#1359). Folders that only the libretro frontend's backend
+/// reaches aren't kept: their times aren't known.
 ///
 /// Checking a folder's time costs a stat, and a path names several
 /// folders, so a folder whose time was checked less than `TRUST` ago is
@@ -245,9 +250,11 @@ impl HostDirCache {
     }
 
     /// The guest created, wrote, deleted or renamed something on a host
-    /// drive: every folder is read again.
+    /// drive: every folder is read again, and the lengths open host files
+    /// keep are asked of the host again (`HostFile::len`).
     pub(super) fn changed(&self) {
         self.changes.set(self.changes.get().wrapping_add(1));
+        host_file_written();
     }
 
     /// Host folders changed outside the guest's file calls (a state was
@@ -384,14 +391,11 @@ impl HostDirCache {
     }
 
     /// What the modification time of the host folder `dir` says about
-    /// keeping what was read of it: whether it is a folder `std::fs`
-    /// reaches, and its time if that is `RECENT` or more in the past.
+    /// keeping what was read of it: whether it is a folder with a time
+    /// (`hostfs::folder_time`), and that time if it is `RECENT` or more in
+    /// the past.
     fn settled(dir: &Path) -> Settled {
-        if hostfs::has_scheme(dir) {
-            return Settled::Unknown;
-        }
-        let meta = hostfs::metadata(dir).ok().filter(|m| m.is_dir);
-        let Some(at) = meta.and_then(|m| m.modified) else {
+        let Some(at) = hostfs::folder_time(dir) else {
             return Settled::Unknown;
         };
         if at.elapsed().is_ok_and(|age| age >= Self::RECENT) {

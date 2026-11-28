@@ -352,7 +352,8 @@ fn load_thunk(ops: &mut Asm) {
 }
 
 /// What the bus does for a write of `s` bytes into the VESA frame
-/// buffer out of the picture shown (`Bus::write_lfb`, `write_to_lfb`),
+/// buffer out of the picture shown (`Bus::write_lfb`, `write_to_lfb`), or
+/// into a Banshee's desktop shown (`Bus::note_banshee_memory_write`),
 /// where it only counts: the bytes of a burst for `cycles=auto`, as the
 /// VGA's in `store_thunk` (a write that starts a burst goes to the bus),
 /// on a page of the picture `cycles=auto` knows also as that picture's,
@@ -406,7 +407,8 @@ fn card_count(ops: &mut Asm, s: i32) {
         ; mov BYTE [rax], 1
         ; noted:
         // Bytes of the picture `cycles=auto` knows: their count, and the
-        // lowest offset and the one past the highest of the burst's.
+        // lowest offset and the one past the highest of the burst's, from
+        // the offset its counts start at (`JitCtx::card_origin`).
         ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
         ; mov eax, r8d
         ; shr eax, 12
@@ -414,6 +416,7 @@ fn card_count(ops: &mut Asm, s: i32) {
         ; jz >unshown
         ; add QWORD [rbx + layout::SHOWN_BYTES as i32], s
         ; mov r9d, r8d
+        ; sub r9d, DWORD [r12 + CTX_CARD_ORIGIN]
         ; cmp r9, QWORD [rbx + layout::LOW as i32]
         ; jae >low
         ; mov QWORD [rbx + layout::LOW as i32], r9
@@ -1369,7 +1372,14 @@ fn uop_gprs(u: &Uop) -> u8 {
     match *u {
         Uop::Get { r, .. } | Uop::Set { r, .. } => bit(r),
         Uop::Ea { base, index, .. } => base.map_or(0, bit) | index.map_or(0, bit),
-        Uop::ShiftVar { count, .. } | Uop::DoubleShiftVar { count, .. } => bit(count),
+        Uop::ShiftVar {
+            count: Count::Reg(count),
+            ..
+        }
+        | Uop::DoubleShiftVar {
+            count: Count::Reg(count),
+            ..
+        } => bit(count),
         Uop::MulWide { size, .. } | Uop::DivWide { size, .. } => {
             if size == 1 {
                 1
@@ -4966,12 +4976,19 @@ impl Gen<'_> {
         }
     }
 
-    /// The count of a shift by register `count` (CL) & 31 into ECX, and on
-    /// to the instruction's end if it is 0: nothing changes then. The
-    /// guest's flags are in EBP both ways if the shift's are live.
-    fn var_count(&mut self, count: Gpr, set: u32) {
+    /// The count of a shift by `count` (CL, or a byte of RAM) & 31 into
+    /// ECX, and on to the instruction's end if it is 0: nothing changes
+    /// then. The guest's flags are in EBP both ways if the shift's are
+    /// live.
+    fn var_count(&mut self, count: Count, set: u32) {
         let end = self.end();
-        self.get_into(RCX, count);
+        match count {
+            Count::Reg(g) => self.get_into(RCX, g),
+            Count::Code(phys) => {
+                dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [r13 + phys as i32])
+            }
+            Count::Const(c) => dynasm!(self.ops ; .arch x64 ; mov ecx, c as i32),
+        }
         if self.wanted(set) && !self.dirty {
             dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
             self.dirty = true;

@@ -26,6 +26,21 @@ pub struct Gpr {
     pub size: u8,
 }
 
+/// Where a shift by a variable count (`Uop::ShiftVar`, and
+/// `Uop::DoubleShiftVar`, which only takes CL) reads it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Count {
+    /// A register: CL.
+    Reg(Gpr),
+    /// An immediate count of 0 of a dword's shift, which changes nothing
+    /// (`translate::shift`).
+    Const(u8),
+    /// The byte of RAM at a physical address: the count of a shift by an
+    /// immediate, which the program changes (see
+    /// `translate::live_immediate`).
+    Code(u32),
+}
+
 impl Gpr {
     pub const fn dword(index: u8) -> Gpr {
         Gpr { index, high: false, size: 4 }
@@ -400,14 +415,12 @@ pub enum Uop {
     /// SHLD (`left`) or SHRD of `dst` by a count of 1 to size * 8 - 1,
     /// filling in from `src`.
     DoubleShift { left: bool, size: u8, dst: T, src: T, count: u8 },
-    /// Shift or rotate by register `count` (CL) & 31: if that is 0, nothing
-    /// changes and the instruction ends here, without the operations after
-    /// this one. For bytes and words, a `Bail` has made it less than the
-    /// width.
-    ShiftVar { op: ShiftOp, size: u8, t: T, count: Gpr },
-    /// SHLD or SHRD by register `count` & 31, as `ShiftVar` and
-    /// `DoubleShift`.
-    DoubleShiftVar { left: bool, size: u8, dst: T, src: T, count: Gpr },
+    /// Shift or rotate by `count` & 31: if that is 0, nothing changes and
+    /// the instruction ends here, without the operations after this one.
+    /// For bytes and words, a `Bail` has made it less than the width.
+    ShiftVar { op: ShiftOp, size: u8, t: T, count: Count },
+    /// SHLD or SHRD by `count` & 31, as `ShiftVar` and `DoubleShift`.
+    DoubleShiftVar { left: bool, size: u8, dst: T, src: T, count: Count },
     /// If t & `mask` isn't 0, the instruction's handler runs it instead of
     /// the operations after this one (a case they don't cover). Nothing
     /// before it may change anything, or fault.

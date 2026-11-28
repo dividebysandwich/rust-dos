@@ -26,13 +26,13 @@ use super::com::{self, CLASS_E_NOAGGREGATION, Guid};
 use super::{
     DD_OK, DDERR_CANNOTATTACHSURFACE, DDERR_CANNOTDETACHSURFACE, DDERR_CANTCREATEDC,
     DDERR_CANTDUPLICATE, DDERR_DCALREADYCREATED, DDERR_INVALIDCAPS, DDERR_INVALIDOBJECT,
-    DDERR_INVALIDPARAMS, DDERR_INVALIDPIXELFORMAT, DDERR_INVALIDRECT, DDERR_MOREDATA,
-    DDERR_NOCLIPPERATTACHED, DDERR_NOCOLORKEY, DDERR_NOCOOPERATIVELEVELSET, DDERR_NODC,
-    DDERR_NOEXCLUSIVEMODE, DDERR_NOOVERLAYHW, DDERR_NOPALETTEATTACHED, DDERR_NOTAOVERLAYSURFACE,
-    DDERR_NOTEXTUREHW, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
-    DDERR_PRIMARYSURFACEALREADYEXISTS, DDERR_SURFACEALREADYATTACHED, DDERR_SURFACEBUSY,
-    DDERR_SURFACELOST, DDERR_WRONGMODE, Format, Object, V_SURFACE1, V_SURFACE4, V_SURFACE7,
-    display, palette, state, voodoo,
+    DDERR_INVALIDPARAMS, DDERR_INVALIDPIXELFORMAT, DDERR_INVALIDRECT, DDERR_INVALIDSURFACETYPE,
+    DDERR_MOREDATA, DDERR_NOCLIPPERATTACHED, DDERR_NOCOLORKEY, DDERR_NOCOOPERATIVELEVELSET,
+    DDERR_NODC, DDERR_NOEXCLUSIVEMODE, DDERR_NOOVERLAYHW, DDERR_NOPALETTEATTACHED,
+    DDERR_NOTAOVERLAYSURFACE, DDERR_NOTEXTUREHW, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
+    DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY, DDERR_PRIMARYSURFACEALREADYEXISTS,
+    DDERR_SURFACEALREADYATTACHED, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_WRONGMODE, Format,
+    Object, V_SURFACE1, V_SURFACE4, V_SURFACE7, display, palette, state, voodoo,
 };
 use crate::cpu::Cpu;
 use crate::video::dxt;
@@ -2364,9 +2364,15 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             changed(cpu, m);
         }
     }
-    let memory: Vec<(u32, u32)> = order
+    // A buffer's memory goes round with its layout and with whether
+    // DirectDraw frees it: SetSurfaceDesc may have given one buffer the
+    // program's memory, which the buffer that takes it mustn't free.
+    let memory: Vec<(u32, u32, u32, bool)> = order
         .iter()
-        .filter_map(|&m| state(cpu).surface(m).map(|s| (s.memory, s.bits)))
+        .filter_map(|&m| {
+            let s = state(cpu).surface(m)?;
+            Some((s.memory, s.bits, s.pitch, s.owns_bits))
+        })
         .collect();
     let first = if copies {
         copy_flip(cpu, id, order[1]);
@@ -2376,10 +2382,12 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let (ring, memory) = (&order[first..], &memory[first..]);
     for (i, &m) in ring.iter().enumerate() {
-        let (memory, bits) = memory[(i + 1) % ring.len()];
+        let (memory, bits, pitch, owns_bits) = memory[(i + 1) % ring.len()];
         if let Some(s) = surface(cpu, m) {
             s.memory = memory;
             s.bits = bits;
+            s.pitch = pitch;
+            s.owns_bits = owns_bits;
         }
     }
     for &m in &order {
@@ -2893,13 +2901,20 @@ pub fn set_surface_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
+    // Only a system memory surface takes the program's memory: not one
+    // in video memory, the primary surface or a managed texture, whatever
+    // the description asks, as Wine's `test_set_surface_desc` finds on
+    // Windows.
+    if s.memory != MEM_SYSTEM || s.is_primary() || managed(cpu, id) {
+        return Some(DDERR_INVALIDSURFACETYPE);
+    }
     let allowed =
         DDSD_LPSURFACE | DDSD_PITCH | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_CAPS;
     if desc.flags & !allowed != 0 || desc.flags & DDSD_LPSURFACE == 0 || desc.surface == 0 {
         return Some(DDERR_INVALIDPARAMS);
     }
-    if s.memory != MEM_SYSTEM || s.root != 0 || !s.children.is_empty() {
-        return Some(DDERR_INVALIDPARAMS);
+    if desc.flags & DDSD_CAPS != 0 && desc.caps[0] != 0 {
+        return Some(DDERR_INVALIDCAPS);
     }
     let format = if desc.flags & DDSD_PIXELFORMAT != 0 {
         hr!(check_format(&desc.format, &s.caps))
@@ -2919,13 +2934,33 @@ pub fn set_surface_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if width == 0 || height == 0 || width > 0x4000 || height > 0x4000 {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let pitch = if desc.flags & DDSD_PITCH != 0 {
+    // A surface of a complex surface, a mipmap's level among them, takes
+    // the program's memory for pixels of its own size and format: games
+    // fill each level of a system memory mipmap this way before Load
+    // (Demolition Racer's track). Windows lets it take another size too
+    // (Wine's `test_set_surface_desc`, `todo_wine`); here, as in Wine, it
+    // can't, since Load, the HALs and Flip take the chain's surfaces to
+    // keep their sizes (#2207).
+    let complex = s.root != 0 || !s.children.is_empty();
+    if complex && (width, height, format) != (s.width, s.height, s.format) {
+        return Some(DDERR_INVALIDPARAMS);
+    }
+    // A compressed surface's pitch is the size of its blocks, which
+    // DDSD_PITCH doesn't set.
+    let dxt = dxt_format(&format);
+    let pitch = if let Some(dxt) = dxt {
+        dxt.size(width, height) as u32
+    } else if desc.flags & DDSD_PITCH != 0 {
         desc.pitch
     } else {
         pitch_of(width, format.bits)
     };
     // The program's memory has to hold the pixels: blits copy them whole.
-    let size = pitch as u64 * height as u64;
+    let size = if dxt.is_some() {
+        pitch as u64
+    } else {
+        pitch as u64 * height as u64
+    };
     if pitch < (width * format.bits).div_ceil(8)
         || size > MAX_GIVEN_BITS
         || !cpu.bus.guest_probe(desc.surface, size as usize, false)

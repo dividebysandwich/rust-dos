@@ -1926,6 +1926,110 @@ fn a_kept_folder_is_checked_again_after_a_while() {
     assert_eq!(disk.host_dirs.reads.get(), reads + 1);
 }
 
+/// A drive with a write overlay over a game's folder, as a game profile
+/// mounts it: `game` below, `upper` above, both aged.
+fn overlay_drive(name: &str) -> (PathBuf, DiskController) {
+    let base = scratch(name);
+    fs::create_dir_all(base.join("c")).unwrap();
+    fs::create_dir_all(base.join("game/DATA/ART")).unwrap();
+    fs::write(base.join("game/DATA/ART/ART.PAK"), b"x").unwrap();
+    fs::write(base.join("game/DATA/ART/OLD.TGA"), b"x").unwrap();
+    for dir in ["game/DATA/ART", "game/DATA", "game"] {
+        age(&base.join(dir));
+    }
+    let mut disk = DiskController::new(base.join("c"));
+    let opts = MountOptions {
+        overlay: Some(base.join("upper")),
+        ..MountOptions::default()
+    };
+    disk.mount(3, &base.join("game"), opts, false).unwrap();
+    age(&base.join("upper"));
+    (base, disk)
+}
+
+/// MechCommander looks for loose files before it reads its packs, several
+/// hundred in a mission's load, each three folders down from the game's
+/// own: on an overlay drive, each of those looks read every folder on the
+/// path again (#1359). They are kept as a host folder's are.
+#[test]
+fn an_overlay_drives_folders_are_kept_until_they_change() {
+    let (_, disk) = overlay_drive("overlay_dir_cache");
+    let art = disk.resolve_path(r"D:\DATA\ART").unwrap();
+    assert!(disk.is_file(r"D:\DATA\ART\ART.PAK"));
+    assert!(!disk.is_file(r"D:\DATA\ART\MR_BKGD.TGA"));
+    assert!(
+        disk.host_dirs.dirs.borrow().contains_key(&art),
+        "an old folder is kept"
+    );
+
+    let reads = disk.host_dirs.reads.get();
+    for _ in 0..3 {
+        assert!(disk.is_file(r"D:\DATA\ART\ART.PAK"));
+        assert!(!disk.is_file(r"D:\DATA\ART\MR_BKGD.TGA"));
+    }
+    assert_eq!(disk.host_dirs.reads.get(), reads, "no folder is read again");
+    disk.host_dirs.expire();
+    assert!(disk.is_file(r"D:\DATA\ART\ART.PAK"));
+    assert_eq!(
+        disk.host_dirs.reads.get(),
+        reads,
+        "nor once its time is checked"
+    );
+}
+
+/// Another program's change to an overlay drive's folder, below or above,
+/// moves that folder's time, and the folder is read again once its time
+/// is checked.
+#[test]
+fn an_overlay_drives_folder_is_read_again_after_another_program_changes_it() {
+    let (base, mut disk) = overlay_drive("overlay_dir_cache_other");
+    assert!(disk.is_file(r"D:\DATA\ART\OLD.TGA"));
+    fs::remove_file(base.join("game/DATA/ART/OLD.TGA")).unwrap();
+    disk.host_dirs.expire();
+    assert!(!disk.is_file(r"D:\DATA\ART\OLD.TGA"), "deleted below");
+
+    // A file the guest made goes above; another program deletes it there.
+    let h = disk.create_file(r"D:\DATA\ART\NEW.TGA", PSP).unwrap();
+    disk.close_file(h);
+    assert!(disk.is_file(r"D:\DATA\ART\NEW.TGA"));
+    disk.host_dirs.expire();
+    assert!(disk.is_file(r"D:\DATA\ART\NEW.TGA"));
+    fs::remove_file(base.join("upper/DATA/ART/NEW.TGA")).unwrap();
+    disk.host_dirs.expire();
+    assert!(!disk.is_file(r"D:\DATA\ART\NEW.TGA"), "deleted above");
+}
+
+/// A host file's length is kept between the guest's questions
+/// (`HostFile::len`), and follows what the guest writes or cuts through
+/// any handle.
+#[test]
+fn a_host_files_length_follows_the_guests_writes_through_any_handle() {
+    let root = scratch("host_file_len");
+    let mut disk = DiskController::new(root.clone());
+    let a = disk.create_file(r"C:\TEMP.FIT", PSP).unwrap();
+    assert_eq!(disk.file_size(a), Some(0));
+    disk.write_file(a, b"12345").unwrap();
+    assert_eq!(disk.file_size(a), Some(5));
+    disk.seek_file(a, 2, 0).unwrap();
+    disk.write_file(a, b"x").unwrap();
+    assert_eq!(disk.file_size(a), Some(5), "a write inside it");
+    disk.seek_file(a, 0, 2).unwrap();
+    disk.write_file(a, b"678").unwrap();
+    assert_eq!(disk.file_size(a), Some(8));
+
+    // Another handle on the same file writes past its end, then cuts it.
+    let b = disk.open_file(r"C:\TEMP.FIT", 2, PSP).unwrap();
+    disk.seek_file(b, 10, 0).unwrap();
+    disk.write_file(b, b"ab").unwrap();
+    assert_eq!(disk.file_size(a), Some(12));
+    disk.set_file_size(b, 3).unwrap();
+    assert_eq!(disk.file_size(a), Some(3));
+    disk.seek_file(a, 0, 2).unwrap();
+    disk.write_file(a, b"z").unwrap();
+    assert_eq!(disk.file_size(b), Some(4));
+    assert_eq!(fs::metadata(root.join("TEMP.FIT")).unwrap().len(), 4);
+}
+
 #[test]
 fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     let root = scratch("host_dir_cache_unmoved");

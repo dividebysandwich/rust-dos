@@ -26,10 +26,14 @@ pub const MIN_MEMORY: u32 = 0x40_0000;
 /// The largest stack committed when the process starts; a larger reserve
 /// stays reserved, with no pages behind it.
 const MAX_STACK_COMMIT: u32 = 0x10_0000;
-/// Where the TLS slot array is in the TIB's page (`fs:[2Ch]` points at
-/// it), and how many slots it has, as on Windows 95.
-pub(crate) const TLS_ARRAY: u32 = 0x100;
+/// Where the TLS slot array is in the TIB (`fs:[2Ch]` points at it), and
+/// how many slots it has, as on Windows 98 SE, whose TlsGetValue reads
+/// the slot at `fs:[88h+4*index]`.
+pub(crate) const TLS_ARRAY: u32 = 0x88;
 pub(super) const TLS_SLOTS: u32 = 80;
+/// Where the TIB has the thread's last error (GetLastError), as on
+/// Windows 98 SE.
+pub(crate) const TIB_LAST_ERROR: u32 = 0x60;
 /// The address space the process heap can grow to.
 const HEAP_RESERVE: u32 = 0x100_0000;
 
@@ -38,7 +42,7 @@ const TIB_EXCEPTION_LIST: u32 = 0x00;
 const TIB_STACK_TOP: u32 = 0x04;
 const TIB_STACK_LIMIT: u32 = 0x08;
 const TIB_SELF: u32 = 0x18;
-const TIB_TLS_ARRAY: u32 = 0x2C;
+pub(crate) const TIB_TLS_ARRAY: u32 = 0x2C;
 /// The process's database, as Windows 95 has it (`process_block`).
 pub(crate) const TIB_PROCESS: u32 = 0x30;
 

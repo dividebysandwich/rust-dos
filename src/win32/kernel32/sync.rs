@@ -134,22 +134,49 @@ pub(super) fn open_semaphore(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// may be; then the waits it may end, end (`thread::object_changed`).
 /// False, with the last error set, if `handle` isn't a handle of the kind
 /// `f` takes.
+///
+/// A change that ends no other thread's wait changes nothing but the
+/// object, which an idle proof follows (`idle::changes_object`): a
+/// ReleaseMutex of a mutex the pass took, a SetEvent no thread waits for.
 fn change(cpu: &mut Cpu, handle: u32, f: impl FnOnce(&mut Kind, u32) -> Result<(), u32>) -> u32 {
+    let (done, woke) = change_waking(cpu, handle, f);
+    if done == TRUE && !woke {
+        followed(cpu);
+    }
+    done
+}
+
+/// The call took or changed only the objects it named, which it noted
+/// (`idle::changes_object`), and read no RAM but its arguments: an idle
+/// proof follows it.
+fn followed(cpu: &mut Cpu) {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
+}
+
+/// `change`, and whether the change ended another thread's wait, which
+/// an idle proof can't follow.
+fn change_waking(
+    cpu: &mut Cpu,
+    handle: u32,
+    f: impl FnOnce(&mut Kind, u32) -> Result<(), u32>,
+) -> (u32, bool) {
     let Some(id) = object::resolve(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
-        return FALSE;
+        return (FALSE, false);
     };
+    crate::idle::changes_object(cpu, id);
     let tid = process(cpu).current_thread().map_or(0, |t| t.id);
     let Some(object) = object::objects(cpu).get_mut(id) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
-        return FALSE;
+        return (FALSE, false);
     };
     if let Err(error) = f(&mut object.kind, tid) {
         set_error(cpu, error);
-        return FALSE;
+        return (FALSE, false);
     }
-    thread::object_changed(&mut cpu.bus.win32, id);
-    TRUE
+    let woke = thread::object_changed(&mut cpu.bus.win32, id);
+    (TRUE, woke)
 }
 
 fn set_signal(kind: &mut Kind, to: bool) -> Result<(), u32> {
@@ -173,9 +200,14 @@ pub(super) fn reset_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// PulseEvent: the waiting threads it can release go (all for a manual
 /// event, one for an auto-reset one), and the event is reset.
 pub(super) fn pulse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let done = change(cpu, args[0], |k, _| set_signal(k, true));
+    let (done, woke) = change_waking(cpu, args[0], |k, _| set_signal(k, true));
     if done == TRUE {
-        change(cpu, args[0], |k, _| set_signal(k, false));
+        change_waking(cpu, args[0], |k, _| set_signal(k, false));
+        // An idle proof follows a pulse that released no thread, which
+        // leaves the event reset.
+        if !woke {
+            followed(cpu);
+        }
     }
     Some(done)
 }
@@ -239,7 +271,19 @@ fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32) -> Option<u32> {
         }
     }
     let objects = &ids[..handles.len()];
+    // A wait that ends at once took what it waited for: an idle proof
+    // follows it as long as every pass leaves the objects as it found
+    // them (`idle::changes_object`).
+    let follow = cpu.bus.observe.on && !looks_at_host(cpu, objects);
+    if follow {
+        for &id in objects {
+            crate::idle::changes_object(cpu, id);
+        }
+    }
     if let Some(result) = thread::poll_objects(cpu, objects, all) {
+        if follow {
+            followed(cpu);
+        }
         return Some(result);
     }
     if ms == 0 {
@@ -272,8 +316,11 @@ fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32) -> Option<u32> {
 /// - what the system signals of its own (a sound buffer's notification, a
 ///   multimedia timer's event, input) it signals at those events and
 ///   interrupts too;
-/// - the running thread changes objects only through calls (SetEvent,
-///   ReleaseMutex, CloseHandle), none of which an idle proof follows;
+/// - the running thread changes objects only through calls; those an
+///   idle proof follows (a wait that ends at once, a SetEvent or
+///   ReleaseMutex that ends no other thread's wait) leave every object
+///   at each visit of the loop's head as the first pass found it
+///   (`idle::changes_object`), so the poll finds the same in every pass;
 /// - a mutex the running thread holds is signaled for it, and a wait for
 ///   it doesn't come here.
 ///
@@ -286,19 +333,24 @@ fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32) -> Option<u32> {
 /// thread that polls a mutex another thread holds, with nothing else to
 /// do, spins for the rest of its turn (#1222).
 fn found_none(cpu: &mut Cpu, objects: &[u32]) {
-    let objects_of = &cpu.bus.win32.objects;
-    let looks = objects.iter().any(|&id| {
-        matches!(
-            objects_of.get(id).map(|o| &o.kind),
-            Some(Kind::Change { .. })
-        )
-    });
-    if looks {
+    if looks_at_host(cpu, objects) {
         return;
     }
     crate::idle::pure_call(cpu, None);
     crate::idle::reads_arguments(cpu);
     cpu.bus.observe.polled = true;
+}
+
+/// Whether a wait for `objects` looks at the host: a change notification
+/// looks at its directory, which another program may change.
+fn looks_at_host(cpu: &Cpu, objects: &[u32]) -> bool {
+    let objects_of = &cpu.bus.win32.objects;
+    objects.iter().any(|&id| {
+        matches!(
+            objects_of.get(id).map(|o| &o.kind),
+            Some(Kind::Change { .. })
+        )
+    })
 }
 
 /// WaitForSingleObject(handle, ms), and WaitForSingleObjectEx with its

@@ -97,6 +97,11 @@ pub enum Kind {
         lists: Vec<Vec<Vec<u8>>>,
         next: Vec<u32>,
     },
+    /// A VxD CreateFileA opened for DeviceIoControl (`\\.\VWIN32`):
+    /// its name (kernel32/device.rs).
+    Vxd {
+        name: String,
+    },
 }
 
 /// A file or directory a search found, as WIN32_FIND_DATA has it.
@@ -377,6 +382,7 @@ crate::win32::state_variants!(Kind {
         signaled
     },
     Snapshot { lists, next },
+    Vxd { name },
 });
 crate::state_fields!(FindEntry {
     attributes,

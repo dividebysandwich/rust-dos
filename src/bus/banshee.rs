@@ -169,6 +169,22 @@ impl Bus {
         Some((bar1, direct))
     }
 
+    /// What translated code may do by itself on the page with byte `at`
+    /// of the card's memory, where `banshee_direct` gave grants
+    /// (`Voodoo::banshee_grant`).
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn banshee_grant(&self, at: u32) -> Option<(u8, u64)> {
+        Some(self.voodoo.as_ref()?.banshee_grant(at))
+    }
+
+    /// The same for every page, which `f` gets from the first.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn banshee_grants(&self, f: impl FnOnce(&mut dyn Iterator<Item = u8>)) {
+        if let Some(v) = &self.voodoo {
+            v.banshee_grants(f);
+        }
+    }
+
     /// Translated code wrote the card's memory by itself.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn banshee_wrote_directly(&mut self) {
@@ -181,6 +197,10 @@ impl Bus {
     /// on. What lands in the desktop shown counts for `cycles=auto` as a
     /// write into a VESA frame buffer does: a game under Windows that
     /// copies its frames into the primary surface itself draws them there.
+    /// Translated code counts its writes into the desktop's whole pages
+    /// itself, with offsets from the desktop's first byte (`dynrec::x64`'s
+    /// `card_count`, `JitCtx::card_origin`): what changes here changes
+    /// there.
     #[inline]
     pub(crate) fn note_banshee_memory_write(&mut self, addr: u32, len: u32) {
         let Some(b) = self.banshee().filter(|b| b.extended()) else {
@@ -580,14 +600,15 @@ mod tests {
     }
 
     #[test]
-    fn direct_memory_leaves_the_desktop_and_observed_accesses_to_the_bus() {
+    fn direct_memory_names_the_desktop_and_leaves_observed_accesses_to_the_bus() {
         const BAR1: u32 = crate::voodoo::banshee::INITIAL_BAR1;
         let mut cpu = card_with_a_desktop();
         let bus = &mut cpu.bus;
         let (at, direct) = bus.banshee_direct().expect("a quiet card");
         assert_eq!((at, direct.len), (BAR1, 0x40_0000));
         let (_, span) = bus.banshee().unwrap().desktop_memory();
-        assert_eq!(direct.kept, [(0x8000, 0x8000 + span as u32), (0, 0), (0, 0)]);
+        assert_eq!(direct.shown, (0x8000, 0x8000 + span as u32));
+        assert_eq!(direct.kept, [(0, 0); 2]);
         // A proof of an idle loop follows every access (`idle`).
         bus.observe.on = true;
         assert!(bus.banshee_direct().is_none());

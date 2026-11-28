@@ -174,6 +174,9 @@ impl Voodoo {
         if self.recording() {
             self.mirror_sync();
             if self.banshee.is_some() && texcount > 0 {
+                // What the program wrote into the memory by itself, which
+                // the texels may be.
+                self.banshee_stamp_direct_writes();
                 self.gpu_texels(&st, texcount);
             }
             if let Some(mirror) = self.mirror.get_mut() {

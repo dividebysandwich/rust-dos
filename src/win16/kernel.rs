@@ -438,7 +438,7 @@ fn current_handle(cpu: &Cpu) -> u16 {
 fn fatal_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let code = args.first().copied().unwrap_or(0) as u16;
     cpu.bus.log_string(&format!("[W16] FatalExit({:X})", code));
-    task::exit(cpu, code);
+    task::exit(cpu, code, &Context::of(cpu));
     None
 }
 
@@ -1056,7 +1056,7 @@ fn debug_output(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn fatal_app_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = super::string(cpu, args[1]);
     cpu.bus.log_string(&format!("[W16] FatalAppExit: {}", text));
-    task::exit(cpu, 0xFF);
+    task::exit(cpu, 0xFF, &Context::of(cpu));
     None
 }
 
