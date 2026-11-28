@@ -707,7 +707,11 @@ pub fn thunk16_id() -> u16 {
 /// built-in DLL `dll` in the running process, whose image of the DLL may
 /// be from an older table (`stub_tables::stub_address_in`).
 pub fn win32_address(cpu: &Cpu, dll: &str, function: &str) -> Option<u32> {
-    let index = crate::win32::stubs::find_dll(dll)?;
+    address_in(cpu, crate::win32::stubs::find_dll(dll)?, function)
+}
+
+/// `win32_address` of the DLL `index` of `stubs::DLLS`.
+fn address_in(cpu: &Cpu, index: usize, function: &str) -> Option<u32> {
     let api = crate::win32::stubs::DLLS[index]
         .apis
         .iter()
@@ -816,15 +820,15 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             handler(cpu, &args)
         }
         Run::Win32(dll, function, ret) => {
-            if !super::task::map_dll(cpu, dll) {
+            let Some(index) = super::task::map_dll(cpu, dll) else {
                 crate::win32::fatal(
                     cpu,
                     &format!("{}.{} goes on to {}, which isn't there", def.name, api.name, dll),
                     None,
                 );
                 return;
-            }
-            match win32_address(cpu, dll, function) {
+            };
+            match address_in(cpu, index, function) {
                 Some(target) => {
                     auto_thunk(cpu, target, api.args, &raw, ret);
                     // Converting no handle, the stub changes nothing but
