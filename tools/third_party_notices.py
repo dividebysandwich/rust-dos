@@ -39,7 +39,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NOTICES = os.path.join(ROOT, "THIRD-PARTY-NOTICES")
 MANIFESTS = ["Cargo.toml", "libretro/Cargo.toml", "web/Cargo.toml"]
-MARKER = "=" * 72 + "\n6. RUST CRATES"
+MARKER = "=" * 72 + "\n7. RUST CRATES"
 RULE = "-" * 72
 
 # The licences in the order they are preferred where a crate offers a

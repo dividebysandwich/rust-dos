@@ -1,7 +1,7 @@
-//! Fonts and text. GDI's own faces are raster fonts, all drawn from the
-//! glyphs of the VGA's ROM fonts (8x8, 8x14, 8x16), scaled to the size a
-//! font asks for. The fonts of files a program adds are drawn from the
-//! files: raster ones from their glyphs (`fnt`), TrueType ones from their
+//! Fonts and text. GDI's own raster faces are drawn from the glyphs of
+//! the VGA's ROM fonts (8x8, 8x14, 8x16), scaled to the size a font asks
+//! for. The fonts of files a program adds are drawn from the files:
+//! raster ones from their glyphs (`fnt`), TrueType ones from their
 //! outlines (`ttf`). A font of variable pitch has each glyph as wide as its
 //! lit columns and a column between glyphs. The ROM's glyphs are code
 //! page 437's; the characters of the other code pages the built-in
@@ -39,10 +39,11 @@
 //! character's hinted width at that size, in the regular, bold, italic or
 //! bold italic font the weight and slant pick. Programs that size their
 //! controls for the text in them, measured or not, then have it fit
-//! about as on Windows.
+//! about as on Windows. Their characters are drawn from the outlines of
+//! the Liberation fonts, which have the same advances.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -766,8 +767,8 @@ enum Widths {
     /// A raster size (in RASTERS).
     Raster(usize),
     /// A TrueType font (`truetype::style`) at so many pixels to the em
-    /// across.
-    TrueType(usize, i32),
+    /// upward and across.
+    TrueType(usize, i32, i32),
 }
 
 /// A glyph: its rows' lit pixels as bit masks (bit 0 the leftmost), how
@@ -781,6 +782,9 @@ pub(super) struct Glyph {
 /// A font's glyphs, one for each byte of its code page.
 pub(super) struct Glyphs {
     glyphs: Vec<Glyph>,
+    /// Drawn from the outlines of the font of the slant asked for: an
+    /// italic one leans already, and isn't leaned again as it is drawn.
+    outlined: bool,
 }
 
 thread_local! {
@@ -1013,7 +1017,10 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
             }
         })
         .collect();
-    Glyphs { glyphs }
+    Glyphs {
+        glyphs,
+        outlined: false,
+    }
 }
 
 /// The ROM glyph `src` at the key's cell height, its lit columns
@@ -1074,15 +1081,38 @@ fn truetype_char(page: CodePage, b: u8) -> Option<u16> {
     (b >= 0x20 && b != 0x7F && !lacks).then(|| page.char(b))
 }
 
-/// The glyphs of a TrueType font of the size `s`: each byte's ROM glyph
-/// fitted to the width Windows 98 gives its character, less a column
-/// between characters. The bold fonts have widths of their own, so a
-/// bold glyph moves on no further than its width.
+/// The glyphs of a TrueType font of the size `s`: each byte's character
+/// drawn from the outlines of the Liberation font with its metrics
+/// (`truetype::outlines`), hinted, and moving on by the width Windows 98
+/// gives it. A size whose height isn't the cell's (lower than 4 rows or
+/// higher than 128), one with a glyph wider than the 64 columns a row
+/// holds, or one whose font can't be read, has the ROM glyphs fitted to
+/// those widths instead, less a column between characters.
 fn truetype_glyphs(key: Key, s: &truetype::Size) -> Glyphs {
     let page = CodePage::by_number(key.page as u32).unwrap_or(CodePage::WESTERN);
+    let advances: Vec<i32> = (0..=255u8)
+        .map(|b| truetype::advance(s, truetype_char(page, b)))
+        .collect();
+    if s.height == key.cell
+        && let Some(drawn) = outline_glyphs(s, page)
+    {
+        let glyphs = drawn
+            .into_iter()
+            .zip(advances)
+            .map(|(d, advance)| Glyph {
+                rows: d.rows,
+                advance,
+                offset: d.offset,
+            })
+            .collect();
+        return Glyphs {
+            glyphs,
+            outlined: true,
+        };
+    }
     let glyphs = (0..=255u8)
-        .map(|b| {
-            let w = truetype::advance(s, truetype_char(page, b));
+        .zip(advances)
+        .map(|(b, w)| {
             let body = w - 1 - key.bold as i32;
             Glyph {
                 rows: fitted_rows(&key, byte_source(page, b), body),
@@ -1091,14 +1121,51 @@ fn truetype_glyphs(key: Key, s: &truetype::Size) -> Glyphs {
             }
         })
         .collect();
-    Glyphs { glyphs }
+    Glyphs {
+        glyphs,
+        outlined: false,
+    }
+}
+
+thread_local! {
+    /// The Liberation fonts, each read when first drawn with.
+    static OUTLINES: [OnceCell<Option<Ttf>>; 12] = const { [const { OnceCell::new() }; 12] };
+}
+
+/// The bytes of the code page `page` drawn from the outlines of the font
+/// of the size `s`, if the font can be read and every glyph fits in a
+/// row's 64 columns: one that doesn't would lose its right side.
+fn outline_glyphs(s: &truetype::Size, page: CodePage) -> Option<Vec<ttf::Drawn>> {
+    OUTLINES.with(|fonts| {
+        let t = fonts
+            .get(s.style)?
+            .get_or_init(|| Ttf::parse(truetype::outlines(s.style).to_vec(), 0))
+            .as_ref()?;
+        let m = ttf::Metrics {
+            // The bold and italic fonts are their own files: nothing is
+            // made bold.
+            key: ttf::SizeKey {
+                ppem: s.ppem,
+                x_ppem: s.x_ppem,
+                bold: false,
+            },
+            height: s.height,
+            ascent: s.ascent,
+            internal: s.internal,
+            external: s.external,
+            average: s.average,
+            max: s.max,
+        };
+        let drawn = t.draw(&m, |b| truetype_char(page, b).map(u32::from));
+        (!drawn.iter().any(|d| d.clipped)).then_some(drawn)
+    })
 }
 
 fn make_glyphs(key: Key) -> Glyphs {
     match key.widths {
         Widths::Raster(i) => return raster_glyphs(key, &RASTERS[i]),
-        Widths::TrueType(style, x_ppem) => {
-            return truetype_glyphs(key, &truetype::across(style, x_ppem));
+        Widths::TrueType(style, ppem, x_ppem) => {
+            return truetype_glyphs(key, &truetype::at(style, ppem, x_ppem));
         }
         Widths::Rom => {}
     }
@@ -1130,7 +1197,10 @@ fn make_glyphs(key: Key) -> Glyphs {
             offset,
         });
     }
-    Glyphs { glyphs }
+    Glyphs {
+        glyphs,
+        outlined: false,
+    }
 }
 
 fn glyphs_of(key: Key) -> Rc<Glyphs> {
@@ -1363,7 +1433,7 @@ fn realize_truetype(
         glyph_width: 0,
         bold,
         fixed: face.pitch_family & 3 == FIXED_PITCH,
-        widths: Widths::TrueType(size.style, size.x_ppem),
+        widths: Widths::TrueType(size.style, size.ppem, size.x_ppem),
     };
     let glyphs = glyphs_of(key);
     Realized {
@@ -1375,7 +1445,8 @@ fn realize_truetype(
         external_leading: size.external,
         weight,
         italic: log.italic,
-        lean: log.italic,
+        // The italic fonts' outlines lean already; the ROM glyphs don't.
+        lean: log.italic && !glyphs.outlined,
         truetype: false,
         underline: log.underline,
         strike: log.strike,
@@ -1521,7 +1592,10 @@ fn file_glyphs(f: &Fnt, x_scale: i32, y_scale: i32, bold: bool) -> Rc<Glyphs> {
                 }
             })
             .collect();
-        Rc::new(Glyphs { glyphs })
+        Rc::new(Glyphs {
+            glyphs,
+            outlined: false,
+        })
     };
     f.drawn
         .borrow_mut()
@@ -1659,7 +1733,10 @@ fn truetype_file_glyphs(t: &Ttf, m: &ttf::Metrics, page: CodePage, symbol: bool)
                 offset: d.offset,
             })
             .collect();
-        Rc::new(Glyphs { glyphs })
+        Rc::new(Glyphs {
+            glyphs,
+            outlined: false,
+        })
     };
     let page = if symbol { 0 } else { page.number() as u16 };
     t.drawn
@@ -3026,6 +3103,49 @@ mod tests {
 
     fn realize(log: &Log, h: i32, w: i32) -> Realized {
         super::realize(log, &System::WESTERN, h, w)
+    }
+
+    /// Arial is drawn from Liberation Sans's outlines (#1337): a "t" has
+    /// its crossbar, which the ROM glyph squeezed into Arial's width lost
+    /// in Memphis Math's "Mulliply lo make", and the bold font has stems
+    /// two pixels wide, all within the widths Windows 98 gives.
+    #[test]
+    fn arial_is_drawn_from_its_outlines() {
+        let lit = |r: u64| r.count_ones();
+        let f = realize(&Log::of(&logfont(-13, 0, 400, 0, 0, "Arial")), -13, 0);
+        let t = &f.glyphs.glyphs[b't' as usize];
+        let stem = t.rows.iter().filter(|&&r| r != 0).map(|&r| lit(r)).min();
+        let bar = t.rows.iter().map(|&r| lit(r)).max();
+        assert_eq!(stem, Some(1));
+        assert!(bar >= Some(3), "{:?}", t.rows);
+        for c in 0x20..=0xFFu8 {
+            let g = &f.glyphs.glyphs[c as usize];
+            let right = g.rows.iter().map(|&r| 64 - r.leading_zeros() as i32).max();
+            assert!(g.offset + right.unwrap_or(0) <= g.advance + 1, "{c:02X}");
+        }
+        let f = realize(&Log::of(&logfont(-16, 0, 700, 0, 0, "Arial")), -16, 0);
+        let m = &f.glyphs.glyphs[b'M' as usize];
+        let base = m.rows[f.ascent as usize - 1];
+        let left = base >> base.trailing_zeros();
+        assert!(left & 0b11 == 0b11, "{:?}", m.rows);
+    }
+
+    /// Italic Arial is drawn from Liberation Sans Italic, whose outlines
+    /// lean already: drawing doesn't lean them again. A size at which a
+    /// glyph is wider than a row's 64 columns keeps the ROM glyphs, which
+    /// are fitted to the widths and lose no strokes, and leans them.
+    #[test]
+    fn arial_outlines_lean_once_and_fit_a_row() {
+        let mut log = logfont(-13, 0, 400, 0, 0, "Arial");
+        log[20] = 1;
+        let f = realize(&Log::of(&log), -13, 0);
+        assert!(f.italic && f.glyphs.outlined && !f.lean);
+        let mut log = logfont(-100, 0, 400, 0, 0, "Arial");
+        log[20] = 1;
+        let f = realize(&Log::of(&log), -100, 0);
+        assert!(f.height <= 128 && !f.glyphs.outlined && f.lean);
+        let w = &f.glyphs.glyphs[b'W' as usize];
+        assert!(w.rows.iter().all(|&r| r >> 60 == 0), "{:?}", w.rows);
     }
 
     const RUSSIAN: System = System {

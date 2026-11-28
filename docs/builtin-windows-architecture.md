@@ -428,8 +428,8 @@ All output goes through the emulated video hardware (`screen.rs`):
 - **GDI and windows**: one desktop in a mode of the display adapter: 640x480
   at 32 bits a pixel on a VESA card, and at 16 on a Banshee or Voodoo3,
   which use the card's own modes, set through its registers as 3dfx's driver
-  set them. Windows are drawn into it. The fonts are raster fonts drawn from
-  the VGA's ROM glyphs, scaled, with the dialog faces' character widths
+  set them. Windows are drawn into it. The raster fonts are drawn from the
+  VGA's ROM glyphs, scaled, with the dialog faces' character widths
   taken from Windows 98's own raster fonts (`gdi32/font.rs`). MS Sans
   Serif's 8-point size, the font of menus, dialogs and buttons, is too
   narrow for a squeezed ROM glyph to stay legible, and has glyphs drawn for
@@ -447,8 +447,11 @@ All output goes through the emulated video hardware (`screen.rs`):
   A font's bytes are those of its character set's code page; the raster
   faces have the system locale's character set, Arial, Times New Roman and
   Courier New the six of WGL4, and the font mapper weighs the character set
-  over the face as Windows does. `AddFontResourceA` reads the FNT resources
-  of a program's .FON file, or a bare .FNT (`gdi32/fnt.rs`): their faces are
+  over the face as Windows does. Arial, Times New Roman and Courier New
+  move on by Windows 98's widths (`gdi32/truetype.bin`) and are drawn from
+  the outlines of the Liberation fonts, which have the same advances
+  (`gdi32/liberation/`). `AddFontResourceA` reads the FNT resources of a
+  program's .FON file, or a bare .FNT (`gdi32/fnt.rs`): their faces are
   listed with the built-in ones, a font that names one is drawn with its
   glyphs at the nearest size, and a save state keeps their bytes. With
   `win32_depth=8` the desktop has 8 bits a pixel, and GDI keeps a system
