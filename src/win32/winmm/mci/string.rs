@@ -53,7 +53,7 @@ enum Field {
     CmdShow,
     WindowText,
     Hdc,
-    /// MCI_SETVIDEO's value.
+    /// MCI_SETVIDEO's and MCI_SETAUDIO's value.
     Value,
     /// A value the device works out itself (waveaudio's bytes a second
     /// and alignment, its input and output).

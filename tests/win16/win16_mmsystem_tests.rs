@@ -1613,15 +1613,20 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
 
 const CREATE_PALETTE: u16 = 360;
 const WSPRINTF: u16 = 420;
+const MCI_SETVIDEO: u16 = 0x876;
+const MCI_DGV_SETVIDEO_ITEM: u32 = 0x10_0000;
+const MCI_DGV_SETVIDEO_VALUE: u32 = 0x100_0000;
+const MCI_DGV_SETVIDEO_PALHANDLE: u16 = 0x4007;
 
-/// Where the MCI_SETVIDEO program keeps its LOGPALETTE, the palette's
-/// handle and the command string it makes.
+/// Where the MCI_SETVIDEO program keeps its MCI_DGV_SETVIDEO_PARMS, its
+/// LOGPALETTE, the palette's handle and the command string it makes.
+const SETVIDEO: u16 = 0x80;
 const LOGPAL: u16 = 0xA0;
 const HPAL: u16 = 0xB0;
 const COMMAND: u16 = 0xC0;
 
 #[test]
-fn mci_setvideo_draws_an_avi_with_the_programs_palette() {
+fn mci_setvideo_gives_an_avi_device_the_programs_palette() {
     // The Magic School Bus Explores the Solar System draws its scenes
     // and its movies through one identity palette: it sends
     // `setvideo <alias> palette handle to <hpal> wait`, made with
@@ -1670,6 +1675,36 @@ fn mci_setvideo_draws_an_avi_with_the_programs_palette() {
     code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
     code.emit(&[0x74, 0x06]) // je over the next
         .emit(&[0xB0, 7, 0xB4, 0x4C, 0xCD, 0x21]);
+    // MCI_DGV_SETVIDEO_PARMS through mciSendCommand: a handle of 0 gives
+    // the device a palette of its own again, the halftone palette's 256
+    // colours of a 24-bit movie, and the program's palette goes back in.
+    for (value, fail) in [(None, 11), (Some(HPAL), 15)] {
+        for k in 0..8 {
+            set(&mut code, SETVIDEO + 2 * k, 0);
+        }
+        set(&mut code, SETVIDEO + 4, MCI_DGV_SETVIDEO_PALHANDLE);
+        if let Some(at) = value {
+            // mov ax,[at]; mov [SETVIDEO+8],ax
+            code.emit(&[0xA1, lo(at), hi(at)]);
+            code.emit(&[0xA3, lo(SETVIDEO + 8), hi(SETVIDEO + 8)]);
+        }
+        let flags = MCI_DGV_SETVIDEO_ITEM | MCI_DGV_SETVIDEO_VALUE;
+        mci(&mut code, MCI_SETVIDEO, flags, SETVIDEO, 0, fail);
+        mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, fail + 1);
+        // mov ax,[HPAL]; cmp ax,[STATUS+4]
+        code.emit(&[0xA1, lo(HPAL), hi(HPAL)]);
+        code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
+        let same = if value.is_some() { 0x74 } else { 0x75 }; // je or jne
+        code.emit(&[same, 0x06]) // over the next
+            .emit(&[0xB0, fail + 2, 0xB4, 0x4C, 0xCD, 0x21]);
+        if value.is_none() {
+            // GetPaletteEntries(the device's palette, 0, 0, NULL).
+            push_word(&mut code, STATUS + 4);
+            code.push(0).push(0).push(0).push(0);
+            code.call("GDI", GET_PALETTE_ENTRIES);
+            expect_ax(&mut code, 256, fail + 3);
+        }
+    }
     let mute = mci_string(&mut code, 8);
     mci(&mut code, MCI_CLOSE, 0, 0, 0, 9);
     // The palette is still there: GetPaletteEntries(hpal, 0, 0, NULL).

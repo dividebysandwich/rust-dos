@@ -244,7 +244,7 @@ pub struct Parms {
     pub window_text: String,
     pub rect: [i32; 4],
     pub hdc: u32,
-    /// MCI_SETVIDEO's value (MCI_DGV_SETVIDEO_VALUE), for its `item`.
+    /// MCI_SETVIDEO's and MCI_SETAUDIO's value, for their `item`.
     pub value: u32,
     /// Whether a digitalvideo device opens without a window: the device
     /// of a DirectShow graph whose pictures go to the program's own
