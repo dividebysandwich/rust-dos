@@ -235,9 +235,16 @@ fn alias(
 /// has one, is free again. The pin it took (`alias`, `refresh`) goes
 /// from each page the window maps and its source still has there; a page
 /// the source committed after the window last looked has no pin of its,
-/// and may have another alias's.
+/// and may have another alias's. A MapLS of the Win16 process's own
+/// memory has no window, only its selector (`map_ls_from`).
 fn unalias(cpu: &mut Cpu, i: usize) {
     let a = cpu.bus.win32.win16.aliases.remove(i);
+    if a.pages == 0 {
+        if a.selector != 0 {
+            free_selector(cpu, a.selector);
+        }
+        return;
+    }
     let mapped: Vec<(u32, u32)> = with_memory(cpu, a.owner, |m, bus| {
         let mut mapped = Vec::new();
         for page in 0..a.pages {
@@ -412,6 +419,15 @@ pub(super) fn map_ls_from(cpu: &mut Cpu, pid: u32, ptr: u32) -> u32 {
         return 0;
     };
     let base = if pid == win16 {
+        // The Win16 process's own memory needs no window, but UnMapLS
+        // finds the selector to free among the aliases.
+        cpu.bus.win32.win16.aliases.push(Alias {
+            owner: win16,
+            source: win16,
+            address: ptr,
+            selector: sel,
+            ..Alias::default()
+        });
         Some(ptr)
     } else {
         alias(cpu, pid, ptr, 0x1_0000, win16, sel)
