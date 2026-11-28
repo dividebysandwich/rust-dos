@@ -198,7 +198,8 @@ pub struct Bitmap {
     /// is the program's drawing on either side of the change.
     pub display: Since<{ DDB_FORMAT_SAVED }, bool>,
     pub dib: Option<Dib>,
-    /// The DC it is selected into, or 0.
+    /// The DC it is selected into, or 0. Always 0 for the stock 1x1
+    /// bitmap, which is in every memory DC that has no other.
     pub dc: u32,
     /// SetBitmapDimensionEx's size.
     pub dimension: (i32, i32),
