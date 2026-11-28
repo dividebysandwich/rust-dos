@@ -277,8 +277,9 @@ fn new_ddb_in(
     )
 }
 
-/// The default bitmap, which a bitmap of no size is.
-fn default_bitmap(cpu: &mut Cpu) -> u32 {
+/// The default bitmap, which a bitmap of no size is, and which a new
+/// memory DC has selected.
+pub fn default_bitmap(cpu: &mut Cpu) -> u32 {
     init(cpu);
     super::handle(super::DEFAULT_BITMAP as usize)
 }

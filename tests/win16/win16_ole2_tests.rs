@@ -7,6 +7,7 @@
 
 use crate::win16;
 
+use iced_x86::code_asm::*;
 use rust_dos_ne as ne;
 use win16::{CODE, Code, program, run};
 
@@ -930,6 +931,398 @@ fn a_program_raises_an_error_object() {
     code.emit(&[0xB0, 0x00]).exit_al();
 
     let (exit, log) = run("ole2_error_info", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+// In-process servers.
+
+/// SRV.DLL's data: the class factory object and the object it makes,
+/// their vtables, the factory's reference count, how many objects it
+/// made, and what DllCanUnloadNow returns.
+const SRV_FACTORY: u16 = 0x10;
+const SRV_OBJECT: u16 = 0x14;
+const SRV_FACTORY_VTABLE: u16 = 0x20;
+const SRV_OBJECT_VTABLE: u16 = 0x40;
+const SRV_REFS: u16 = 0x60;
+const SRV_MADE: u16 = 0x62;
+const SRV_CAN_UNLOAD: u16 = 0x64;
+
+/// A function of SRV.DLL: the prologue the loader patches to load the
+/// library's data segment ("mov ax,ds; nop"), a frame, DS the
+/// library's, the body, and a far return taking `ret` bytes off.
+fn server_function(
+    body: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+    ret: u16,
+) -> Vec<u8> {
+    let mut a = CodeAssembler::new(16).unwrap();
+    a.db(&[0x8C, 0xD8, 0x90]).unwrap();
+    a.push(bp).unwrap();
+    a.mov(bp, sp).unwrap();
+    a.push(ds).unwrap();
+    a.mov(ds, ax).unwrap();
+    body(&mut a).unwrap();
+    a.pop(ds).unwrap();
+    a.pop(bp).unwrap();
+    if ret == 0 {
+        a.retf().unwrap();
+    } else {
+        a.retf_1(ret as u32).unwrap();
+    }
+    a.assemble(0).unwrap()
+}
+
+/// DX:AX E_NOINTERFACE.
+fn e_nointerface(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.mov(ax, 0x4002)?;
+    a.mov(dx, 0x8000)
+}
+
+/// DX:AX S_OK.
+fn s_ok(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.xor(ax, ax)?;
+    a.xor(dx, dx)
+}
+
+/// SRV.DLL, an in-process server as AVIFILE.DLL of Video for Windows
+/// 1.1 is one: its LibMain fills in the vtables of its class factory
+/// and of the object the factory makes; DllGetClassObject (Pascal's)
+/// gives the factory for IClassFactory, with a reference;
+/// CreateInstance (C's, as all methods) gives the object and counts it;
+/// DllCanUnloadNow returns the word at SRV_CAN_UNLOAD. Its functions
+/// are exported, so the loader patches their prologues.
+fn server_library() -> Vec<u8> {
+    let get_class_object = server_function(
+        |a| {
+            let mut other = a.create_label();
+            let mut done = a.create_label();
+            // riid at BP+10: IClassFactory, {00000001-...}.
+            a.les(bx, dword_ptr(bp + 10))?;
+            a.cmp(word_ptr(bx).es(), 1)?;
+            a.jne(other)?;
+            a.les(bx, dword_ptr(bp + 6))?;
+            a.mov(word_ptr(bx).es(), SRV_FACTORY as u32)?;
+            a.mov(word_ptr(bx + 2).es(), ds)?;
+            a.inc(word_ptr(SRV_REFS as u32))?;
+            s_ok(a)?;
+            a.jmp(done)?;
+            a.set_label(&mut other)?;
+            e_nointerface(a)?;
+            a.set_label(&mut done)?;
+            a.nop()
+        },
+        12,
+    );
+    let can_unload_now = server_function(
+        |a| {
+            a.mov(ax, word_ptr(SRV_CAN_UNLOAD as u32))?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+    let query_interface = server_function(e_nointerface, 0);
+    let factory_add_ref = server_function(
+        |a| {
+            a.inc(word_ptr(SRV_REFS as u32))?;
+            a.mov(ax, word_ptr(SRV_REFS as u32))?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+    let factory_release = server_function(
+        |a| {
+            a.dec(word_ptr(SRV_REFS as u32))?;
+            a.mov(ax, word_ptr(SRV_REFS as u32))?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+    // CreateInstance(this, outer, riid, ppv): ppv at BP+18.
+    let create_instance = server_function(
+        |a| {
+            a.les(bx, dword_ptr(bp + 18))?;
+            a.mov(word_ptr(bx).es(), SRV_OBJECT as u32)?;
+            a.mov(word_ptr(bx + 2).es(), ds)?;
+            a.inc(word_ptr(SRV_MADE as u32))?;
+            s_ok(a)
+        },
+        0,
+    );
+    let lock_server = server_function(s_ok, 0);
+    let one = server_function(
+        |a| {
+            a.mov(ax, 1)?;
+            a.xor(dx, dx)
+        },
+        0,
+    );
+
+    // The functions follow a jump to LibMain, which is made last, when
+    // their offsets are known.
+    let functions = [
+        get_class_object,
+        can_unload_now,
+        query_interface,
+        factory_add_ref,
+        factory_release,
+        create_instance,
+        lock_server,
+        one,
+    ];
+    let mut offsets = Vec::new();
+    let mut body = Vec::new();
+    for f in &functions {
+        offsets.push(3 + body.len() as u16);
+        body.extend_from_slice(f);
+    }
+    let [_, _, qi, f_add, f_rel, create, lock, one] = offsets[..] else {
+        unreachable!()
+    };
+    let mut a = CodeAssembler::new(16).unwrap();
+    let mut far = |at: u16, offset: u16| {
+        a.mov(word_ptr(at as u32), offset as u32).unwrap();
+        a.mov(word_ptr(at as u32 + 2), cs).unwrap();
+    };
+    for (i, f) in [qi, f_add, f_rel, create, lock].into_iter().enumerate() {
+        far(SRV_FACTORY_VTABLE + 4 * i as u16, f);
+    }
+    for (i, f) in [qi, one, one].into_iter().enumerate() {
+        far(SRV_OBJECT_VTABLE + 4 * i as u16, f);
+    }
+    for (object, vtable) in [
+        (SRV_FACTORY, SRV_FACTORY_VTABLE),
+        (SRV_OBJECT, SRV_OBJECT_VTABLE),
+    ] {
+        a.mov(word_ptr(object as u32), vtable as u32).unwrap();
+        a.mov(word_ptr(object as u32 + 2), ds).unwrap();
+    }
+    a.mov(word_ptr(SRV_CAN_UNLOAD as u32), 1u32).unwrap();
+    a.mov(ax, 1).unwrap();
+    a.retf().unwrap();
+    let lib_main = a.assemble(0).unwrap();
+    let mut text = vec![0xE9]; // jmp near over the functions
+    text.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    text.extend_from_slice(&body);
+    text.extend_from_slice(&lib_main);
+
+    let mut b = ne::Builder::new("SRV", ne::LIBMODULE | ne::SINGLEDATA | ne::PROTMODE);
+    let code = b.segment(ne::SegmentSpec {
+        data: text,
+        flags: CODE,
+        alloc: 0,
+        relocations: Vec::new(),
+    });
+    let data = b.segment(ne::SegmentSpec {
+        data: vec![0; 0x70],
+        flags: ne::SEG_DATA | 0x0C00,
+        alloc: 0x100,
+        relocations: Vec::new(),
+    });
+    b.auto_data(data, 0, 0);
+    b.entry_point(code, 0);
+    for (i, &offset) in offsets.iter().enumerate() {
+        let entry = ne::Entry::Code {
+            segment: code as u8,
+            offset,
+            flags: ne::ENTRY_EXPORTED,
+            moveable: true,
+        };
+        b.entry(i as u16 + 1, entry);
+    }
+    b.export("DllGetClassObject", 1, false);
+    b.export("DllCanUnloadNow", 2, false);
+    b.build()
+}
+
+/// A GUID's 16 bytes put at `at` of the data segment.
+fn put_guid(code: &mut Code, at: u16, guid: [u8; 16]) {
+    for (i, pair) in guid.chunks(2).enumerate() {
+        set(
+            code,
+            at + 2 * i as u16,
+            u16::from_le_bytes([pair[0], pair[1]]),
+        );
+    }
+}
+
+/// End with `fail` unless the word at ES:`at` is `value`.
+fn expect_es(code: &mut Code, at: u16, value: u16, fail: u8) {
+    // cmp word es:[at],value
+    code.emit(&[0x26, 0x81, 0x3E, lo(at), hi(at), lo(value), hi(value)]);
+    or_fail(code, fail);
+}
+
+/// CoCreateInstance and CoGetClassObject start a class's in-process
+/// server, as AVIFILE.DLL asks COMPOBJ for the AVI file handler it
+/// registers itself: the DLL named in the registry's
+/// CLSID\{...}\InprocServer is loaded, its LibMain run, and its
+/// DllGetClassObject called. The task holds the DLL once, however often
+/// it was asked; CoFreeUnusedLibraries frees it when DllCanUnloadNow
+/// says S_OK, and the last CoUninitialize whatever it says. A class
+/// with no server in the registry is REGDB_E_CLASSNOTREG, and so is one
+/// whose server is a built-in module without DllGetClassObject.
+#[test]
+fn co_create_instance_starts_an_inproc_server() {
+    const CO_INITIALIZE: u16 = 2;
+    const CO_UNINITIALIZE: u16 = 3;
+    const CO_GET_CLASS_OBJECT: u16 = 7;
+    const CO_CREATE_INSTANCE: u16 = 13;
+    const CO_FREE_UNUSED_LIBRARIES: u16 = 17;
+    const REG_SET_VALUE: u16 = 5; // SHELL
+    const GET_MODULE_HANDLE: u16 = 47; // KERNEL
+    const RELEASE: u8 = 2;
+
+    const OUT2: u16 = 0x14;
+    const CLSID: u16 = 0x20;
+    const KEY: u16 = 0x30;
+    const DLL: u16 = 0x70;
+    const NAME: u16 = 0x78;
+    const IID_ICLASSFACTORY: u16 = 0x80;
+    const IID_IUNKNOWN_AT: u16 = 0x90;
+    const OTHER: u16 = 0xA0;
+    const KEY2: u16 = 0xB0;
+    const OLE2_DLL: u16 = 0xF0;
+
+    // {0BADC0DE-1234-5678-9ABC-DEF012345678}, and one no server has.
+    const GUID: [u8; 16] = [
+        0xDE, 0xC0, 0xAD, 0x0B, 0x34, 0x12, 0x78, 0x56, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56,
+        0x78,
+    ];
+    let mut other = GUID;
+    other[15] = 0x79;
+    let ole = |d1: u8| {
+        let mut g = [0; 16];
+        g[0] = d1;
+        g[8] = 0xC0;
+        g[15] = 0x46;
+        g
+    };
+
+    let mut code = Code::new();
+    put_guid(&mut code, CLSID, GUID);
+    put_guid(&mut code, IID_ICLASSFACTORY, ole(1));
+    put_guid(&mut code, IID_IUNKNOWN_AT, ole(0));
+    put_guid(&mut code, OTHER, other);
+    put_text(
+        &mut code,
+        KEY,
+        b"CLSID\\{0BADC0DE-1234-5678-9ABC-DEF012345678}\\InprocServer",
+    );
+    put_text(&mut code, DLL, b"srv.dll");
+    put_text(&mut code, NAME, b"SRV");
+    put_text(
+        &mut code,
+        KEY2,
+        b"CLSID\\{0BADC0DE-1234-5678-9ABC-DEF012345679}\\InprocServer",
+    );
+    put_text(&mut code, OLE2_DLL, b"ole2.dll");
+
+    // RegSetValue(HKEY_CLASSES_ROOT, key, REG_SZ, "srv.dll", 7): the
+    // server registered, as AVIFILE's entry point registers itself.
+    code.push(0).push(1);
+    push_ds(&mut code, KEY);
+    code.push(0).push(1);
+    push_ds(&mut code, DLL);
+    code.push(0).push(7).call("SHELL", REG_SET_VALUE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // CoInitialize(NULL).
+    code.push(0).push(0).call("COMPOBJ", CO_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, IID_IUnknown,
+    // &out): the server's object, one made, the factory released.
+    push_ds(&mut code, CLSID);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0, 3);
+    les_bx(&mut code, OUT);
+    code.emit(&[0x81, 0xFB, lo(SRV_OBJECT), hi(SRV_OBJECT)]); // cmp bx,SRV_OBJECT
+    or_fail(&mut code, 4);
+    expect_es(&mut code, SRV_MADE, 1, 5);
+    expect_es(&mut code, SRV_REFS, 0, 6);
+
+    // CoGetClassObject(clsid, CLSCTX_INPROC_SERVER, NULL,
+    // IID_IClassFactory, &out2): the factory, with a reference, which
+    // the program releases.
+    push_ds(&mut code, CLSID);
+    code.push(0).push(1).push(0).push(0);
+    push_ds(&mut code, IID_ICLASSFACTORY);
+    push_ds(&mut code, OUT2);
+    code.call("COMPOBJ", CO_GET_CLASS_OBJECT);
+    expect_dx_ax(&mut code, 0, 7);
+    les_bx(&mut code, OUT2);
+    code.emit(&[0x81, 0xFB, lo(SRV_FACTORY), hi(SRV_FACTORY)]); // cmp bx,SRV_FACTORY
+    or_fail(&mut code, 8);
+    expect_es(&mut code, SRV_REFS, 1, 9);
+    call_object(&mut code, OUT2, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 0, 10);
+
+    // CoFreeUnusedLibraries while DllCanUnloadNow says S_FALSE: the
+    // server stays.
+    code.call("COMPOBJ", CO_FREE_UNUSED_LIBRARIES);
+    push_ds(&mut code, NAME);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x85, 0xC0]) // test ax,ax
+        .emit(&[0x75, 0x06]) // jnz over the exit
+        .emit(&[0xB0, 11, 0xB4, 0x4C, 0xCD, 0x21]);
+
+    // Once it says S_OK, the server goes: the task held it once.
+    les_bx(&mut code, OUT);
+    let (l, h) = (lo(SRV_CAN_UNLOAD), hi(SRV_CAN_UNLOAD));
+    code.emit(&[0x26, 0xC7, 0x06, l, h, 0, 0]); // mov word es:[..],0
+    code.call("COMPOBJ", CO_FREE_UNUSED_LIBRARIES);
+    push_ds(&mut code, NAME);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x85, 0xC0]); // test ax,ax
+    or_fail(&mut code, 12);
+
+    // A class with no server: REGDB_E_CLASSNOTREG.
+    push_ds(&mut code, OTHER);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0x8004_0154, 13);
+
+    // A class served by a built-in module whose DllGetClassObject the
+    // built-in Windows lacks, as Windows registers OLE 2's own classes
+    // with OLE2.DLL: still REGDB_E_CLASSNOTREG, the program going on.
+    code.push(0).push(1);
+    push_ds(&mut code, KEY2);
+    code.push(0).push(1);
+    push_ds(&mut code, OLE2_DLL);
+    code.push(0).push(8).call("SHELL", REG_SET_VALUE);
+    expect_dx_ax(&mut code, 0, 16);
+    push_ds(&mut code, OTHER);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0x8004_0154, 17);
+
+    // The server loaded again, and freed by the last CoUninitialize
+    // though DllCanUnloadNow says S_FALSE, as CoFreeAllLibraries frees
+    // it.
+    push_ds(&mut code, CLSID);
+    code.push(0).push(0).push(0).push(1);
+    push_ds(&mut code, IID_IUNKNOWN_AT);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0, 14);
+    code.call("COMPOBJ", CO_UNINITIALIZE);
+    push_ds(&mut code, NAME);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x85, 0xC0]); // test ax,ax
+    or_fail(&mut code, 15);
+
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let exe = program(&code, CODE);
+    let (exit, log) = win16::run_with("ole2_inproc_server", exe, |_, dir| {
+        std::fs::write(dir.join("SRV.DLL"), server_library()).unwrap();
+    });
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }
 

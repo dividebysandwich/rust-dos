@@ -355,3 +355,96 @@ fn names_come_from_a_propertys_get_method() {
     assert_eq!(names_func(&funcs[..1], 1), Some(&funcs[0]));
     assert_eq!(names_func(&funcs, 2), None);
 }
+
+/// The hashes of names Windows' CreateTypeLib2 stored with them in the
+/// MSFT fixture (the high word of each name's length field), English's.
+#[test]
+fn name_hashes_are_windows() {
+    const SYS_WIN32: u32 = 1;
+    for (name, low) in [
+        ("RdTest", 0x51B8),
+        ("Colour", 0x4AB6),
+        ("Red", 0xCE05),
+        ("x", 0x106F),
+        ("y", 0x106C),
+        ("IShape", 0xB855),
+        ("value", 0x4BE4),
+    ] {
+        let h = super::hash::hash(SYS_WIN32, 0x409, name.as_bytes());
+        assert_eq!(h, 0x10_0000 | low, "{name}");
+        let upper = super::hash::hash(SYS_WIN32, 0x409, name.to_uppercase().as_bytes());
+        assert_eq!(upper, h, "{name} in capitals");
+    }
+    // The Mac's flag, and the group of another language's table.
+    assert_eq!(super::hash::hash(2, 0x409, b"x") >> 16, 0x11);
+    assert_eq!(super::hash::hash(SYS_WIN32, 0x411, b"x") >> 16, 0x40);
+}
+
+/// A GIF's transparent color and what its picture doesn't cover of the
+/// logical screen come out transparent; the rest opaque.
+#[test]
+fn a_gif_keeps_its_transparency() {
+    let mut data = Vec::new();
+    {
+        let palette = [255, 0, 0, 0, 0, 255];
+        let mut e = gif::Encoder::new(&mut data, 3, 2, &palette).unwrap();
+        let mut frame = gif::Frame {
+            width: 2,
+            height: 2,
+            transparent: Some(1),
+            buffer: std::borrow::Cow::Borrowed(&[0, 1, 1, 0]),
+            ..gif::Frame::default()
+        };
+        frame.left = 1;
+        e.write_frame(&frame).unwrap();
+    }
+    let rgba = super::picture::decode_gif(&data).unwrap();
+    assert_eq!((rgba.width, rgba.height), (3, 2));
+    let alpha: Vec<u8> = rgba.pixels.chunks(4).map(|p| p[3]).collect();
+    assert_eq!(alpha, [0, 255, 0, 0, 0, 255]);
+    assert_eq!(&rgba.pixels[4..8], &[255, 0, 0, 255]);
+}
+
+/// The Var<type>From<type> functions write the value changed as
+/// VariantChangeType changes it, and leave the output alone on an error.
+#[test]
+fn var_conversions_write_their_output() {
+    use super::variant::*;
+    const TEXT: u32 = 0x2_0000;
+    const OUT: u32 = 0x2_1000;
+    let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+    let mut from_str = |f: fn(&mut crate::cpu::Cpu, &[u32]) -> Option<u32>, s: &str| {
+        let units: Vec<u8> = s
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.bus.guest_write_bytes(TEXT, &units);
+        cpu.bus.guest_write_bytes(OUT, &[0xAA; 8]);
+        let hr = f(&mut cpu, &[TEXT, 0x409, 0, OUT]).unwrap();
+        let mut out = [0u8; 8];
+        cpu.bus.guest_read_bytes(OUT, &mut out);
+        (hr, u64::from_le_bytes(out))
+    };
+    assert_eq!(
+        from_str(var_i2_from_str, " -1,234 "),
+        (0, 0xAAAA_AAAA_AAAA_FB2E)
+    );
+    assert_eq!(
+        from_str(var_i2_from_str, "40000"),
+        (DISP_E_OVERFLOW, 0xAAAA_AAAA_AAAA_AAAA)
+    );
+    assert_eq!(from_str(var_i4_from_str, "2.5"), (0, 0xAAAA_AAAA_0000_0002));
+    assert_eq!(from_str(var_r8_from_str, "1.5"), (0, 1.5f64.to_bits()));
+    assert_eq!(
+        from_str(var_r4_from_str, "x"),
+        (DISP_E_TYPEMISMATCH, 0xAAAA_AAAA_AAAA_AAAA)
+    );
+    assert_eq!(from_str(var_cy_from_str, "1.25"), (0, 12500));
+    let r8 = 3.5f64.to_bits();
+    let hr = var_i4_from_r8(&mut cpu, &[r8 as u32, (r8 >> 32) as u32, OUT]);
+    assert_eq!((hr, cpu.bus.guest_read_32(OUT)), (Some(0), 4));
+    let hr = var_cy_from_i4(&mut cpu, &[-3i32 as u32, OUT]);
+    assert_eq!(hr, Some(0));
+    assert_eq!(cpu.bus.guest_read_32(OUT) as i32, -30000);
+}

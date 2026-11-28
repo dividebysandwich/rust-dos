@@ -5,13 +5,14 @@
 //! the DLL such a program, Discworld Noir's setup among them, doesn't
 //! start.
 //!
-//! OleTranslateColor, DllCanUnloadNow and the registration functions are
-//! written. The font and picture objects, the property frames,
-//! OleIconToCursor and the class factory aren't yet: each is in the
-//! table with Windows 98 SE's ordinal, so a program that imports it by
-//! name or by ordinal loads, and calling it does what calling a missing
-//! function does (`super::not_written`): the program ends with a message
-//! naming it.
+//! The font and picture objects and OleIconToCursor are OLEAUT32's
+//! (font.rs, picture.rs in `oleaut32`), as Windows 98's OLEPRO32 forwards
+//! them. OleTranslateColor, DllCanUnloadNow and the registration
+//! functions are written. The property frames and the class factory
+//! aren't yet: each is in the table with Windows 98 SE's ordinal, so a
+//! program that imports it by name or by ordinal loads, and calling it
+//! does what calling a missing function does (`super::not_written`): the
+//! program ends with a message naming it.
 
 use super::com::{E_INVALIDARG, E_NOTIMPL, S_OK};
 use super::stubs::{Api, Conv, Dll};
@@ -46,7 +47,12 @@ const fn stdcall(
 /// The functions, with Windows 98 SE's ordinals. Append only (see
 /// `stubs`).
 static APIS: &[Api] = &[
-    stdcall("OleIconToCursor", 248, 2, icon_to_cursor),
+    stdcall(
+        "OleIconToCursor",
+        248,
+        2,
+        super::oleaut32::ole_icon_to_cursor,
+    ),
     stdcall(
         "OleCreatePropertyFrameIndirect",
         249,
@@ -54,9 +60,24 @@ static APIS: &[Api] = &[
         property_frame_indirect,
     ),
     stdcall("OleCreatePropertyFrame", 250, 11, property_frame),
-    stdcall("OleLoadPicture", 251, 5, load_picture),
-    stdcall("OleCreatePictureIndirect", 252, 4, create_picture_indirect),
-    stdcall("OleCreateFontIndirect", 253, 3, create_font_indirect),
+    stdcall(
+        "OleLoadPicture",
+        251,
+        5,
+        super::oleaut32::picture::load_picture,
+    ),
+    stdcall(
+        "OleCreatePictureIndirect",
+        252,
+        4,
+        super::oleaut32::picture::create_picture_indirect,
+    ),
+    stdcall(
+        "OleCreateFontIndirect",
+        253,
+        3,
+        super::oleaut32::font::create_font_indirect,
+    ),
     stdcall("OleTranslateColor", 254, 3, translate_color),
     stdcall("DllCanUnloadNow", 255, 0, dll_can_unload_now),
     stdcall("DllGetClassObject", 256, 3, dll_get_class_object),
@@ -64,17 +85,12 @@ static APIS: &[Api] = &[
     stdcall("DllUnregisterServer", 258, 0, register_server),
 ];
 
-// From guest code OleIconToCursor fails with no cursor, and the others,
-// which return an HRESULT, with E_NOTIMPL: 0 would be S_OK, and the
+// From guest code these fail with E_NOTIMPL: 0 would be S_OK, and the
 // caller would use the object it didn't get.
 super::not_written_handlers! {
     DLL.name;
-    icon_to_cursor: "OleIconToCursor" => 0,
     property_frame_indirect: "OleCreatePropertyFrameIndirect" => E_NOTIMPL,
     property_frame: "OleCreatePropertyFrame" => E_NOTIMPL,
-    load_picture: "OleLoadPicture" => E_NOTIMPL,
-    create_picture_indirect: "OleCreatePictureIndirect" => E_NOTIMPL,
-    create_font_indirect: "OleCreateFontIndirect" => E_NOTIMPL,
     dll_get_class_object: "DllGetClassObject" => E_NOTIMPL,
 }
 

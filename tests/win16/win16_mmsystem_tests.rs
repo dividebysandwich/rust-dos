@@ -1729,3 +1729,141 @@ fn mci_setvideo_gives_an_avi_device_the_programs_palette() {
     });
     assert_eq!(exit, 1, "{log}");
 }
+
+const MMIO_OPEN: u16 = 1210;
+const MMIO_CLOSE: u16 = 1211;
+const MMIO_READ: u16 = 1212;
+const MMIO_INSTALL_IO_PROC: u16 = 1221;
+const GET_SELECTOR_LIMIT: u16 = 188;
+
+/// Where the I/O procedure test keeps things: the file's name, its
+/// handle, what was read, the first byte of the name the procedure got,
+/// how many times it was closed, and the selector of the buffer its last
+/// MMIOM_READ got.
+const IO_NAME: u16 = 0x40;
+const IO_HANDLE: u16 = 0x50;
+const IO_BUFFER: u16 = 0x60;
+const IO_NAME0: u16 = 0x70;
+const IO_CLOSES: u16 = 0x72;
+const IO_SEL: u16 = 0x74;
+
+/// A 16-bit I/O procedure, IOProc(lpmmioinfo, wMsg, lParam1, lParam2),
+/// Pascal's: MMIOM_OPEN keeps the name's first byte at IO_NAME0 and
+/// starts at 0 (adwInfo[0] is the place), MMIOM_READ gives "HELLO" at
+/// the place 0 and nothing after, moving lDiskOffset, keeping the
+/// buffer's selector at IO_SEL, and MMIOM_CLOSE counts at IO_CLOSES. DS
+/// is the program's, the stack's.
+fn io_proc() -> Vec<u8> {
+    let mut c: Vec<u8> = Vec::new();
+    let mut to_ret0 = Vec::new();
+    c.extend([0x55, 0x8B, 0xEC]); // push bp; mov bp,sp
+    c.extend([0x8B, 0x46, 0x0E]); // mov ax,[bp+0Eh]: wMsg
+    c.extend([0x3D, 0x03, 0x00, 0x75, 0x00]); // cmp ax,3 (MMIOM_OPEN); jne
+    let not_open = c.len() - 1;
+    c.extend([0xC4, 0x5E, 0x10]); // les bx,[bp+10h]: the MMIOINFO
+    c.extend([0x26, 0xC7, 0x47, 0x2C, 0x00, 0x00]); // mov word es:[bx+2Ch],0
+    c.extend([0xC4, 0x5E, 0x0A]); // les bx,[bp+0Ah]: the name
+    c.extend([0x26, 0x8A, 0x07]); // mov al,es:[bx]
+    c.extend([0xA2, lo(IO_NAME0), hi(IO_NAME0)]); // mov [IO_NAME0],al
+    c.extend([0xEB, 0x00]); // jmp ret0
+    to_ret0.push(c.len() - 1);
+    c[not_open] = (c.len() - not_open - 1) as u8;
+    c.extend([0x3D, 0x04, 0x00, 0x75, 0x06]); // cmp ax,4 (MMIOM_CLOSE); jne
+    c.extend([0xFF, 0x06, lo(IO_CLOSES), hi(IO_CLOSES)]); // inc word [IO_CLOSES]
+    c.extend([0xEB, 0x00]); // jmp ret0
+    to_ret0.push(c.len() - 1);
+    c.extend([0x85, 0xC0, 0x75, 0x00]); // test ax,ax (MMIOM_READ); jnz ret0
+    to_ret0.push(c.len() - 1);
+    c.extend([0x8B, 0x46, 0x0C]); // mov ax,[bp+0Ch]: the buffer's selector
+    c.extend([0xA3, lo(IO_SEL), hi(IO_SEL)]); // mov [IO_SEL],ax
+    c.extend([0xC4, 0x5E, 0x10]); // les bx,[bp+10h]
+    c.extend([0x26, 0x83, 0x7F, 0x2C, 0x00, 0x75, 0x00]); // cmp word es:[bx+2Ch],0; jne ret0
+    to_ret0.push(c.len() - 1);
+    c.extend([0xC4, 0x7E, 0x0A]); // les di,[bp+0Ah]: the buffer
+    c.extend([0x26, 0xC7, 0x05, b'H', b'E']); // mov word es:[di],"HE"
+    c.extend([0x26, 0xC7, 0x45, 0x02, b'L', b'L']); // mov word es:[di+2],"LL"
+    c.extend([0x26, 0xC6, 0x45, 0x04, b'O']); // mov byte es:[di+4],'O'
+    c.extend([0xC4, 0x5E, 0x10]); // les bx,[bp+10h]
+    c.extend([0x26, 0xC7, 0x47, 0x2C, 0x05, 0x00]); // mov word es:[bx+2Ch],5
+    c.extend([0x26, 0x83, 0x47, 0x28, 0x05]); // add word es:[bx+28h],5: lDiskOffset
+    c.extend([0xB8, 0x05, 0x00, 0x31, 0xD2, 0xEB, 0x04]); // mov ax,5; xor dx,dx; jmp done
+    let ret0 = c.len();
+    for at in to_ret0 {
+        c[at] = (ret0 - at - 1) as u8;
+    }
+    c.extend([0x31, 0xC0, 0x31, 0xD2]); // xor ax,ax; xor dx,dx
+    c.extend([0x5D, 0xCA, 0x0E, 0x00]); // done: pop bp; retf 14
+    c
+}
+
+/// A Windows 3.1 program installs its own I/O procedure for 'TST ' and
+/// opens "X.TST+A": mmio calls the 16-bit procedure with the name and a
+/// 16-bit MMIOINFO, reads through it, and closes through it, and
+/// MMIO_FINDPROC gives the 16-bit procedure back. The selector a read's
+/// buffer is passed with is free once the read returns. MMSYSTEM had no
+/// mmioInstallIOProc, and a program that imports it, as The Magic School
+/// Bus Explores the Solar System's MSPAM.DLL does to read its sounds from
+/// its compound file, ended at its first call.
+#[test]
+fn a_programs_own_io_procedure_reads_its_files() {
+    let fcc = u32::from_le_bytes(*b"TST ");
+    let mut code = Code::new();
+    let mut proc_at = Vec::new();
+    set(&mut code, IO_CLOSES, 0);
+    set(&mut code, IO_SEL, 0);
+    // mmioInstallIOProc('TST ', proc, MMIO_INSTALLPROC).
+    code.push((fcc >> 16) as u16).push(fcc as u16);
+    code.emit(&[0x0E]);
+    proc_at.push(code.here() + 1);
+    code.push(0).push(1).push(0);
+    code.call("MMSYSTEM", MMIO_INSTALL_IO_PROC);
+    expect_nonzero(&mut code, 1);
+    // mmioOpen("X.TST+A", NULL, MMIO_READ).
+    for (i, pair) in b"X.TST+A\0".chunks(2).enumerate() {
+        let word = u16::from_le_bytes([pair[0], pair[1]]);
+        set(&mut code, IO_NAME + 2 * i as u16, word);
+    }
+    code.emit(&[0x1E])
+        .push(IO_NAME)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0);
+    code.call("MMSYSTEM", MMIO_OPEN);
+    expect_nonzero(&mut code, 2);
+    code.emit(&[0xA3, lo(IO_HANDLE), hi(IO_HANDLE)]); // mov [IO_HANDLE],ax
+    expect(&mut code, IO_NAME0, u16::from(b'X'), true, 3);
+    // GetSelectorLimit(the read's selector): 0, as it is free.
+    expect(&mut code, IO_SEL, 0, false, 11);
+    push_word(&mut code, IO_SEL);
+    code.call("KERNEL", GET_SELECTOR_LIMIT);
+    expect_ax(&mut code, 0, 10);
+    // mmioRead(hmmio, IO_BUFFER, 5).
+    push_word(&mut code, IO_HANDLE);
+    code.emit(&[0x1E]).push(IO_BUFFER).push(0).push(5);
+    code.call("MMSYSTEM", MMIO_READ);
+    expect_ax(&mut code, 5, 4);
+    expect(&mut code, IO_BUFFER, u16::from_le_bytes(*b"HE"), true, 5);
+    expect(&mut code, IO_BUFFER + 4, u16::from(b'O'), true, 6);
+    // mmioClose(hmmio, 0).
+    push_word(&mut code, IO_HANDLE);
+    code.push(0);
+    code.call("MMSYSTEM", MMIO_CLOSE);
+    expect_ax(&mut code, 0, 7);
+    expect(&mut code, IO_CLOSES, 1, true, 8);
+    // mmioInstallIOProc('TST ', NULL, MMIO_FINDPROC): the procedure.
+    code.push((fcc >> 16) as u16).push(fcc as u16);
+    code.push(0).push(0).push(4).push(0);
+    code.call("MMSYSTEM", MMIO_INSTALL_IO_PROC);
+    proc_at.push(code.here() + 1);
+    code.emit(&[0x3D, 0, 0]); // cmp ax,proc
+    code.emit(&[0x74, 0x06, 0xB0, 9, 0xB4, 0x4C, 0xCD, 0x21]);
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let proc = code.here();
+    code.emit(&io_proc());
+    for at in proc_at {
+        code.patch(at, proc);
+    }
+    let (exit, log) = run("mmio_io_proc16", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}

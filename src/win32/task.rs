@@ -152,6 +152,7 @@ pub static TASKS: &[Step] = &[
     super::oleaut32::invoke_step,
     super::user32::message::receive_step,
     super::msacm32::drivers::step,
+    super::oleaut32::objects_step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
@@ -183,6 +184,7 @@ pub const DDEML_XACT: u16 = 45;
 pub const OLEAUT32_INVOKE: u16 = 46;
 pub const RECEIVE: u16 = 47;
 pub const MSACM32: u16 = 48;
+pub const OLEAUT32_OBJECTS: u16 = 49;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's
