@@ -69,6 +69,56 @@ The registry is the file `C:\REGISTRY.REG`, REGEDIT4 text that can be
 read and edited by hand. It is made the first time a program uses the
 registry.
 
+### Runtimes a setup offers
+
+Many setups offer to install runtimes from the CD after the game:
+DirectX, QuickTime, a media player, codecs, a browser. Whatever they
+copy, the built-in Windows keeps its own DLLs. A DLL it has, loaded by
+its name or from the system folder, is the built-in one, and COM makes
+its built-in classes before any server the registry names for them.
+The installer's copies stay on drive C:, where a program that opens the
+file or asks for its version sees them, but they don't run. A DLL the
+built-in Windows doesn't have runs from the copy its installer leaves,
+so a runtime is worth installing when it brings what the built-in
+Windows lacks:
+
+- **DirectX and DirectX Media:** skip them. The built-in Windows has
+  DirectX 8.1 (8.0a with `win32_version=95`) and DirectShow, and the
+  registry gives that version at every start. A DirectX setup that
+  checks the version, as the DirectX 6.1 on Prince of Persia 3D's CD
+  does, ends at once and copies nothing.
+- **QuickTime:** install it when the game has QuickTime movies (`.mov`
+  files). It isn't part of Windows, and Prince of Persia 3D, for one,
+  skips its movies without it. QuickTime 4's and 5's installers run.
+  QuickTime 5's shows its licence in Dutch at first (#1478): pick
+  English in the language list at its bottom left.
+- **Windows Media Player 6 (`MPFULL.EXE`):** skip it. Its setup stops
+  at each of its parts with "Missing entry:LaunchINFSection", as the
+  built-in ADVPACK.DLL doesn't install INF sections yet (#2271), and
+  leaves the system as it was. Movies a game plays through DirectShow
+  or Video for Windows don't need it.
+- **Internet Explorer 4 or 5:** skip it. Its setup installs through the
+  same ADVPACK functions as Media Player's. A game that loads
+  `WININET.DLL` for its online parts goes on without it (#1491).
+- **Indeo codecs and Video for Windows 1.1e:** skip them for a Windows
+  95 or 98 game. The built-in Video for Windows (MSVFW32 and AVIFIL32)
+  decodes Indeo 3, 4 and 5, Cinepak and Microsoft Video 1 itself,
+  whatever SYSTEM.INI lists, so a codec's DLL isn't used. A setup that
+  installs and registers a codec, as Leadfoot's runs
+  `regsvr32 /s ir50_32.dll`, still works. A Windows 3.1 game needs
+  Video for Windows 1.1e: the built-in Windows has no 16-bit
+  MSVIDEO.DLL or AVIFILE.DLL yet (#2306).
+- **Visual Basic runtimes:** install one when a program says it needs
+  `MSVBVM50.DLL` or `MSVBVM60.DLL`, which the built-in Windows doesn't
+  have. If the package's setup doesn't run, open it with 7-Zip and copy
+  that DLL into the program's folder.
+- **InstallShield's engine and Windows Installer:** let the setup
+  install them. The setup itself runs on them: Windows Installer
+  (`INSTMSIA.EXE`) and InstallShield's scripting runtime
+  (`isscript.msi`) install, and the setup goes on.
+- **Acrobat Reader:** skip it. It only shows the manual; open the PDF
+  file from the CD on your own computer instead.
+
 ## What differs from Windows 98
 
 ### How an install differs

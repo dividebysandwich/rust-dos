@@ -3191,7 +3191,10 @@ EI.EXE
 The setup asks its questions as it would on Windows, and writes its
 files, registry keys and shortcuts on the game's drives. With
 `overlay=true` they go to the saves folder, so **R** on the Games page
-takes the install away and the next start runs the setup again.
+takes the install away and the next start runs the setup again. When
+it offers DirectX, QuickTime, a media player or other runtimes,
+[runtimes a setup offers](docs/builtin-windows.md#runtimes-a-setup-offers)
+says which to install.
 
 The settings of [the profile above](#a-profile-to-start-from) apply to
 the setup as well as the game, and `SET TEMP` matters most here. The
