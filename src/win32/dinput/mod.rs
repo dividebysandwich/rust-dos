@@ -777,11 +777,15 @@ fn new_object(
     if !wide {
         return Some(this);
     }
-    let it = interface(cpu, id, true);
-    if it.is_none() {
-        release_object(cpu, id);
-    }
-    it
+    let Some(it) = interface(cpu, id, true) else {
+        // Undone as the failure above is, without `release_object`: a
+        // device's parent hasn't had the reference yet that `destroyed`
+        // would take away.
+        com::free_interface(cpu, this);
+        state(cpu).objects[id as usize - 1] = None;
+        return None;
+    };
+    Some(it)
 }
 
 /// The interface of the object `id`, the Unicode one if `wide`, which is
@@ -794,7 +798,12 @@ fn interface(cpu: &mut Cpu, id: u32, wide: bool) -> Option<u32> {
     if *o.wide != 0 {
         return Some(*o.wide);
     }
-    let vtable = WIDE + if o.device.is_some() { DEVICE } else { DIRECT_INPUT };
+    let role = if o.device.is_some() {
+        DEVICE
+    } else {
+        DIRECT_INPUT
+    };
+    let vtable = WIDE + role;
     let dll = if is_eight(cpu, id) {
         dll8_index()
     } else {
@@ -1122,8 +1131,7 @@ fn create_device(
     };
     let kind = objects::kind_of(cpu, &guid, version).ok_or(DIERR_DEVICENOTREG)?;
     let device = device::Device::new(id, kind, objects::shape(cpu, kind));
-    let this =
-        new_object(cpu, DEVICE, eight, version, Some(device), wide).ok_or(E_OUTOFMEMORY)?;
+    let this = new_object(cpu, DEVICE, eight, version, Some(device), wide).ok_or(E_OUTOFMEMORY)?;
     if let Some(o) = state(cpu).object_mut(id) {
         o.refs += 1;
     }

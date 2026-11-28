@@ -23,8 +23,8 @@ use super::poll;
 use super::{
     DEVICE, DI_NOEFFECT, DI_OK, DIERR_ACQUIRED, DIERR_DEVICENOTREG, DIERR_INPUTLOST,
     DIERR_INVALIDPARAM, DIERR_NOTACQUIRED, DIERR_NOTBUFFERED, DIERR_NOTFOUND, DIERR_NOTINITIALIZED,
-    DIERR_OTHERAPPHASPRIO, DIERR_READONLY, DIERR_UNSUPPORTED, E_HANDLE, check_version, is_eight,
-    interface, new_object, object_of, release_object, result, state, version_of,
+    DIERR_OTHERAPPHASPRIO, DIERR_READONLY, DIERR_UNSUPPORTED, E_HANDLE, check_version, interface,
+    is_eight, new_object, object_of, release_object, result, state, version_of,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::{self, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid};
