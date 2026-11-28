@@ -6343,6 +6343,10 @@ midiInMessage
 OutputDebugStr
 mmioInstallIOProc
 mmioSendMessage
+waveOutGetPitch
+waveOutSetPitch
+waveOutGetPlaybackRate
+waveOutSetPlaybackRate
 
 MODULE LZEXPAND
 LZCopy
