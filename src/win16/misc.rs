@@ -369,6 +369,27 @@ pub static MMSYSTEM: Def = Def {
         ),
         rust("mmioInstallIOProc", 1221, "lll", mmio_install_io_proc),
         win32("mmioSendMessage", 1222, "wwll", MM, "mmioSendMessage", b'w'),
+        // No device has a pitch or playback rate control, as in WINMM,
+        // but programs look the functions up: Authorware's runtime
+        // stops at start when one is missing.
+        win32("waveOutGetPitch", 413, "wp", MM, "waveOutGetPitch", b'w'),
+        win32("waveOutSetPitch", 414, "wl", MM, "waveOutSetPitch", b'w'),
+        win32(
+            "waveOutGetPlaybackRate",
+            417,
+            "wp",
+            MM,
+            "waveOutGetPlaybackRate",
+            b'w',
+        ),
+        win32(
+            "waveOutSetPlaybackRate",
+            418,
+            "wl",
+            MM,
+            "waveOutSetPlaybackRate",
+            b'w',
+        ),
         // For the installable MCI drivers (mcidrv.rs).
         rust("mciSetDriverData", 707, "wl", mcidrv::mci_set_driver_data),
         rust("mciGetDriverData", 708, "w", mcidrv::mci_get_driver_data),

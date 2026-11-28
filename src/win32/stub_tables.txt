@@ -6131,6 +6131,7 @@ GetAspectRatioFilter
 GetAspectRatioFilterEx
 IsDCCurrentPalette
 CreateScalableFontResource
+GetOutlineTextMetrics
 
 MODULE KEYBOARD
 ToAscii
@@ -6342,6 +6343,10 @@ midiInMessage
 OutputDebugStr
 mmioInstallIOProc
 mmioSendMessage
+waveOutGetPitch
+waveOutSetPitch
+waveOutGetPlaybackRate
+waveOutSetPlaybackRate
 mciSetDriverData
 mciGetDriverData
 mciDriverYield
