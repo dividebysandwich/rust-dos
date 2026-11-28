@@ -7,8 +7,8 @@ by other authors. Their licences ask that copies of rust-dos, in source
 or binary form, carry their copyright notices and licence terms. This
 file holds them, and every release package ships it beside LICENSE.
 
-Sections 1 to 5 are written by hand: add an entry when code from
-another project comes in. Section 7 is written by
+Sections 1 to 6 are written by hand: add an entry when code or fonts
+from another project come in. Section 7 is written by
 tools/third_party_notices.py from Cargo's view of the dependencies; run
 it when a dependency changes.
 

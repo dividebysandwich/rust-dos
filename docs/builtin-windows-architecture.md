@@ -443,8 +443,8 @@ All output goes through the emulated video hardware (`screen.rs`):
   over the face as Windows does. Arial, Times New Roman and Courier New
   move on by Windows 98's widths (`gdi32/truetype.bin`) and are drawn from
   the outlines of the Liberation fonts, which have the same advances
-  (`gdi32/liberation/`). `AddFontResourceA` reads the FNT resources
-  of a program's .FON file, or a bare .FNT (`gdi32/fnt.rs`): their faces are
+  (`gdi32/liberation/`). `AddFontResourceA` reads the FNT resources of a
+  program's .FON file, or a bare .FNT (`gdi32/fnt.rs`): their faces are
   listed with the built-in ones, a font that names one is drawn with its
   glyphs at the nearest size, and a save state keeps their bytes. With
   `win32_depth=8` the desktop has 8 bits a pixel, and GDI keeps a system

@@ -89,11 +89,13 @@ pub struct Metrics {
 }
 
 /// A glyph drawn: its rows from the cell's top, the leftmost pixel in bit
-/// 0 at `offset` from the pen, and how far it moves on.
+/// 0 at `offset` from the pen, and how far it moves on. `clipped` is a
+/// glyph wider than `MOST_WIDTH`, which lost its right part.
 pub struct Drawn {
     pub rows: Vec<u64>,
     pub advance: i32,
     pub offset: i32,
+    pub clipped: bool,
 }
 
 /// `v` font units at `ppem` pixels to the em, rounded.
@@ -265,6 +267,7 @@ impl Ttf {
                     rows: Vec::new(),
                     advance: 0,
                     offset: 0,
+                    clipped: false,
                 })
                 .collect();
         };
@@ -310,7 +313,7 @@ impl Ttf {
                     .unwrap_or_else(|| {
                         (metrics.advance_width(id).unwrap_or(0.0) * stretch).round() as i32
                     });
-                let (rows, offset) = pen.fill(stretch, m.ascent, m.height);
+                let (rows, offset, clipped) = pen.fill(stretch, m.ascent, m.height);
                 let rows = if bold {
                     rows.into_iter().map(|r| r | r << 1).collect()
                 } else {
@@ -320,6 +323,7 @@ impl Ttf {
                     rows,
                     advance: advance + bold as i32,
                     offset,
+                    clipped,
                 }
             })
             .collect()
@@ -406,8 +410,9 @@ impl Path {
     /// `stretch`, in a cell `height` rows high whose baseline is `ascent`
     /// rows down: each row's lit pixels from the column `offset` (the
     /// return's second), lit where the outline covers at least half of
-    /// the pixel. A glyph wider than `MOST_WIDTH` loses its right part.
-    fn fill(&self, stretch: f32, ascent: i32, height: i32) -> (Vec<u64>, i32) {
+    /// the pixel. A glyph wider than `MOST_WIDTH` loses its right part,
+    /// which the return's third tells.
+    fn fill(&self, stretch: f32, ascent: i32, height: i32) -> (Vec<u64>, i32, bool) {
         let mut rows = vec![0u64; height.max(0) as usize];
         let all = self.segments.iter().flat_map(|s| s.points());
         let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
@@ -416,10 +421,11 @@ impl Path {
             (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
         }
         if self.segments.is_empty() || x1 <= x0 || y1 <= y0 {
-            return (rows, 0);
+            return (rows, 0, false);
         }
         let (left, top) = (x0.floor(), y0.floor());
-        let width = ((x1.ceil() - left) as i32).clamp(1, MOST_WIDTH) as usize;
+        let full = (x1.ceil() - left) as i32;
+        let width = full.clamp(1, MOST_WIDTH) as usize;
         let depth = ((y1.ceil() - top) as i32).clamp(1, 4 * height.max(1)) as usize;
         let at =
             |(x, y): (f32, f32)| -> Point { point(x * stretch - left, ascent as f32 - y - top) };
@@ -440,7 +446,7 @@ impl Path {
                 *bits |= 1 << x;
             }
         });
-        (rows, left as i32)
+        (rows, left as i32, full > MOST_WIDTH)
     }
 }
 
