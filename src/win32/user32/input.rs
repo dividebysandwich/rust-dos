@@ -2095,10 +2095,11 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 }
 
 /// SwapMouseButton(swap): whether the buttons were swapped before. They
-/// never are here, and a call that keeps them as they are changes nothing,
-/// so an idle proof goes through it. Warhammer: Shadow of the Horned Rat
-/// reads the setting with SwapMouseButton(FALSE) twice in every pass of
-/// the loop it waits in on its screens (#1284).
+/// never are here (SwapMouseButton(TRUE) doesn't swap them yet, #2329),
+/// and a call that keeps them as they are changes nothing, so an idle
+/// proof goes through it. Warhammer: Shadow of the Horned Rat reads the
+/// setting with SwapMouseButton(FALSE) twice in every pass of the loop it
+/// waits in on its screens (#1284).
 pub fn swap_mouse_button(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] == FALSE {
         crate::idle::pure_call(cpu, None);
