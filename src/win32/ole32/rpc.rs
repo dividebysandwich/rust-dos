@@ -381,6 +381,25 @@ pub fn let_go(cpu: &mut Cpu, id: u32) -> Option<u32> {
     None
 }
 
+/// CoDisconnectObject's work: the running process's exports of `object`
+/// go, whatever references proxies and holders such as the Running
+/// Object Table have to them, so calls through those proxies fail as to
+/// a process that is gone. The objects COM held a reference to for them
+/// come back, once for each export, for the caller to Release now.
+pub fn disconnect(cpu: &mut Cpu, object: u32) -> Vec<u32> {
+    let pid = current_pid(cpu);
+    let exports = &mut rpc(cpu).exports;
+    let mut released = Vec::new();
+    exports.retain(|e| {
+        let gone = e.pid == pid && e.object == object;
+        if gone && e.owned {
+            released.push(e.object);
+        }
+        !gone
+    });
+    released
+}
+
 /// A proxy in the running process of the export `id` a holder keeps,
 /// with a reference of the caller's: 0 when there can be none.
 pub fn proxy_of_held(cpu: &mut Cpu, id: u32) -> u32 {

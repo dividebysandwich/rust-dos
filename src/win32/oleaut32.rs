@@ -1,17 +1,23 @@
 //! OLEAUT32.DLL: the BSTR functions and VARIANTs' simplest ones, which
 //! setup programs and OLE32's PROPVARIANTs use; type libraries
 //! (typelib.rs), which controls register themselves with; error objects
-//! (errorinfo.rs); changes of VARIANTs' types (variant.rs); and
-//! OleTranslateColor, which OLEPRO32 has too (olepro32.rs). A BSTR is a
-//! string of Unicode characters whose length in bytes is in the 4 bytes
+//! (errorinfo.rs); changes of VARIANTs' types (variant.rs); OLE's
+//! standard font and picture objects (font.rs, picture.rs) and their
+//! connection points (connpt.rs); and OleTranslateColor. OLEPRO32 has the
+//! objects' functions and OleTranslateColor too (olepro32.rs). A BSTR is
+//! a string of Unicode characters whose length in bytes is in the 4 bytes
 //! before it, and a zero after it, in a block of the task allocator, as
 //! Windows has it.
 
+mod connpt;
 mod desc;
 mod errorinfo;
+pub(crate) mod font;
+mod hash;
 mod invoke;
 pub(crate) mod model;
 mod msft;
+pub(crate) mod picture;
 pub(crate) mod safearray;
 pub(crate) mod signature;
 mod sltg;
@@ -233,6 +239,153 @@ static APIS: &[Api] = &[
     stdcall("SafeArrayCreateVector", 411, 3, safearray::safe_array_create_vector),
     stdcall("VariantCopyInd", 11, 2, safearray::variant_copy_ind),
     stdcall("DispGetParam", 28, 5, invoke::disp_get_param),
+    stdcall("OaBuildVersion", 170, 0, oa_build_version),
+    stdcall("OleCreateFontIndirect", 420, 3, font::create_font_indirect),
+    stdcall("IFont_QueryInterface", 0, 3, font::query_interface),
+    stdcall("IFont_AddRef", 0, 1, font::method_add_ref),
+    stdcall("IFont_Release", 0, 1, font::method_release),
+    stdcall("IFont_get_Name", 0, 2, font::get_name),
+    stdcall("IFont_put_Name", 0, 2, font::put_name),
+    stdcall("IFont_get_Size", 0, 2, font::get_size),
+    stdcall("IFont_put_Size", 0, 3, font::put_size),
+    stdcall("IFont_get_Bold", 0, 2, font::get_bold),
+    stdcall("IFont_put_Bold", 0, 2, font::put_bold),
+    stdcall("IFont_get_Italic", 0, 2, font::get_italic),
+    stdcall("IFont_put_Italic", 0, 2, font::put_italic),
+    stdcall("IFont_get_Underline", 0, 2, font::get_underline),
+    stdcall("IFont_put_Underline", 0, 2, font::put_underline),
+    stdcall("IFont_get_Strikethrough", 0, 2, font::get_strikethrough),
+    stdcall("IFont_put_Strikethrough", 0, 2, font::put_strikethrough),
+    stdcall("IFont_get_Weight", 0, 2, font::get_weight),
+    stdcall("IFont_put_Weight", 0, 2, font::put_weight),
+    stdcall("IFont_get_Charset", 0, 2, font::get_charset),
+    stdcall("IFont_put_Charset", 0, 2, font::put_charset),
+    stdcall("IFont_get_hFont", 0, 2, font::get_hfont),
+    stdcall("IFont_Clone", 0, 2, font::clone),
+    stdcall("IFont_IsEqual", 0, 2, font::is_equal),
+    stdcall("IFont_SetRatio", 0, 3, font::set_ratio),
+    stdcall("IFont_QueryTextMetrics", 0, 2, font::query_text_metrics),
+    stdcall("IFont_AddRefHfont", 0, 2, font::add_ref_hfont),
+    stdcall("IFont_ReleaseHfont", 0, 2, font::release_hfont),
+    stdcall("IFont_SetHdc", 0, 2, font::set_hdc),
+    stdcall("IFontDisp_GetTypeInfoCount", 0, 2, font::get_type_info_count),
+    stdcall("IFontDisp_GetTypeInfo", 0, 4, font::get_type_info),
+    stdcall("IFontDisp_GetIDsOfNames", 0, 6, font::get_ids_of_names),
+    stdcall("IFontDisp_Invoke", 0, 9, font::invoke),
+    stdcall("IFont_GetClassID", 0, 2, font::get_class_id),
+    stdcall("IFont_IsDirty", 0, 1, font::is_dirty),
+    stdcall("IFont_Load", 0, 2, font::load),
+    stdcall("IFont_Save", 0, 3, font::save),
+    stdcall("IFont_GetSizeMax", 0, 2, font::get_size_max),
+    stdcall(
+        "IFont_EnumConnectionPoints",
+        0,
+        2,
+        font::enum_connection_points,
+    ),
+    stdcall("IFont_FindConnectionPoint", 0, 3, font::find_connection_point),
+    stdcall("IFont_InitNew", 0, 1, font::init_new),
+    stdcall("IFont_LoadBag", 0, 3, font::bag_load),
+    stdcall("IFont_SaveBag", 0, 4, font::bag_save),
+    stdcall("IConnectionPoint_QueryInterface", 0, 3, connpt::query_interface),
+    stdcall("IConnectionPoint_AddRef", 0, 1, connpt::method_add_ref),
+    stdcall("IConnectionPoint_Release", 0, 1, connpt::method_release),
+    stdcall(
+        "IConnectionPoint_GetConnectionInterface",
+        0,
+        2,
+        connpt::get_connection_interface,
+    ),
+    stdcall(
+        "IConnectionPoint_GetConnectionPointContainer",
+        0,
+        2,
+        connpt::get_connection_point_container,
+    ),
+    stdcall("IConnectionPoint_Advise", 0, 3, connpt::advise),
+    stdcall("IConnectionPoint_Unadvise", 0, 2, connpt::unadvise),
+    stdcall(
+        "IConnectionPoint_EnumConnections",
+        0,
+        2,
+        connpt::enum_connections,
+    ),
+    stdcall("OleLoadPicture", 418, 5, picture::load_picture),
+    stdcall(
+        "OleCreatePictureIndirect",
+        419,
+        4,
+        picture::create_picture_indirect,
+    ),
+    stdcall("IPicture_QueryInterface", 0, 3, picture::query_interface),
+    stdcall("IPicture_AddRef", 0, 1, picture::method_add_ref),
+    stdcall("IPicture_Release", 0, 1, picture::method_release),
+    stdcall("IPicture_get_Handle", 0, 2, picture::get_handle),
+    stdcall("IPicture_get_hPal", 0, 2, picture::get_hpal),
+    stdcall("IPicture_get_Type", 0, 2, picture::get_type),
+    stdcall("IPicture_get_Width", 0, 2, picture::get_width),
+    stdcall("IPicture_get_Height", 0, 2, picture::get_height),
+    stdcall("IPicture_Render", 0, 11, picture::render),
+    stdcall("IPicture_set_hPal", 0, 2, picture::set_hpal),
+    stdcall("IPicture_get_CurDC", 0, 2, picture::get_cur_dc),
+    stdcall("IPicture_SelectPicture", 0, 4, picture::select_picture),
+    stdcall(
+        "IPicture_get_KeepOriginalFormat",
+        0,
+        2,
+        picture::get_keep_original_format,
+    ),
+    stdcall(
+        "IPicture_put_KeepOriginalFormat",
+        0,
+        2,
+        picture::put_keep_original_format,
+    ),
+    stdcall("IPicture_PictureChanged", 0, 1, picture::picture_changed),
+    stdcall("IPicture_SaveAsFile", 0, 4, picture::save_as_file),
+    stdcall("IPicture_get_Attributes", 0, 2, picture::get_attributes),
+    stdcall(
+        "IPictureDisp_GetTypeInfoCount",
+        0,
+        2,
+        picture::get_type_info_count,
+    ),
+    stdcall("IPictureDisp_GetTypeInfo", 0, 4, picture::get_type_info),
+    stdcall("IPictureDisp_GetIDsOfNames", 0, 6, picture::get_ids_of_names),
+    stdcall("IPictureDisp_Invoke", 0, 9, picture::invoke),
+    stdcall("IPicture_GetClassID", 0, 2, picture::get_class_id),
+    stdcall("IPicture_IsDirty", 0, 1, picture::is_dirty),
+    stdcall("IPicture_Load", 0, 2, picture::load),
+    stdcall("IPicture_Save", 0, 3, picture::save),
+    stdcall("IPicture_GetSizeMax", 0, 2, picture::get_size_max),
+    stdcall(
+        "IPicture_EnumConnectionPoints",
+        0,
+        2,
+        font::enum_connection_points,
+    ),
+    stdcall(
+        "IPicture_FindConnectionPoint",
+        0,
+        3,
+        picture::find_connection_point,
+    ),
+    stdcall("VarI2FromStr", 54, 4, variant::var_i2_from_str),
+    stdcall("VarI4FromR8", 61, 3, variant::var_i4_from_r8),
+    stdcall("VarI4FromStr", 64, 4, variant::var_i4_from_str),
+    stdcall("VarR4FromStr", 74, 4, variant::var_r4_from_str),
+    stdcall("VarR8FromStr", 84, 4, variant::var_r8_from_str),
+    stdcall("VarCyFromI4", 100, 2, variant::var_cy_from_i4),
+    stdcall("VarCyFromStr", 104, 4, variant::var_cy_from_str),
+    stdcall("VarBstrFromI2", 109, 4, variant::var_bstr_from_i2),
+    stdcall("VarBstrFromI4", 110, 4, variant::var_bstr_from_i4),
+    stdcall("VarBstrFromR4", 111, 4, variant::var_bstr_from_r4),
+    stdcall("VarBstrFromR8", 112, 5, variant::var_bstr_from_r8),
+    stdcall("VarBstrFromCy", 113, 5, variant::var_bstr_from_cy),
+    stdcall("DispInvoke", 30, 8, disp_invoke),
+    stdcall("OleIconToCursor", 415, 2, ole_icon_to_cursor),
+    stdcall("LHashValOfNameSys", 165, 3, hash::lhash_val_of_name_sys),
+    stdcall("LHashValOfNameSysA", 166, 3, hash::lhash_val_of_name_sys_a),
 ];
 
 /// The vtables, by their places in this list. ITypeLib's and ITypeInfo's
@@ -328,6 +481,155 @@ static VTABLES: &[Vtable] = &[
             "IErrorInfo_GetHelpContext",
         ],
     },
+    Vtable {
+        name: "IFont",
+        methods: &[
+            "IFont_QueryInterface",
+            "IFont_AddRef",
+            "IFont_Release",
+            "IFont_get_Name",
+            "IFont_put_Name",
+            "IFont_get_Size",
+            "IFont_put_Size",
+            "IFont_get_Bold",
+            "IFont_put_Bold",
+            "IFont_get_Italic",
+            "IFont_put_Italic",
+            "IFont_get_Underline",
+            "IFont_put_Underline",
+            "IFont_get_Strikethrough",
+            "IFont_put_Strikethrough",
+            "IFont_get_Weight",
+            "IFont_put_Weight",
+            "IFont_get_Charset",
+            "IFont_put_Charset",
+            "IFont_get_hFont",
+            "IFont_Clone",
+            "IFont_IsEqual",
+            "IFont_SetRatio",
+            "IFont_QueryTextMetrics",
+            "IFont_AddRefHfont",
+            "IFont_ReleaseHfont",
+            "IFont_SetHdc",
+        ],
+    },
+    Vtable {
+        name: "IFontDisp",
+        methods: &[
+            "IFont_QueryInterface",
+            "IFont_AddRef",
+            "IFont_Release",
+            "IFontDisp_GetTypeInfoCount",
+            "IFontDisp_GetTypeInfo",
+            "IFontDisp_GetIDsOfNames",
+            "IFontDisp_Invoke",
+        ],
+    },
+    Vtable {
+        name: "IFontPersistStream",
+        methods: &[
+            "IFont_QueryInterface",
+            "IFont_AddRef",
+            "IFont_Release",
+            "IFont_GetClassID",
+            "IFont_IsDirty",
+            "IFont_Load",
+            "IFont_Save",
+            "IFont_GetSizeMax",
+        ],
+    },
+    Vtable {
+        name: "IFontConnectionPointContainer",
+        methods: &[
+            "IFont_QueryInterface",
+            "IFont_AddRef",
+            "IFont_Release",
+            "IFont_EnumConnectionPoints",
+            "IFont_FindConnectionPoint",
+        ],
+    },
+    Vtable {
+        name: "IFontPersistPropertyBag",
+        methods: &[
+            "IFont_QueryInterface",
+            "IFont_AddRef",
+            "IFont_Release",
+            "IFont_GetClassID",
+            "IFont_InitNew",
+            "IFont_LoadBag",
+            "IFont_SaveBag",
+        ],
+    },
+    Vtable {
+        name: "IConnectionPoint",
+        methods: &[
+            "IConnectionPoint_QueryInterface",
+            "IConnectionPoint_AddRef",
+            "IConnectionPoint_Release",
+            "IConnectionPoint_GetConnectionInterface",
+            "IConnectionPoint_GetConnectionPointContainer",
+            "IConnectionPoint_Advise",
+            "IConnectionPoint_Unadvise",
+            "IConnectionPoint_EnumConnections",
+        ],
+    },
+    Vtable {
+        name: "IPicture",
+        methods: &[
+            "IPicture_QueryInterface",
+            "IPicture_AddRef",
+            "IPicture_Release",
+            "IPicture_get_Handle",
+            "IPicture_get_hPal",
+            "IPicture_get_Type",
+            "IPicture_get_Width",
+            "IPicture_get_Height",
+            "IPicture_Render",
+            "IPicture_set_hPal",
+            "IPicture_get_CurDC",
+            "IPicture_SelectPicture",
+            "IPicture_get_KeepOriginalFormat",
+            "IPicture_put_KeepOriginalFormat",
+            "IPicture_PictureChanged",
+            "IPicture_SaveAsFile",
+            "IPicture_get_Attributes",
+        ],
+    },
+    Vtable {
+        name: "IPictureDisp",
+        methods: &[
+            "IPicture_QueryInterface",
+            "IPicture_AddRef",
+            "IPicture_Release",
+            "IPictureDisp_GetTypeInfoCount",
+            "IPictureDisp_GetTypeInfo",
+            "IPictureDisp_GetIDsOfNames",
+            "IPictureDisp_Invoke",
+        ],
+    },
+    Vtable {
+        name: "IPicturePersistStream",
+        methods: &[
+            "IPicture_QueryInterface",
+            "IPicture_AddRef",
+            "IPicture_Release",
+            "IPicture_GetClassID",
+            "IPicture_IsDirty",
+            "IPicture_Load",
+            "IPicture_Save",
+            "IPicture_GetSizeMax",
+        ],
+    },
+    Vtable {
+        name: "IPictureConnectionPointContainer",
+        methods: &[
+            "IPicture_QueryInterface",
+            "IPicture_AddRef",
+            "IPicture_Release",
+            "IPicture_EnumConnectionPoints",
+            "IPicture_FindConnectionPoint",
+        ],
+    },
 ];
 
 /// OLEAUT32's state: its objects, each kept with the process it belongs
@@ -343,6 +645,9 @@ pub struct State {
     /// thread, interface).
     errors: Vec<Option<errorinfo::ErrorObject>>,
     thread_errors: Vec<(u32, u32, u32)>,
+    /// The standard font objects and their HFONTs, and the standard
+    /// picture objects.
+    fonts: font::Saved,
 }
 
 crate::state_fields!(State {
@@ -350,7 +655,8 @@ crate::state_fields!(State {
     infos,
     parsed,
     errors,
-    thread_errors
+    thread_errors,
+    fonts
 });
 
 fn dll_index() -> usize {
@@ -386,6 +692,29 @@ fn insert<T>(table: &mut Vec<Option<T>>, item: T) -> usize {
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     typelib::process_ended(cpu, pid);
     errorinfo::process_ended(cpu, pid);
+    font::process_ended(cpu, pid);
+    picture::process_ended(cpu, pid);
+}
+
+/// The kinds of the tasks of the font and picture objects
+/// (`task::OLEAUT32_OBJECTS`), their first variable.
+pub(super) const NOTIFY: u32 = 0;
+pub(super) const FONT_LOAD: u32 = 1;
+pub(super) const FONT_SAVE: u32 = 2;
+pub(super) const ADVISE: u32 = 3;
+pub(super) const PICTURE_LOAD: u32 = 4;
+pub(super) const PICTURE_SAVE: u32 = 5;
+
+/// A step of a task of the font and picture objects.
+pub fn objects_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    match t.var(0) {
+        NOTIFY => connpt::notify_step(cpu, t),
+        FONT_LOAD => font::load_step(cpu, t, value),
+        FONT_SAVE => font::save_step(cpu, t, value),
+        ADVISE => connpt::advise_step(cpu, t, value),
+        PICTURE_SAVE => picture::save_step(cpu, t, value),
+        _ => picture::load_step(cpu, t, value),
+    }
 }
 
 /// A new BSTR of the string `s`, or 0 when memory is out.
@@ -438,12 +767,41 @@ fn disp_get_ids_of_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(cpu, task::OLEAUT32, vec![method, info, names, count, ids], 0)
 }
 
+/// DispInvoke(this, info, member, flags, params, result, excepinfo,
+/// arg_err): ITypeInfo::Invoke of `info` with the same arguments, as
+/// Windows makes it.
+fn disp_invoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // ITypeInfo::Invoke takes the type before the object, and the rest
+    // as they are.
+    let (this, info) = (args[0], args[1]);
+    let mut invoke_args = [0; 8];
+    invoke_args[0] = info;
+    invoke_args[1] = this;
+    invoke_args[2..].copy_from_slice(&args[2..]);
+    if typelib::info_of(cpu, info).is_some() {
+        return invoke::invoke(cpu, &invoke_args);
+    }
+    let Some(method) = super::ole32::method(cpu, info, 11) else {
+        return Some(super::com::E_INVALIDARG);
+    };
+    let mut vars = vec![method];
+    vars.extend_from_slice(&invoke_args);
+    task::start(cpu, task::OLEAUT32, vars, 0)
+}
+
+/// OleIconToCursor(instance, icon): a copy of the icon, as CopyCursor
+/// makes one, which is what Wine gives.
+pub(crate) fn ole_icon_to_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::user32::resource::copy_icon(cpu, &args[1..])
+}
+
 /// The task of the functions that call into the program:
-/// DispGetIDsOfNames calls the type's GetIDsOfNames and returns what it
+/// DispGetIDsOfNames and DispInvoke call the type's method, its address
+/// the first variable and its arguments the others, and return what it
 /// does.
 pub fn step(_: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.step {
-        0 => Next::call(t.var(0), &[t.var(1), t.var(2), t.var(3), t.var(4)], 1),
+        0 => Next::call(t.var(0), &t.vars[1..], 1),
         _ => Next::Done(value),
     }
 }
@@ -501,6 +859,13 @@ fn byte_len(cpu: &mut Cpu, s: u32) -> u32 {
         return 0;
     }
     cpu.bus.guest_read_32(s - 4)
+}
+
+/// OaBuildVersion(): Windows 98 SE's OLEAUT32.DLL, 2.40.4275, as the
+/// minor version in the high word and the build in the low one. The
+/// Visual Basic 5 runtime asks for it at start-up.
+fn oa_build_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(40 << 16 | 4275)
 }
 
 /// SysAllocString(text): NULL for NULL.

@@ -1682,15 +1682,35 @@ pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
         (y1 - y0).abs() * log.height.signum()
     };
     let width = dc.width_to_device(log.width.abs());
+    realize_sized(cpu, &log, height, width)
+}
+
+/// The font the LOGFONTA `log` gives on a DC whose logical units are
+/// its pixels (MM_TEXT), as a memory DC of the screen has them. OLE's
+/// standard font object picks its font this way.
+pub fn realize_log(cpu: &mut Cpu, log: &[u8]) -> Realized {
+    let log = Log::of(log);
+    realize_sized(cpu, &log, log.height, log.width.abs())
+}
+
+/// The font of `log` at the device height and width given.
+fn realize_sized(cpu: &mut Cpu, log: &Log, height: i32, width: i32) -> Realized {
     let sys = System::of(cpu);
-    let sizes = file_sizes(cpu, &log);
-    if let Some(f) = realize_file(&log, &sys, &sizes, height, width) {
+    let sizes = file_sizes(cpu, log);
+    if let Some(f) = realize_file(log, &sys, &sizes, height, width) {
         return f;
     }
-    if let Some(f) = realize_added_truetype(&gdi(cpu).font_files, &log, &sys, height, width) {
+    if let Some(f) = realize_added_truetype(&gdi(cpu).font_files, log, &sys, height, width) {
         return f;
     }
-    realize(&log, &sys, height, width)
+    realize(log, &sys, height, width)
+}
+
+/// A new HFONT of the LOGFONTA `log` (60 bytes), for a built-in DLL.
+pub fn new_font(cpu: &mut Cpu, mut log: Vec<u8>) -> u32 {
+    log.resize(60, 0);
+    log[59] = 0;
+    add(cpu, Kind::Font { font: Font { log } })
 }
 
 /// The font of the DC `hdc`, or None with the error set.
@@ -1895,6 +1915,20 @@ pub fn get_text_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tm = text_metric(&dc, &f);
     cpu.bus.guest_write_bytes(args[1], &tm);
     Some(TRUE)
+}
+
+/// The TEXTMETRICW of the font of the DC `hdc`, the 57 bytes of its
+/// fields up to tmCharSet: TEXTMETRICA's with the four characters in
+/// Unicode. For a built-in DLL (OLE's IFont::QueryTextMetrics).
+pub fn text_metric_wide(cpu: &mut Cpu, hdc: u32) -> Option<Vec<u8>> {
+    let (dc, f) = font_of(cpu, hdc)?;
+    let a = text_metric(&dc, &f);
+    let mut b = a[..44].to_vec();
+    for &c in &a[44..48] {
+        b.extend_from_slice(&f.page.char(c).to_le_bytes());
+    }
+    b.extend_from_slice(&a[48..]);
+    Some(b)
 }
 
 fn write_size(cpu: &mut Cpu, at: u32, (w, h): (i32, i32)) {

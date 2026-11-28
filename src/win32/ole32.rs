@@ -278,6 +278,7 @@ static APIS: &[Api] = &[
     stdcall("IRunningObjectTable_NoteChangeTime", 0, 3, moniker::rot_note_change_time),
     stdcall("IRunningObjectTable_GetTimeOfLastChange", 0, 3, moniker::rot_get_time_of_last_change),
     stdcall("IRunningObjectTable_EnumRunning", 0, 2, moniker::rot_enum_running),
+    stdcall("CoDisconnectObject", 20, 2, compobj::co_disconnect_object),
 ];
 
 /// The vtables, by their places in this list.
