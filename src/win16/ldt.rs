@@ -1,13 +1,13 @@
 //! Selectors: the entries of the Win16 process's LDT that 16-bit code
 //! uses for its segments, given out from `FIRST` on as Windows 3.1 gave
-//! them out. A single selector freed is given out again before the others,
-//! the last one freed first, as Windows 98's free list gives them: a
-//! program started again after it ended then gets other selectors than
-//! it had, which a probe on Windows 98 SE showed (#2280). A block of more
-//! than 64 KB has a selector for each 64 KB of
-//! it, `__AHINCR` (8) apart, so that huge pointers step through it: the
-//! first selector's base is the block's and its limit the whole block's,
-//! and each next one starts 64 KB further with a limit 64 KB smaller, as
+//! them out. A single selector freed is given out again before the
+//! others, the last one freed first, as Windows 98's free list gives
+//! them: a program started again after it ended then gets other
+//! selectors than it had, which a probe on Windows 98 SE showed (#2280).
+//! A block of more than 64 KB has a selector for each 64 KB of it,
+//! `__AHINCR` (8) apart, so that huge pointers step through it: the first
+//! selector's base is the block's and its limit the whole block's, and
+//! each next one starts 64 KB further with a limit 64 KB smaller, as
 //! Windows sets them.
 //!
 //! The LDT is the system block's (system.rs), in physical memory the
@@ -349,5 +349,29 @@ mod tests {
         ldt.free(selector(FIRST + 2), 2);
         assert_eq!(ldt.alloc(3), Some(b));
         assert_eq!(ldt.alloc(1), Some(selector(FIRST + 4)));
+    }
+
+    #[test]
+    fn the_freed_list_stays_within_the_table_and_keeps_its_order() {
+        // A huge block allocated and freed over and over takes the same
+        // run each time and puts its entries on the list each time.
+        let mut ldt = Ldt::default();
+        let a = ldt.alloc(1).unwrap();
+        let b = ldt.alloc(1).unwrap();
+        ldt.free(a, 1);
+        for _ in 0..5000 {
+            let run = ldt.alloc(2).unwrap();
+            assert_eq!(run, selector(FIRST + 2));
+            ldt.free(run, 2);
+        }
+        let entries = crate::win32::system::LDT_ENTRIES as usize;
+        assert!(ldt.freed.len() <= entries, "{}", ldt.freed.len());
+        // The run's entries, the last freed first, then the one freed
+        // before them all, then the first free entry.
+        assert_eq!(ldt.alloc(1), Some(selector(FIRST + 3)));
+        assert_eq!(ldt.alloc(1), Some(selector(FIRST + 2)));
+        assert_eq!(ldt.alloc(1), Some(a));
+        assert_eq!(ldt.alloc(1), Some(selector(FIRST + 4)));
+        assert!(ldt.is_allocated(b));
     }
 }

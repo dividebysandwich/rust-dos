@@ -94,10 +94,10 @@ const WIN32_VERSION: u16 = 117;
 /// (`win16::notify::NOTIFY_SAVED`), 71's to 113's the last errors
 /// outside the TIBs and the TLS slots at TIB+100h
 /// (`win32::thread::TIB_98`, which the load moves), 71's to 114's no
-/// VxD handles (`object::Kind::Vxd`, which they load without), and
-/// 71's to 115's no Unicode interfaces of DirectInput
-/// (`dinput::WIDE_SAVED`), and 71's to 116's not the order the Win16
-/// selectors were freed in (`win16::ldt::FREED_SAVED`).
+/// VxD handles (`object::Kind::Vxd`, which they load without), 71's to
+/// 115's no Unicode interfaces of DirectInput (`dinput::WIDE_SAVED`),
+/// and 71's to 116's not the order the Win16 selectors were freed in
+/// (`win16::ldt::FREED_SAVED`).
 const WIN32_LOADS: [u16; 47] = [
     71,
     72,
