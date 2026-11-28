@@ -232,6 +232,12 @@ opcode, `win32_version=98se` when a message names the version, more
   set. On `svga_voodoo3` and `svga_toadforce` the game sets its 16-bit
   mode on the display card itself, which DirectShow then reads, so the
   movies play without the setting.
+* **Prince of Persia 3D**: `machine=svga_voodoo3`, `cpu=pentium_ii`,
+  `memsize=128`. After the game, its setup offers QuickTime 4, DirectX
+  6.1 and Windows Media Player 6. Install QuickTime, which plays the
+  game's movies; without it the game skips them. Skip the other two
+  ([runtimes a setup
+  offers](builtin-windows.md#runtimes-a-setup-offers)).
 * **Rage of Mages** (GOG): `cpu=pentium_ii`. The game needs a Pentium; on
   the default 486 the map's unexplored areas show dark blue instead of
   black. Copy the game's folder into a folder of drive C:, such as
