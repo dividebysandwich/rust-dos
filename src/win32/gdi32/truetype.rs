@@ -1,16 +1,43 @@
 //! The metrics of the TrueType faces Arial, Times New Roman and Courier
-//! New, without their outlines. `truetype.bin` has, for each of the
-//! twelve fonts (each face regular, bold, italic and bold italic), the
-//! font-wide numbers the metrics come from, the ascent and descent in
-//! pixels at each pixel size, and the hinted widths of the characters of
-//! code pages 1250 to 1254 and 1257 at the sizes up to 128 pixels where
-//! they move off the scaled advance. These roughly match the real fonts'
-//! dimensions, so GDI's text takes about as much room as on Windows,
-//! though `font` draws it with the ROM font's glyphs.
+//! New, and the outlines they are drawn with. `truetype.bin` has, for
+//! each of the twelve fonts (each face regular, bold, italic and bold
+//! italic), the font-wide numbers the metrics come from, the ascent and
+//! descent in pixels at each pixel size, and the hinted widths of the
+//! characters of code pages 1250 to 1254 and 1257 at the sizes up to 128
+//! pixels where they move off the scaled advance. These roughly match
+//! the real fonts' dimensions, so GDI's text takes as much room as on
+//! Windows.
+//!
+//! Windows' fonts can't be shipped, so `font` draws the characters with
+//! the outlines of the Liberation fonts 2.1.5 (`liberation/`, under the
+//! SIL Open Font License 1.1): Liberation Sans, Serif and Mono have the
+//! advances of Arial, Times New Roman and Courier New, and are hinted by
+//! their own instructions.
 
 use std::sync::OnceLock;
 
 static DATA: &[u8] = include_bytes!("truetype.bin");
+
+/// The Liberation fonts, in `style`'s order.
+static OUTLINES: [&[u8]; 12] = [
+    include_bytes!("liberation/LiberationSans-Regular.ttf"),
+    include_bytes!("liberation/LiberationSans-Bold.ttf"),
+    include_bytes!("liberation/LiberationSans-Italic.ttf"),
+    include_bytes!("liberation/LiberationSans-BoldItalic.ttf"),
+    include_bytes!("liberation/LiberationSerif-Regular.ttf"),
+    include_bytes!("liberation/LiberationSerif-Bold.ttf"),
+    include_bytes!("liberation/LiberationSerif-Italic.ttf"),
+    include_bytes!("liberation/LiberationSerif-BoldItalic.ttf"),
+    include_bytes!("liberation/LiberationMono-Regular.ttf"),
+    include_bytes!("liberation/LiberationMono-Bold.ttf"),
+    include_bytes!("liberation/LiberationMono-Italic.ttf"),
+    include_bytes!("liberation/LiberationMono-BoldItalic.ttf"),
+];
+
+/// The TrueType file whose outlines draw the font `style`.
+pub fn outlines(style: usize) -> &'static [u8] {
+    OUTLINES[style]
+}
 
 /// The families, in `truetype.bin`'s order.
 pub const ARIAL: usize = 0;
@@ -235,12 +262,23 @@ pub fn size(style: usize, device_height: i32, device_width: i32) -> Size {
     }
 }
 
-/// The font `style` at `x_ppem` pixels to the em across, as far as
-/// `advance` needs it.
-pub fn across(style: usize, x_ppem: i32) -> Size {
+/// The font `style` at `ppem` pixels to the em upward and `x_ppem`
+/// across, as far as drawing it and `advance` need: its height and
+/// ascent as `size` gives them.
+pub fn at(style: usize, ppem: i32, x_ppem: i32) -> Size {
+    let s = size(style, -ppem, 0);
+    if x_ppem == ppem {
+        return s;
+    }
+    let f = &data().fonts[style];
+    let ascent = scale(f, f.win_ascent, ppem);
+    let height = ascent + scale(f, f.win_descent, ppem);
     Size {
         x_ppem,
-        ..size(style, -x_ppem, 0)
+        height,
+        ascent,
+        internal: height - ppem,
+        ..s
     }
 }
 
