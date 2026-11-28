@@ -260,6 +260,13 @@ jobs:
         if: matrix.label == 'linux-x86_64'
         run: python3 tools/third_party_notices.py --check
 
+      # tools/merge_numbers.py resolves the W32 version and the table
+      # places a merge of main leaves in conflict; its tests make small
+      # repositories of their own and take a second.
+      - name: Test tools/merge_numbers.py (Linux x86_64)
+        if: matrix.label == 'linux-x86_64'
+        run: python3 -I tools/merge_numbers_test.py
+
       # The tests run with cargo-nextest (.config/nextest.toml), each in a
       # process of its own, as each file in tests/ had a program of its own
       # before the files became modules of a few programs (#549).

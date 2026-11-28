@@ -173,6 +173,15 @@ that it improves on main. Steps, in this order:
    hash without a build, and exits with 1, saying what to change, while
    the table's last line isn't `WIN32_VERSION` with that hash.
 
+   `python -I tools/merge_numbers.py`, run while the merge is stopped
+   on its conflicts, does all of this for a branch that added one W32
+   version, and resolves the places of an append-only table both sides
+   appended to (the `THENS` of `src/win16/thunk.rs` and
+   `src/win32/call.rs`): main's entries keep their places, the
+   branch's follow, and its `u16` constants are renumbered to match.
+   It stages what it resolved and lists the conflicts it left. Read
+   its changes like any other resolution before committing.
+
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs
 a decision with no clearly better option, or is far beyond the change's
