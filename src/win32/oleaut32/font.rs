@@ -430,8 +430,10 @@ fn release(cpu: &mut Cpu, id: usize) -> Option<Vec<(u32, u32)>> {
             .map(|h| h.hfont)
             .collect();
         fonts(cpu).hfonts.retain(|h| h.pid != pid);
+        // DeleteObject's work: one still selected into a DC goes when
+        // it is selected out.
         for h in gone {
-            gdi32::delete_object_now(cpu, h);
+            gdi32::delete_object(cpu, &[h]);
         }
     }
     Some(calls)
@@ -479,7 +481,7 @@ fn dec_int_ref(cpu: &mut Cpu, pid: u32, hfont: u32) -> u32 {
         fonts(cpu)
             .hfonts
             .retain(|h| !(h.pid == pid && h.hfont == hfont));
-        gdi32::delete_object_now(cpu, hfont);
+        gdi32::delete_object(cpu, &[hfont]);
     }
     S_OK
 }
@@ -573,7 +575,7 @@ fn changed(cpu: &mut Cpu, id: usize, dispid: u32) -> Option<u32> {
         .iter()
         .find(|&&(_, d)| d == dispid)
         .map_or("", |&(n, _)| n);
-    connpt::notify(cpu, dispid, &notify, &events, name)
+    connpt::notify(cpu, connpt::FONT, id, dispid, &notify, &events, name)
 }
 
 /// LOAD's and SAVE's scratch space: the bytes, and the count Read or
@@ -637,6 +639,9 @@ pub fn load_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 o.size = u32::from_le_bytes([head[6], head[7], head[8], head[9]]) as i64;
                 o.name = name;
                 o.dirty = true;
+                // No font made before is the one to compare the name
+                // with, as Wine has it: the character set read is kept.
+                o.face.clear();
                 (o.pid, std::mem::take(&mut o.hfont))
             };
             dec_int_ref(cpu, pid, old);

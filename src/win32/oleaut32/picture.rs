@@ -113,7 +113,7 @@ pub struct Picture {
     pub xor: u32,
     pub keep_original_format: bool,
     /// The DC SelectPicture selected the bitmap into, and the bitmap a
-    /// new memory DC has, which goes back into it.
+    /// new memory DC has (GDI's default one), which goes back into it.
     pub cur_dc: u32,
     pub stock_bitmap: u32,
     /// The interfaces: IPicture, IPictureDisp, IPersistStream,
@@ -225,6 +225,7 @@ fn construct(cpu: &mut Cpu, own: bool) -> Option<usize> {
         kind: PICTYPE_UNINITIALIZED,
         own,
         keep_original_format: true,
+        stock_bitmap: gdi32::bitmap::default_bitmap(cpu),
         ..Picture::default()
     };
     let id = insert(pictures(cpu), picture);
@@ -298,9 +299,11 @@ fn release(cpu: &mut Cpu, id: usize) -> Option<Vec<(u32, u32)>> {
 fn destroy(cpu: &mut Cpu, o: &Picture) {
     match o.kind {
         PICTYPE_BITMAP => {
+            // DeleteObject's work: a bitmap still selected into a DC
+            // (SelectPicture's) goes when it is selected out.
             for h in [o.handle, o.mask, o.xor] {
                 if h != 0 {
-                    gdi32::delete_object_now(cpu, h);
+                    gdi32::delete_object(cpu, &[h]);
                 }
             }
         }
@@ -1070,6 +1073,8 @@ pub fn get_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
+/// get_hPal(this, out): a bitmap's palette; E_FAIL for any other type,
+/// which Wine's tests check on Windows for each PICTYPE.
 pub fn get_hpal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     get_32(cpu, args, |o| {
         if o.kind == PICTYPE_BITMAP {
@@ -1244,7 +1249,7 @@ pub fn set_hpal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// A property changed: the sinks hear of it.
 fn changed(cpu: &mut Cpu, id: usize, dispid: u32) -> Option<u32> {
     let sinks = get(cpu, id).sinks.clone();
-    connpt::notify(cpu, dispid, &sinks, &[], "")
+    connpt::notify(cpu, connpt::PICTURE, id, dispid, &sinks, &[], "")
 }
 
 pub fn get_cur_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1258,7 +1263,8 @@ pub fn get_cur_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SelectPicture(this, hdc, old_dc, bitmap): a bitmap selected into the
 /// DC `hdc`, out of the one it was in before, which gets the bitmap a new
-/// memory DC has.
+/// memory DC has, as Wine does it. The default bitmap can be in any
+/// number of DCs, so it can go into each DC the picture leaves.
 pub fn select_picture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, hdc, old_dc, out] = args else {
         unreachable!()
@@ -1271,14 +1277,11 @@ pub fn select_picture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_FAIL);
     }
     com::write_out(cpu, old_dc, o.cur_dc);
-    if o.cur_dc != 0 && o.stock_bitmap != 0 {
+    if o.cur_dc != 0 {
         gdi32::dc::select_object(cpu, &[o.cur_dc, o.stock_bitmap]);
     }
     if hdc != 0 {
-        let previous = gdi32::dc::select_object(cpu, &[hdc, o.handle]).unwrap_or(0);
-        if o.stock_bitmap == 0 {
-            get(cpu, id).stock_bitmap = previous;
-        }
+        gdi32::dc::select_object(cpu, &[hdc, o.handle]);
     }
     get(cpu, id).cur_dc = hdc;
     com::write_out(cpu, out, o.handle);
