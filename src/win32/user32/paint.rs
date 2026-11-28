@@ -1263,6 +1263,15 @@ pub fn begin_paint(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // validated, frame and all.
     let state = user(cpu);
     let region = client_update(state, hwnd);
+    // rcPaint is the box of the update region where the client area
+    // shows, children and all: real Windows 98 gives a WS_CLIPCHILDREN
+    // window invalidated only under its children their box, though its
+    // DC can't draw there. Sorry! blits that box to its primary surface,
+    // whose clipper keeps the children's area, and after a game it
+    // invalidates nothing but its new buttons' rectangles.
+    let client = state.screen_client(hwnd);
+    let paint = region.and_rect(&shown_client(state, hwnd)).bounds();
+    let paint = paint.offset(-client.left, -client.top);
     let iconic = state
         .window(hwnd)
         .is_some_and(|w| w.style & WS_MINIMIZE != 0);
@@ -1274,7 +1283,9 @@ pub fn begin_paint(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         w.update = Region::new();
         w.paint &= !PAINT_INTERNAL;
     }
-    let vars = vec![K_BEGIN, hwnd, 0, 0, hdc, ps, 0, hwnd];
+    // The box goes after the list's place: BeginPaint's task has none.
+    let mut vars = vec![K_BEGIN, hwnd, 0, 0, hdc, ps, 0, hwnd];
+    vars.extend([paint.left, paint.top, paint.right, paint.bottom].map(|v| v as u32));
     task::start(cpu, TASK_PAINT, vars, 0)
 }
 
@@ -1315,8 +1326,9 @@ fn validate_parents(state: &mut State, hwnd: u32) {
 }
 
 /// Fill the PAINTSTRUCT at `ps`: the DC, whether the window still needs
-/// erasing, and the box of what it paints.
-fn write_paint_struct(cpu: &mut Cpu, hwnd: u32, hdc: u32, ps: u32) {
+/// erasing, and `paint`, the box of what it paints in the client area,
+/// in the DC's logical units.
+fn write_paint_struct(cpu: &mut Cpu, hwnd: u32, hdc: u32, ps: u32, paint: Rect) {
     let erase = user(cpu)
         .window_mut(hwnd)
         .map(|w| {
@@ -1329,15 +1341,17 @@ fn write_paint_struct(cpu: &mut Cpu, hwnd: u32, hdc: u32, ps: u32) {
     bytes[0..4].copy_from_slice(&hdc.to_le_bytes());
     bytes[4..8].copy_from_slice(&(erase as u32).to_le_bytes());
     cpu.bus.guest_write_bytes(ps, &bytes);
-    gdi32::dc::get_clip_box(cpu, &[hdc, ps + 8]);
-    // What to paint is within the client area, whatever the DC reaches.
+    // What to paint is within the client area.
     let client = user(cpu).screen_client(hwnd);
     let size = Rect::new(0, 0, client.width(), client.height());
-    let paint = Rect::read(cpu, ps + 8).intersect(&size);
-    let paint = if paint.is_empty() {
-        Rect::default()
-    } else {
-        paint
+    let paint = paint.intersect(&size);
+    let paint = match gdi32::gdi(cpu).dc(hdc) {
+        Some(dc) if !paint.is_empty() => {
+            let (l, t) = dc.to_logical(paint.left, paint.top);
+            let (r, b) = dc.to_logical(paint.right, paint.bottom);
+            Rect::new(l.min(r), t.min(b), l.max(r), t.max(b))
+        }
+        _ => Rect::default(),
     };
     paint.write(cpu, ps + 8);
 }
@@ -1605,7 +1619,8 @@ fn begin_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         return next;
     }
     let (hwnd, hdc, ps) = (t.var(V_HWND), t.var(V_HDC), t.var(V_OUT));
-    write_paint_struct(cpu, hwnd, hdc, ps);
+    let [left, top, right, bottom] = [0, 1, 2, 3].map(|i| t.var(V_LIST + i) as i32);
+    write_paint_struct(cpu, hwnd, hdc, ps, Rect::new(left, top, right, bottom));
     Next::Done(hdc)
 }
 
@@ -2782,6 +2797,45 @@ mod tests {
             assert_eq!(left.bounds(), all);
             assert_eq!(left.and_rect(&at).is_empty(), clip == 0, "clip {clip:#x}");
         }
+    }
+
+    /// BeginPaint's rcPaint is the box of the update region, also where
+    /// it lies under the children of a WS_CLIPCHILDREN window, whose DC
+    /// can't draw there. Windows 98 gives Sorry!'s view, invalidated
+    /// under four new buttons and where an old one was, the box of all
+    /// five; the game blits that box from its picture of the menu.
+    #[test]
+    fn rc_paint_takes_in_the_update_region_under_children() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        let state = user(&mut cpu);
+        let all = Rect::new(0, 0, 200, 200);
+        let at = Rect::new(20, 30, 80, 70);
+        let parent = state
+            .new_window(Window {
+                style: WS_VISIBLE | WS_CLIPCHILDREN,
+                rect: all,
+                client: all,
+                update: Region::from_rect(at),
+                ..Window::default()
+            })
+            .expect("a window");
+        state
+            .new_window(Window {
+                style: WS_VISIBLE | super::super::window::WS_CHILD,
+                parent,
+                rect: at,
+                client: Rect::new(0, 0, 60, 40),
+                ..Window::default()
+            })
+            .expect("a window");
+        let ps = 0x1000;
+        begin_paint(&mut cpu, &[parent, ps]);
+        let rc: Vec<i32> = (0..4)
+            .map(|i| cpu.bus.guest_read_32(ps + 8 + 4 * i) as i32)
+            .collect();
+        assert_eq!(rc, [at.left, at.top, at.right, at.bottom]);
+        assert!(user(&mut cpu).window(parent).unwrap().update.is_empty());
     }
 
     /// A CS_PARENTDC child given all of its parent's invalid area (its
