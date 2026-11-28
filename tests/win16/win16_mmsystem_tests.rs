@@ -1611,6 +1611,125 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
     }
 }
 
+const CREATE_PALETTE: u16 = 360;
+const WSPRINTF: u16 = 420;
+const MCI_SETVIDEO: u16 = 0x876;
+const MCI_DGV_SETVIDEO_ITEM: u32 = 0x10_0000;
+const MCI_DGV_SETVIDEO_VALUE: u32 = 0x100_0000;
+const MCI_DGV_SETVIDEO_PALHANDLE: u16 = 0x4007;
+
+/// Where the MCI_SETVIDEO program keeps its MCI_DGV_SETVIDEO_PARMS, its
+/// LOGPALETTE, the palette's handle and the command string it makes.
+const SETVIDEO: u16 = 0x80;
+const LOGPAL: u16 = 0xA0;
+const HPAL: u16 = 0xB0;
+const COMMAND: u16 = 0xC0;
+
+#[test]
+fn mci_setvideo_gives_an_avi_device_the_programs_palette() {
+    // The Magic School Bus Explores the Solar System draws its scenes
+    // and its movies through one identity palette: it sends
+    // `setvideo <alias> palette handle to <hpal> wait`, made with
+    // wsprintf, and `setaudio <alias> off wait`. MCIAVI then draws with
+    // that palette, so `status palette handle` gives it, and closing the
+    // device leaves it to the program. The built-in Windows didn't know
+    // the commands (MCIERR_UNRECOGNIZED_COMMAND) and realized a palette
+    // of its own in the program's window, which sent the program's to
+    // the background. Exit code 1, or the check that failed.
+    let mut code = Code::new();
+    let open = mci_string(&mut code, 2);
+    code.emit(&[0x0E]); // push cs
+    let alias = code.here() + 1;
+    code.push(0).call("MMSYSTEM", MCI_GET_DEVICE_ID);
+    expect_nonzero(&mut code, 3);
+    code.emit(&[0xA3, lo(DEVICE), hi(DEVICE)]); // mov [DEVICE],ax
+    // CreatePalette of one colour.
+    set(&mut code, LOGPAL, 0x300);
+    set(&mut code, LOGPAL + 2, 1);
+    set(&mut code, LOGPAL + 4, 0x2010);
+    set(&mut code, LOGPAL + 6, 0x0030);
+    code.emit(&[0x1E]).push(LOGPAL); // push ds
+    code.call("GDI", CREATE_PALETTE);
+    expect_nonzero(&mut code, 4);
+    code.emit(&[0xA3, lo(HPAL), hi(HPAL)]); // mov [HPAL],ax
+    // wsprintf(DS:COMMAND, the format, [HPAL]), cdecl.
+    push_word(&mut code, HPAL);
+    code.emit(&[0x0E]); // push cs
+    let format = code.here() + 1;
+    code.push(0).emit(&[0x1E]).push(COMMAND); // push ds
+    code.call("USER", WSPRINTF);
+    code.emit(&[0x83, 0xC4, 0x0A]); // add sp,10
+    // mciSendString(DS:COMMAND, DS:BUFFER, 32, 0).
+    code.emit(&[0x1E]).push(COMMAND); // push ds
+    code.emit(&[0x1E]).push(BUFFER).push(32).push(0); // push ds
+    code.call("MMSYSTEM", MCI_SEND_STRING);
+    expect_ax(&mut code, 0, 5);
+    // MCI_STATUS of MCI_DGV_STATUS_HPAL gives the program's palette.
+    set(&mut code, STATUS, 0);
+    set(&mut code, STATUS + 2, 0);
+    set(&mut code, STATUS + 8, MCI_DGV_STATUS_HPAL);
+    set(&mut code, STATUS + 10, 0);
+    mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, 6);
+    // mov ax,[HPAL]; cmp ax,[STATUS+4]
+    code.emit(&[0xA1, lo(HPAL), hi(HPAL)]);
+    code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
+    code.emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, 7, 0xB4, 0x4C, 0xCD, 0x21]);
+    // MCI_DGV_SETVIDEO_PARMS through mciSendCommand: a handle of 0 gives
+    // the device a palette of its own again, the halftone palette's 256
+    // colours of a 24-bit movie, and the program's palette goes back in.
+    for (value, fail) in [(None, 11), (Some(HPAL), 15)] {
+        for k in 0..8 {
+            set(&mut code, SETVIDEO + 2 * k, 0);
+        }
+        set(&mut code, SETVIDEO + 4, MCI_DGV_SETVIDEO_PALHANDLE);
+        if let Some(at) = value {
+            // mov ax,[at]; mov [SETVIDEO+8],ax
+            code.emit(&[0xA1, lo(at), hi(at)]);
+            code.emit(&[0xA3, lo(SETVIDEO + 8), hi(SETVIDEO + 8)]);
+        }
+        let flags = MCI_DGV_SETVIDEO_ITEM | MCI_DGV_SETVIDEO_VALUE;
+        mci(&mut code, MCI_SETVIDEO, flags, SETVIDEO, 0, fail);
+        mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, fail + 1);
+        // mov ax,[HPAL]; cmp ax,[STATUS+4]
+        code.emit(&[0xA1, lo(HPAL), hi(HPAL)]);
+        code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
+        let same = if value.is_some() { 0x74 } else { 0x75 }; // je or jne
+        code.emit(&[same, 0x06]) // over the next
+            .emit(&[0xB0, fail + 2, 0xB4, 0x4C, 0xCD, 0x21]);
+        if value.is_none() {
+            // GetPaletteEntries(the device's palette, 0, 0, NULL).
+            push_word(&mut code, STATUS + 4);
+            code.push(0).push(0).push(0).push(0);
+            code.call("GDI", GET_PALETTE_ENTRIES);
+            expect_ax(&mut code, 256, fail + 3);
+        }
+    }
+    let mute = mci_string(&mut code, 8);
+    mci(&mut code, MCI_CLOSE, 0, 0, 0, 9);
+    // The palette is still there: GetPaletteEntries(hpal, 0, 0, NULL).
+    push_word(&mut code, HPAL);
+    code.push(0).push(0).push(0).push(0);
+    code.call("GDI", GET_PALETTE_ENTRIES);
+    expect_ax(&mut code, 1, 10);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    for (place, text) in [
+        (open, &b"open CLIP.AVI alias c\0"[..]),
+        (alias, b"c\0"),
+        (format, b"setvideo c palette handle to %u wait\0"),
+        (mute, b"setaudio c off wait\0"),
+    ] {
+        let at = code.here();
+        code.emit(text);
+        code.patch(place, at);
+    }
+    let (exit, log) = run_with("mci_setvideo", program(&code, CODE), |cpu, dir| {
+        cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+        std::fs::write(dir.join("CLIP.AVI"), avi_clip()).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+}
+
 const MMIO_OPEN: u16 = 1210;
 const MMIO_CLOSE: u16 = 1211;
 const MMIO_READ: u16 = 1212;
