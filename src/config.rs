@@ -45,7 +45,7 @@ pub use settings::{Memory, default_cpu, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
     AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, Renderer,
-    SoundConfig, Win32Locale, Win32Trace, WindowsVersion,
+    SoundConfig, Win32Fonts, Win32Locale, Win32Trace, WindowsVersion,
 };
 
 /// Written to the default location on first start.
@@ -246,6 +246,8 @@ pub struct Config {
     pub win32_desktop: Option<DesktopSize>,
     /// Its system locale (`win32_locale`).
     pub win32_locale: Option<Win32Locale>,
+    /// Where it reads the outlines of its TrueType faces (`win32_fonts`).
+    pub win32_fonts: Option<Win32Fonts>,
     /// Which of its functions' calls the log gets (`win32_trace`).
     pub win32_trace: Option<Win32Trace>,
     /// The compatibility shims every program gets (`win32_shims`).

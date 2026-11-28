@@ -82,6 +82,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.win32.desktop = settings.win32_desktop;
     cpu.bus.win32.locale = settings.win32_locale;
     cpu.bus.win32.shims = settings.win32_shims;
+    cpu.bus.win32.outlines.set(&settings.win32_fonts);
     crate::win32::trace::set_level(cpu, settings.win32_trace);
     crate::win32::dll_files::sync(&mut cpu.bus);
     crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);

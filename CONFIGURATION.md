@@ -2106,6 +2106,33 @@ order.
   still change the size with ChangeDisplaySettings while it runs; its
   end gives this size back. Like `win32_depth`, a change takes effect
   for the next program that starts when none runs.
+* `win32_fonts` is where the built-in Windows reads the outlines of
+  Arial, Times New Roman and Courier New, each regular, bold, italic and
+  bold italic. `auto` (the default) reads Windows' own font files where
+  it finds them: first in the emulated `C:\WINDOWS\FONTS`, where a game
+  or you may have put them, then, on Windows and macOS, in the
+  computer's fonts folder (`%WINDIR%\Fonts`, or
+  `/System/Library/Fonts/Supplemental` and `/Library/Fonts`).
+  `liberation` draws them from the Liberation fonts that come with
+  rust-dos. A folder's path, such as `D:\w98fonts` or `~/fonts`, reads
+  the files there. The files have the names Windows gives them
+  (`arial.ttf`, `arialbd.ttf`, `ariali.ttf`, `arialbi.ttf`, `times.ttf`,
+  `timesbd.ttf`, `timesi.ttf`, `timesbi.ttf`, `cour.ttf`, `courbd.ttf`,
+  `couri.ttf`, `courbi.ttf`) or macOS gives them (`Arial Bold.ttf`), in
+  any case. Each font missing from the folders, or whose file isn't
+  that font, is drawn from Liberation: a folder with only `arial.ttf`
+  gives the regular Arial and nothing else. Windows 98's own files
+  draw what Windows 98 drew; a newer Windows' Arial differs from them
+  in a few characters, and Liberation in the shapes of most, by a
+  pixel or two. Whatever draws them, each character takes the width it
+  has on Windows 98, so text takes the same room. The files are read
+  the first time a program draws in one of these faces, so DOS
+  programs, and a Windows installed on the emulated machine, never
+  read them. A `--deterministic` run doesn't read the computer's fonts
+  folder, so its pictures are the same on every machine; the emulated
+  C: and a folder named here are read as usual. The log names the file
+  each font is drawn from. A change takes effect for the text drawn
+  after it.
 
 #### DOS
 

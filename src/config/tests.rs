@@ -1289,6 +1289,7 @@ fn changed_settings() -> Settings {
         win32_depth: DesktopDepth::Palette,
         win32_desktop: DesktopSize::Svga,
         win32_locale: Win32Locale::RuRu,
+        win32_fonts: Win32Fonts::Liberation,
         win32_trace: Win32Trace::Off,
         win32_shims: crate::win32::shims::win32s::WIN32S,
         dos_high: false,
@@ -1798,6 +1799,28 @@ fn the_system_locale_is_read() {
     let config = parse("[emulator]\nwin32_locale=ja-JP\n", Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 1);
     assert!(config.warnings[0].contains("ru-RU"), "{:?}", config.warnings);
+}
+
+#[test]
+fn win32_fonts_takes_auto_liberation_or_a_folder() {
+    let fonts = |text: &str| {
+        let config = parse(&format!("[emulator]
+win32_fonts={text}
+"), Path::new("/cfg"), Some(Path::new("/home/u")));
+        (Settings::from_config(&config).win32_fonts, config.warnings)
+    };
+    assert_eq!(Settings::default().win32_fonts, Win32Fonts::Auto);
+    assert_eq!(fonts("AUTO"), (Win32Fonts::Auto, vec![]));
+    assert_eq!(fonts("Liberation"), (Win32Fonts::Liberation, vec![]));
+    assert_eq!(fonts("~/fonts"), (Win32Fonts::Folder(PathBuf::from("/home/u/fonts")), vec![]));
+    assert_eq!(
+        fonts(r#""D:\w98 fonts""#),
+        (Win32Fonts::Folder(PathBuf::from(r"D:\w98 fonts")), vec![])
+    );
+    let (empty, warnings) = fonts("");
+    assert_eq!((empty, warnings.len()), (Win32Fonts::Auto, 1));
+    let home = Some(Path::new("/home/u"));
+    assert_eq!(Win32Fonts::Folder(PathBuf::from("/home/u/fonts")).name(home), "~/fonts");
 }
 
 #[test]

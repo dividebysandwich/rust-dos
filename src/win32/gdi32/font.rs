@@ -37,15 +37,17 @@
 //! bold italic font the weight and slant pick. Programs that size their
 //! controls for the text in them, measured or not, then have it fit
 //! about as on Windows. Their characters are drawn from the outlines of
-//! the Liberation fonts, which have the same advances.
+//! the real fonts where the machine has them, else of the Liberation
+//! fonts, which have the same advances (`outlines`).
 
 use std::borrow::Cow;
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::dc::{self, Dc, OPAQUE};
 use super::fnt::{AddedFile, Fnt};
+use super::outlines::{self, Outline};
 use super::ttf::{self, Ttf};
 use super::draw::{Canvas, Fill, value_for};
 use super::sans8;
@@ -755,8 +757,9 @@ enum Widths {
     /// A raster size (in RASTERS).
     Raster(usize),
     /// A TrueType font (`truetype::style`) at so many pixels to the em
-    /// upward and across.
-    TrueType(usize, i32, i32),
+    /// upward and across, drawn from the outlines of this
+    /// `outlines::Outline::id`.
+    TrueType(usize, i32, i32, u64),
 }
 
 /// A glyph: its rows' lit pixels as bit masks (bit 0 the leftmost), how
@@ -1038,19 +1041,19 @@ fn truetype_char(page: CodePage, b: u8) -> Option<u16> {
 }
 
 /// The glyphs of a TrueType font of the size `s`: each byte's character
-/// drawn from the outlines of the Liberation font with its metrics
-/// (`truetype::outlines`), hinted, and moving on by the width Windows 98
-/// gives it. A size whose height isn't the cell's (lower than 4 rows or
-/// higher than 128), one with a glyph wider than the 64 columns a row
-/// holds, or one whose font can't be read, has the ROM glyphs fitted to
-/// those widths instead, less a column between characters.
-fn truetype_glyphs(key: Key, s: &truetype::Size) -> Glyphs {
+/// drawn from the outlines `outline` (`outlines::of`), hinted, and moving
+/// on by the width Windows 98 gives it. A size whose height isn't the
+/// cell's (lower than 4 rows or higher than 128), one with a glyph wider
+/// than the 64 columns a row holds, or one without outlines, has the ROM
+/// glyphs fitted to those widths instead, less a column between
+/// characters.
+fn truetype_glyphs(key: Key, s: &truetype::Size, outline: Option<&Ttf>) -> Glyphs {
     let page = CodePage::by_number(key.page as u32).unwrap_or(CodePage::WESTERN);
     let advances: Vec<i32> = (0..=255u8)
         .map(|b| truetype::advance(s, truetype_char(page, b)))
         .collect();
     if s.height == key.cell
-        && let Some(drawn) = outline_glyphs(s, page)
+        && let Some(drawn) = outline.and_then(|t| outline_glyphs(t, s, page))
     {
         let glyphs = drawn
             .into_iter()
@@ -1083,45 +1086,35 @@ fn truetype_glyphs(key: Key, s: &truetype::Size) -> Glyphs {
     }
 }
 
-thread_local! {
-    /// The Liberation fonts, each read when first drawn with.
-    static OUTLINES: [OnceCell<Option<Ttf>>; 12] = const { [const { OnceCell::new() }; 12] };
+/// The bytes of the code page `page` drawn from the outlines `t` at the
+/// size `s`, if every glyph fits in a row's 64 columns: one that doesn't
+/// would lose its right side.
+fn outline_glyphs(t: &Ttf, s: &truetype::Size, page: CodePage) -> Option<Vec<ttf::Drawn>> {
+    let m = ttf::Metrics {
+        // The bold and italic fonts are their own files: nothing is
+        // made bold.
+        key: ttf::SizeKey {
+            ppem: s.ppem,
+            x_ppem: s.x_ppem,
+            bold: false,
+        },
+        height: s.height,
+        ascent: s.ascent,
+        internal: s.internal,
+        external: s.external,
+        average: s.average,
+        max: s.max,
+    };
+    let drawn = t.draw(&m, |b| truetype_char(page, b).map(u32::from));
+    (!drawn.iter().any(|d| d.clipped)).then_some(drawn)
 }
 
-/// The bytes of the code page `page` drawn from the outlines of the font
-/// of the size `s`, if the font can be read and every glyph fits in a
-/// row's 64 columns: one that doesn't would lose its right side.
-fn outline_glyphs(s: &truetype::Size, page: CodePage) -> Option<Vec<ttf::Drawn>> {
-    OUTLINES.with(|fonts| {
-        let t = fonts
-            .get(s.style)?
-            .get_or_init(|| Ttf::parse(truetype::outlines(s.style).to_vec(), 0))
-            .as_ref()?;
-        let m = ttf::Metrics {
-            // The bold and italic fonts are their own files: nothing is
-            // made bold.
-            key: ttf::SizeKey {
-                ppem: s.ppem,
-                x_ppem: s.x_ppem,
-                bold: false,
-            },
-            height: s.height,
-            ascent: s.ascent,
-            internal: s.internal,
-            external: s.external,
-            average: s.average,
-            max: s.max,
-        };
-        let drawn = t.draw(&m, |b| truetype_char(page, b).map(u32::from));
-        (!drawn.iter().any(|d| d.clipped)).then_some(drawn)
-    })
-}
-
-fn make_glyphs(key: Key) -> Glyphs {
+/// The glyphs of the key `key`, a TrueType font's drawn from `outline`.
+fn make_glyphs(key: Key, outline: Option<&Ttf>) -> Glyphs {
     match key.widths {
         Widths::Raster(i) => return raster_glyphs(key, &RASTERS[i]),
-        Widths::TrueType(style, ppem, x_ppem) => {
-            return truetype_glyphs(key, &truetype::at(style, ppem, x_ppem));
+        Widths::TrueType(style, ppem, x_ppem, _) => {
+            return truetype_glyphs(key, &truetype::at(style, ppem, x_ppem), outline);
         }
         Widths::Rom => {}
     }
@@ -1159,11 +1152,14 @@ fn make_glyphs(key: Key) -> Glyphs {
     }
 }
 
-fn glyphs_of(key: Key) -> Rc<Glyphs> {
+/// The glyphs of the key `key`, kept for the next font of the same key.
+/// The key of a TrueType font names its outlines (`Widths::TrueType`),
+/// which are `outline`.
+fn glyphs_of(key: Key, outline: Option<&Ttf>) -> Rc<Glyphs> {
     CACHE.with(|c| {
         c.borrow_mut()
             .entry(key)
-            .or_insert_with(|| Rc::new(make_glyphs(key)))
+            .or_insert_with(|| Rc::new(make_glyphs(key, outline)))
             .clone()
     })
 }
@@ -1230,14 +1226,34 @@ fn widest(glyphs: &Glyphs) -> i32 {
         .unwrap_or(0)
 }
 
+/// The outlines a TrueType face's font (`truetype::style`) is drawn
+/// with, looked for as it is first asked for (`outlines::of`).
+type OutlineOf<'a> = dyn FnMut(usize) -> Option<Rc<Outline>> + 'a;
+
 /// Realize the logical font `log` for heights in device units, under the
-/// system locale `sys`.
+/// system locale `sys`, drawing Arial, Times New Roman and Courier New
+/// from the Liberation fonts.
+#[cfg(test)]
 fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Realized {
+    realize_with(log, sys, device_height, device_width, &mut outlines::liberation)
+}
+
+/// Realize the logical font `log` for heights in device units, under the
+/// system locale `sys`, drawing Arial, Times New Roman and Courier New
+/// from the outlines `outline` gives.
+fn realize_with(
+    log: &Log,
+    sys: &System,
+    device_height: i32,
+    device_width: i32,
+    outline: &mut OutlineOf,
+) -> Realized {
     let (fi, charset) = choose(log, sys);
     let face = &FACES[fi];
     let page = sys.code_page(charset);
     if let Some(family) = face.truetype {
-        return realize_truetype(log, sys, fi, charset, family, device_height, device_width);
+        let f = (fi, charset, family);
+        return realize_truetype(log, sys, f, device_height, device_width, outline);
     }
     let (cell, internal) = match device_height {
         0 => (face.cell, (face.cell + 3) / 6),
@@ -1296,7 +1312,7 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
         fixed,
         widths: raster.map_or(Widths::Rom, |(i, _)| Widths::Raster(i)),
     };
-    let glyphs = glyphs_of(key);
+    let glyphs = glyphs_of(key, None);
     let average = match raster {
         Some((i, _)) => {
             let r = &RASTERS[i];
@@ -1349,15 +1365,15 @@ fn csb_of(sys: &System, fi: usize) -> u32 {
 /// Realize the logical font `log` as the TrueType face `fi` (of the
 /// `truetype` family `family`) in the character set `charset`: with
 /// Windows 98's metrics and widths for the size, of its bold font from
-/// weight 600 up and of its italic one when italic.
+/// weight 600 up and of its italic one when italic, drawn from the
+/// outlines `outline` gives for that font.
 fn realize_truetype(
     log: &Log,
     sys: &System,
-    fi: usize,
-    charset: u8,
-    family: usize,
+    (fi, charset, family): (usize, u8, usize),
     device_height: i32,
     device_width: i32,
+    outline: &mut OutlineOf,
 ) -> Realized {
     let face = &FACES[fi];
     let page = sys.code_page(charset);
@@ -1389,9 +1405,19 @@ fn realize_truetype(
         glyph_width: 0,
         bold,
         fixed: face.pitch_family & 3 == FIXED_PITCH,
-        widths: Widths::TrueType(size.style, size.ppem, size.x_ppem),
+        widths: Widths::Rom,
     };
-    let glyphs = glyphs_of(key);
+    let outline = outline(size.style);
+    let key = Key {
+        widths: Widths::TrueType(
+            size.style,
+            size.ppem,
+            size.x_ppem,
+            outline.as_ref().map_or(0, |o| o.id),
+        ),
+        ..key
+    };
+    let glyphs = glyphs_of(key, outline.as_ref().map(|o| &o.ttf));
     Realized {
         face: Cow::Borrowed(face.name),
         height: size.height,
@@ -1723,7 +1749,9 @@ pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
     if let Some(f) = realize_added_truetype(&gdi(cpu).font_files, &log, &sys, height, width) {
         return f;
     }
-    realize(&log, &sys, height, width)
+    realize_with(&log, &sys, height, width, &mut |style| {
+        outlines::of(cpu, style)
+    })
 }
 
 /// The font of the DC `hdc`, or None with the error set.
@@ -2943,7 +2971,9 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
             face.pitch_family,
             face.name,
         );
-        let f = realize(&Log::of(&b), &sys, face.cell, 0);
+        let f = realize_with(&Log::of(&b), &sys, face.cell, 0, &mut |style| {
+            outlines::of(cpu, style)
+        });
         (b, f)
     };
     let charset = f.charset;

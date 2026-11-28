@@ -442,11 +442,13 @@ All output goes through the emulated video hardware (`screen.rs`):
   Courier New the six of WGL4, and the font mapper weighs the character set
   over the face as Windows does. Arial, Times New Roman and Courier New
   move on by Windows 98's widths (`gdi32/truetype.bin`) and are drawn from
-  the outlines of the Liberation fonts, which have the same advances
-  (`gdi32/liberation/`). `AddFontResourceA` reads the FNT resources of a
-  program's .FON file, or a bare .FNT (`gdi32/fnt.rs`): their faces are
-  listed with the built-in ones, a font that names one is drawn with its
-  glyphs at the nearest size, and a save state keeps their bytes. With
+  the outlines of Windows' own font files where the machine has them
+  (the `win32_fonts` setting, `gdi32/outlines.rs`), else of the
+  Liberation fonts, which have the same advances (`gdi32/liberation/`).
+  `AddFontResourceA` reads the FNT resources of a program's .FON file, or
+  a bare .FNT (`gdi32/fnt.rs`): their faces are listed with the built-in
+  ones, a font that names one is drawn with its glyphs at the nearest
+  size, and a save state keeps their bytes. With
   `win32_depth=8` the desktop has 8 bits a pixel, and GDI keeps a system
   palette in the DAC as Windows does on a 256-colour display: palettes
   realized in the foreground or the background, `PC_RESERVED` entries for

@@ -2,7 +2,7 @@
 
 use super::{
     AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, Section, SoundConfig,
-    Win32Locale, Win32Trace, WindowsVersion,
+    Win32Fonts, Win32Locale, Win32Trace, WindowsVersion,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::diskio::DiskSettings;
@@ -104,6 +104,9 @@ pub struct Settings {
     pub win32_desktop: DesktopSize,
     /// The built-in Windows' system locale.
     pub win32_locale: Win32Locale,
+    /// Where the built-in Windows reads the outlines of Arial, Times New
+    /// Roman and Courier New from.
+    pub win32_fonts: Win32Fonts,
     /// Which calls of its functions the log gets a line for.
     pub win32_trace: Win32Trace,
     /// The compatibility shims every program it starts gets: a set of
@@ -224,6 +227,7 @@ impl Default for Settings {
             win32_depth: DesktopDepth::Adapter,
             win32_desktop: DesktopSize::Vga,
             win32_locale: Win32Locale::EnUs,
+            win32_fonts: Win32Fonts::Auto,
             win32_trace: Win32Trace::Collapsed,
             win32_shims: crate::win32::shims::Shims::NONE,
             dos_high: true,
@@ -393,6 +397,7 @@ impl Settings {
             win32_depth: config.win32_depth.unwrap_or(default.win32_depth),
             win32_desktop: config.win32_desktop.unwrap_or(default.win32_desktop),
             win32_locale: config.win32_locale.unwrap_or(default.win32_locale),
+            win32_fonts: config.win32_fonts.clone().unwrap_or(default.win32_fonts),
             win32_trace: config.win32_trace.unwrap_or(default.win32_trace),
             win32_shims: config.win32_shims.unwrap_or(default.win32_shims),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
@@ -652,6 +657,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "win32_depth", Some(settings.win32_depth.name().to_string())),
         (Emulator, "win32_desktop", Some(settings.win32_desktop.name().to_string())),
         (Emulator, "win32_locale", Some(settings.win32_locale.name().to_string())),
+        (Emulator, "win32_fonts", Some(settings.win32_fonts.name(home))),
         (Emulator, "win32_trace", Some(settings.win32_trace.name().to_string())),
         (
             Emulator,

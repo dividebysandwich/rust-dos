@@ -8,11 +8,12 @@
 //! the real fonts' dimensions, so GDI's text takes as much room as on
 //! Windows.
 //!
-//! Windows' fonts can't be shipped, so `font` draws the characters with
-//! the outlines of the Liberation fonts 2.1.5 (`liberation/`, under the
-//! SIL Open Font License 1.1): Liberation Sans, Serif and Mono have the
-//! advances of Arial, Times New Roman and Courier New, and are hinted by
-//! their own instructions.
+//! Windows' fonts can't be shipped, so where the machine has none of
+//! its own (`outlines`), `font` draws the characters with the outlines
+//! of the Liberation fonts 2.1.5 (`liberation/`, under the SIL Open Font
+//! License 1.1): Liberation Sans, Serif and Mono have the advances of
+//! Arial, Times New Roman and Courier New, and are hinted by their own
+//! instructions.
 
 use std::sync::OnceLock;
 

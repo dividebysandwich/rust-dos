@@ -427,6 +427,10 @@ pub struct Win32 {
     /// The shims every program gets as it starts (the `win32_shims`
     /// setting).
     pub shims: shims::Shims,
+    /// Where Arial, Times New Roman and Courier New are drawn from (the
+    /// `win32_fonts` setting, which `Outlines::set` takes), and the font
+    /// files read for it.
+    pub outlines: gdi32::outlines::Outlines,
     pub(crate) os_locale: nls::Win32Locale,
     /// The desktop's size as ChangeDisplaySettings set it, and the
     /// process that set it: None while it is its own (screen.rs).
@@ -1950,6 +1954,7 @@ crate::state_fields!(Win32 {
     desktop,
     locale,
     shims,
+    outlines,
     dll_files,
     trace,
     trace3d,
