@@ -1611,32 +1611,37 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
     }
 }
 
-#[test]
-fn a_full_64_kb_mmio_buffer_ends_at_the_next_tile() {
-    // A memory file with a 64 KB buffer MMIO_ALLOCBUF gives, opened as
-    // Civilization II opens its intro's sound. mmioGetInfo's
-    // pchEndWrite is just past the buffer: the selector stepped by
-    // __AHINCR (8) at offset 0, as a huge pointer is. mmioSetInfo takes
-    // it back, and the next mmioGetInfo gives the same.
-    const MMIO_OPEN: u16 = 1210;
-    const MMIO_CLOSE: u16 = 1211;
-    const MMIO_GET_INFO: u16 = 1215;
-    const MMIO_SET_INFO: u16 = 1216;
-    const INFO: u16 = 0x100;
-    const INFO2: u16 = 0x180;
+/// MMSYSTEM's mmio ordinals, and where the mmio tests keep two MMIOINFOs.
+const MMIO_OPEN: u16 = 1210;
+const MMIO_CLOSE: u16 = 1211;
+const MMIO_GET_INFO: u16 = 1215;
+const MMIO_SET_INFO: u16 = 1216;
+const MMIO_INFO: u16 = 0x100;
+const MMIO_INFO2: u16 = 0x180;
+
+/// Open a memory file with a 64 KB buffer, `buffer` filling in pchBuffer
+/// of the MMIOINFO at MMIO_INFO or leaving it null for MMIO_ALLOCBUF
+/// (`alloc`). mmioGetInfo's pchBuffer and pchEndWrite are at `offset`,
+/// and pchEndWrite, just past the buffer, has the selector stepped by
+/// __AHINCR (8), as a huge pointer is. mmioSetInfo takes it back, and
+/// the next mmioGetInfo gives the same.
+fn mmio_64_kb_buffer(name: &str, buffer: impl FnOnce(&mut Code), alloc: bool, offset: u16) {
     let mut code = Code::new();
-    // push ds; pop es; mov di,INFO; mov cx,80h; xor ax,ax; cld; rep stosw
-    code.emit(&[0x1E, 0x07, 0xBF, lo(INFO), hi(INFO), 0xB9, 0x80, 0x00])
-        .emit(&[0x31, 0xC0, 0xFC, 0xF3, 0xAB]);
-    set(&mut code, INFO + 4, 0x454D); // fccIOProc "MEM "
-    set(&mut code, INFO + 6, 0x204D);
-    set(&mut code, INFO + 18, 1); // cchBuffer 10000h
-    // mmioOpen(NULL, &info, MMIO_ALLOCBUF | MMIO_CREATE | MMIO_READWRITE)
+    // push ds; pop es; mov di,MMIO_INFO; mov cx,80h; xor ax,ax; cld;
+    // rep stosw
+    code.emit(&[0x1E, 0x07, 0xBF, lo(MMIO_INFO), hi(MMIO_INFO)])
+        .emit(&[0xB9, 0x80, 0x00, 0x31, 0xC0, 0xFC, 0xF3, 0xAB]);
+    set(&mut code, MMIO_INFO + 4, 0x454D); // fccIOProc "MEM "
+    set(&mut code, MMIO_INFO + 6, 0x204D);
+    set(&mut code, MMIO_INFO + 18, 1); // cchBuffer 10000h
+    buffer(&mut code);
+    // mmioOpen(NULL, &info, MMIO_CREATE | MMIO_READWRITE, and
+    // MMIO_ALLOCBUF for `alloc`)
     code.push(0)
         .push(0)
         .emit(&[0x1E])
-        .push(INFO)
-        .push(1)
+        .push(MMIO_INFO)
+        .push(u16::from(alloc))
         .push(0x1002);
     code.call("MMSYSTEM", MMIO_OPEN);
     code.emit(&[0x85, 0xC0]) // test ax,ax
@@ -1647,22 +1652,49 @@ fn a_full_64_kb_mmio_buffer_ends_at_the_next_tile() {
         code.emit(&[0x1E]).push(at).push(0);
         code.call("MMSYSTEM", MMIO_GET_INFO);
         expect_ax(code, 0, fail);
-        expect(code, at + 20, 0, true, fail + 1); // pchBuffer's offset
-        expect(code, at + 32, 0, true, fail + 2); // pchEndWrite's
+        expect(code, at + 20, offset, true, fail + 1); // pchBuffer's offset
+        expect(code, at + 32, offset, true, fail + 2); // pchEndWrite's
         // mov ax,[pchBuffer's selector]; add ax,8; cmp ax,[pchEndWrite's]
         code.emit(&[0xA1, lo(at + 22), hi(at + 22), 0x05, 0x08, 0x00])
             .emit(&[0x3B, 0x06, lo(at + 34), hi(at + 34)])
             .emit(&[0x74, 0x06, 0xB0, fail + 3, 0xB4, 0x4C, 0xCD, 0x21]);
     };
-    get_info(&mut code, INFO2, 3);
+    get_info(&mut code, MMIO_INFO2, 3);
     push_word(&mut code, HANDLE);
-    code.emit(&[0x1E]).push(INFO2).push(0);
+    code.emit(&[0x1E]).push(MMIO_INFO2).push(0);
     code.call("MMSYSTEM", MMIO_SET_INFO);
     expect_ax(&mut code, 0, 7);
-    get_info(&mut code, INFO, 8);
+    get_info(&mut code, MMIO_INFO, 8);
     push_word(&mut code, HANDLE);
     code.push(0).call("MMSYSTEM", MMIO_CLOSE);
     code.emit(&[0xB0, 0x01]).exit_al();
-    let (exit, log) = run("mmio_huge_end", program(&code, CODE));
+    let (exit, log) = run(name, program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_full_64_kb_mmio_buffer_ends_at_the_next_tile() {
+    // The buffer MMIO_ALLOCBUF gives, as Civilization II opens its
+    // intro's sound: at S:0000, so pchEndWrite is S+8:0000.
+    mmio_64_kb_buffer("mmio_huge_end", |_| {}, true, 0);
+}
+
+#[test]
+fn a_64_kb_mmio_buffer_inside_a_huge_block_ends_in_its_tile() {
+    // The program's buffer at S+8:8000 of a 192 KB block at S:0000, a
+    // tile into the block and halfway through it: pchEndWrite is
+    // S+16:8000, in the block's third tile, which the buffer's own
+    // selector S+8 reaches.
+    const GLOBAL_ALLOC: u16 = 15;
+    const GLOBAL_LOCK: u16 = 18;
+    let buffer = |code: &mut Code| {
+        // GlobalLock(GlobalAlloc(GMEM_FIXED, 30000h)): the block at DX:AX.
+        code.push(0).push(3).push(0).call("KERNEL", GLOBAL_ALLOC);
+        code.emit(&[0x50]).call("KERNEL", GLOBAL_LOCK); // push ax
+        // add dx,8; mov [pchBuffer's selector],dx
+        code.emit(&[0x83, 0xC2, 0x08])
+            .emit(&[0x89, 0x16, lo(MMIO_INFO + 22), hi(MMIO_INFO + 22)]);
+        set(code, MMIO_INFO + 20, 0x8000);
+    };
+    mmio_64_kb_buffer("mmio_huge_inside", buffer, false, 0x8000);
 }
