@@ -21383,15 +21383,13 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
-/// ICDecompress decodes to an 8-bit DIB in the colours of its table, as
-/// Civilization II has Indeo 4 decode its intro into its WinG DIB: each
-/// pixel is the index of the nearest colour. The table here has black,
-/// grey 90 and grey 200, so the Cinepak key frame's grey 200 is index 2
-/// and the next frame's grey 90 index 1. Windows's codecs dither to the
-/// palette ICM_DECOMPRESS_SET_PALETTE gives, or to one of their own
-/// without it (#2202); a program that asks for 8 bits sets its DIB's
-/// table to the palette it means to show. The program ends with a bit
-/// set for each check that held.
+/// ICDecompress decodes Cinepak to an 8-bit DIB in the colours of its
+/// table: each pixel is the index of the nearest colour. The table here
+/// has black, grey 90 and grey 200, so the key frame's grey 200 is index
+/// 2 and the next frame's grey 90 index 1. Windows's Cinepak codec
+/// dithers to a palette of its own (#2202); Indeo 4's gives indexes of
+/// its own palette, which `icm_decompress_get_palette_gives_indeo_4s`
+/// checks. The program ends with a bit set for each check that held.
 #[test]
 fn icdecompress_maps_frames_to_an_8_bit_dibs_colours() {
     let kernel32: &[&str] = &["ExitProcess"];
@@ -21460,6 +21458,103 @@ fn icdecompress_maps_frames_to_an_8_bit_dibs_colours() {
     });
     let code = run_family("icdecompress_8_bits", &[("T.EXE", program)]);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+/// ICM_DECOMPRESS_GET_PALETTE, which Civilization II sends Indeo 4
+/// before it plays its intro into an 8-bit WinG DIB, gives the codec's
+/// palette after the output's BITMAPINFOHEADER and sets biClrUsed to
+/// 256, as Video for Windows 1.1e's IR41.DLL does on Windows 95: the
+/// static colours at 0 to 9 and 246 to 255, the codec's 234 colours at
+/// 10, the darkest a grey of 25, and two blacks at 244 and 245, all 236
+/// with PC_NOCOLLAPSE (4) in rgbReserved. ICM_DECOMPRESS_SET_PALETTE
+/// takes that palette back, and 0 for the codec's own. Cinepak answers
+/// ICERR_UNSUPPORTED to GET_PALETTE (#2202). The program ends with the
+/// number of the first check that failed, or 0.
+#[test]
+fn icm_decompress_get_palette_gives_indeo_4s() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICOpen", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const CINEPAK: usize = 0x600;
+    let mut data = bitmap_info(320, 120, 24, b"IV41");
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(320, 120, 8, &[0; 4]));
+    data.extend_from_slice(&[0xCC; 1024]);
+    data.resize(CINEPAK, 0);
+    data.extend(bitmap_info(8, 4, 24, b"cvid"));
+    const ICM_DECOMPRESS_SET_PALETTE: i32 = 0x401D;
+    const ICM_DECOMPRESS_GET_PALETTE: i32 = 0x401E;
+    const ICERR_UNSUPPORTED: i32 = -1;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        let vidc = i32::from_le_bytes(*b"vidc");
+        let send = |a: &mut CodeAssembler, msg: i32, dw1: i32, dw2: i32| {
+            push_args(a, &[0, msg, dw1, dw2])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICSendMessage"))
+        };
+        // The number of the first check that failed, in ebx.
+        let check = |a: &mut CodeAssembler, n: i32| {
+            let mut held = a.create_label();
+            a.je(held)?;
+            a.test(ebx, ebx)?;
+            a.jnz(held)?;
+            a.mov(ebx, n)?;
+            a.set_label(&mut held)?;
+            a.nop()
+        };
+        let quad = |n: usize| dword_ptr(l.at((OUT + 40 + 4 * n) as u32));
+        a.xor(ebx, ebx)?;
+        push_args(a, &[vidc, i32::from_le_bytes(*b"iv41"), 2])?;
+        a.call(f("ICOpen"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setz(al)?;
+        a.cmp(al, 0)?;
+        check(a, 1)?;
+        send(a, ICM_DECOMPRESS_GET_PALETTE, at(0), at(OUT))?;
+        a.cmp(eax, 0)?;
+        check(a, 2)?;
+        a.cmp(dword_ptr(l.at((OUT + 32) as u32)), 256)?;
+        check(a, 3)?;
+        a.cmp(quad(0), 0)?;
+        check(a, 4)?;
+        a.cmp(quad(10), 0x0419_1919)?;
+        check(a, 5)?;
+        // The last of the codec's colours, (183, 236, 255).
+        a.cmp(quad(243), 0x04B7_ECFF)?;
+        check(a, 6)?;
+        a.cmp(quad(245), 0x0400_0000)?;
+        check(a, 7)?;
+        a.cmp(quad(255), 0x00FF_FFFF)?;
+        check(a, 8)?;
+        send(a, ICM_DECOMPRESS_SET_PALETTE, at(OUT), 0)?;
+        a.cmp(eax, 0)?;
+        check(a, 9)?;
+        send(a, ICM_DECOMPRESS_SET_PALETTE, 0, 0)?;
+        a.cmp(eax, 0)?;
+        check(a, 10)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        push_args(a, &[vidc, i32::from_le_bytes(*b"cvid"), 2])?;
+        a.call(f("ICOpen"))?;
+        a.mov(esi, eax)?;
+        send(a, ICM_DECOMPRESS_GET_PALETTE, at(CINEPAK), at(OUT))?;
+        a.cmp(eax, ICERR_UNSUPPORTED)?;
+        check(a, 11)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icm_get_palette", &[("T.EXE", program)]);
+    assert_eq!(code, 0, "the first check that failed");
 }
 
 /// ICSendMessage's ICDecompressEx messages, as Leadfoot plays its Indeo

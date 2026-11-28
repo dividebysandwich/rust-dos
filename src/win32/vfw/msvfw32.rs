@@ -216,7 +216,17 @@ fn open(cpu: &mut Cpu, fourcc: u32) -> u32 {
         vfw.decoders.resize_with(slot + 1, Codec::default);
     }
     vfw.decoders[slot] = Codec::default();
+    set_given_palette(vfw, slot, None);
     slot as u32 + 1
+}
+
+/// Keeps `palette` as the palette given to the handle at `slot` of
+/// `vfw` (`State::palettes`).
+fn set_given_palette(vfw: &mut super::State, slot: usize, palette: Option<Vec<u32>>) {
+    if vfw.palettes.len() <= slot {
+        vfw.palettes.resize(slot + 1, None);
+    }
+    vfw.palettes[slot] = palette;
 }
 
 /// ICClose(hic): ICERR_OK, or ICERR_BADHANDLE for a handle that isn't
@@ -229,6 +239,9 @@ fn ic_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .and_then(Option::take);
     if let Some(decoder) = slot.and_then(|slot| vfw.decoders.get_mut(slot)) {
         *decoder = Codec::default();
+    }
+    if let Some(palette) = slot.and_then(|slot| vfw.palettes.get_mut(slot)) {
+        *palette = None;
     }
     Some(if open.is_some() {
         ICERR_OK
@@ -317,15 +330,18 @@ fn open_codec(cpu: &mut Cpu, hic: u32) -> Option<u32> {
 /// Microsoft Video 1's FourCC as ICOpen keeps it, and its frames'.
 const MSVC: u32 = u32::from_le_bytes(*b"MSVC");
 const CRAM: u32 = u32::from_le_bytes(*b"CRAM");
+/// Indeo 4's FourCC.
+const IV41: u32 = u32::from_le_bytes(*b"IV41");
 
 /// The decompression messages: ICM_DECOMPRESS_GET_FORMAT, _QUERY,
-/// _BEGIN, ICM_DECOMPRESS itself, _END and _SET_PALETTE.
+/// _BEGIN, ICM_DECOMPRESS itself, _END, _SET_PALETTE and _GET_PALETTE.
 const ICM_DECOMPRESS_GET_FORMAT: u32 = 0x400A;
 const ICM_DECOMPRESS_QUERY: u32 = 0x400B;
 const ICM_DECOMPRESS_BEGIN: u32 = 0x400C;
 const ICM_DECOMPRESS: u32 = 0x400D;
 const ICM_DECOMPRESS_END: u32 = 0x400E;
 const ICM_DECOMPRESS_SET_PALETTE: u32 = 0x401D;
+const ICM_DECOMPRESS_GET_PALETTE: u32 = 0x401E;
 /// ICERR_UNSUPPORTED, ICERR_BADFORMAT and ICERR_BADPARAM.
 const ICERR_UNSUPPORTED: u32 = -1i32 as u32;
 const ICERR_BADFORMAT: u32 = -2i32 as u32;
@@ -559,9 +575,8 @@ pub(crate) fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             decompress_ex_query(cpu, fourcc, dw1, dw2)
         }
         ICM_DECOMPRESSEX => decompress_ex(cpu, hic, fourcc, dw1, dw2),
-        // An 8-bit stream's palette indexes go out as they are, whatever
-        // the output's palette.
-        ICM_DECOMPRESS_SET_PALETTE => ICERR_UNSUPPORTED,
+        ICM_DECOMPRESS_GET_PALETTE => decompress_get_palette(cpu, fourcc, dw1, dw2),
+        ICM_DECOMPRESS_SET_PALETTE => decompress_set_palette(cpu, hic, fourcc, dw1),
         _ => ICERR_UNSUPPORTED,
     })
 }
@@ -797,6 +812,76 @@ fn decompress_get_format(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) ->
     ICERR_OK
 }
 
+/// ICM_DECOMPRESS_GET_PALETTE: the palette the codec `fourcc` decodes
+/// the format at `input` to in 8 bits, written after the
+/// BITMAPINFOHEADER at `output` with biClrUsed 256 in it. Only Indeo 4
+/// has one here (`indeo4::palette`): the static colours, its own 234
+/// and two blacks, and these 236 have PC_NOCOLLAPSE in rgbReserved, as
+/// IR41.DLL writes them. Civilization II asks for it before its intro
+/// and gives it back with ICM_DECOMPRESS_SET_PALETTE. The other codecs
+/// answer ICERR_UNSUPPORTED: Cinepak's driver has a palette too, which
+/// DrawDib draws in (`cinepak::palette_8`), but not here (#2202).
+fn decompress_get_palette(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) -> u32 {
+    if fourcc != IV41 {
+        return ICERR_UNSUPPORTED;
+    }
+    if let Err(e) = formats(cpu, fourcc, input, 0) {
+        return e;
+    }
+    let Some(info) = read_info(cpu, output) else {
+        return ICERR_BADPARAM;
+    };
+    let at = output.wrapping_add(info.size);
+    if !allows(cpu, output, HEADER, true) || !allows(cpu, at, 4 * 256, true) {
+        return ICERR_BADPARAM;
+    }
+    let palette = super::indeo4::palette::palette_8(crate::win32::gdi32::static_colors());
+    let mut quads = [0u8; 4 * 256];
+    for (i, (q, c)) in quads.as_chunks_mut::<4>().0.iter_mut().zip(palette).enumerate() {
+        let [r, g, b, _] = c.to_le_bytes();
+        let flags = if (10..246).contains(&i) { PC_NOCOLLAPSE } else { 0 };
+        *q = [b, g, r, flags];
+    }
+    cpu.bus.guest_write_32(output + 32, 256);
+    cpu.bus.guest_write_bytes(at, &quads);
+    ICERR_OK
+}
+
+/// PALETTEENTRY's PC_NOCOLLAPSE.
+const PC_NOCOLLAPSE: u8 = 4;
+
+/// ICM_DECOMPRESS_SET_PALETTE: the palette the codec `fourcc` open as
+/// `hic` is to decode to in 8 bits, the colours of the BITMAPINFO at
+/// `palette`, or its own for 0. Only Indeo 4 takes one. Its own palette
+/// given back, as Civilization II does, changes nothing: IR41.DLL
+/// writes the same indexes. Another is kept (`State::palettes`), and
+/// each pixel takes the nearest of its colours; IR41.DLL dithers to it,
+/// in a way not worked out (#2354). Microsoft Video 1's 8-bit frames
+/// are indexes that go out as they are, whatever the palette.
+fn decompress_set_palette(cpu: &mut Cpu, hic: u32, fourcc: u32, palette: u32) -> u32 {
+    if fourcc != IV41 {
+        return ICERR_UNSUPPORTED;
+    }
+    let given = if palette == 0 {
+        None
+    } else {
+        let Some(colours) = output_colours(cpu, palette) else {
+            return ICERR_BADPARAM;
+        };
+        let colours: Vec<u32> = colours
+            .iter()
+            .map(|&[r, g, b]| u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16)
+            .collect();
+        let own = &super::indeo4::palette::COLOURS;
+        let first = super::indeo4::palette::FIRST;
+        let is_own = colours.get(first..first + own.len()) == Some(&own[..]);
+        (!is_own).then_some(colours)
+    };
+    let vfw = &mut crate::win32::process(cpu).vfw;
+    set_given_palette(vfw, hic as usize - 1, given);
+    ICERR_OK
+}
+
 /// Decodes the Microsoft Video 1 frame `data`, of the format at `input`,
 /// onto the DIB `bits` of the format at `output`. Like msvidc32.dll it
 /// draws in place: the blocks a frame skips keep what the DIB had, which
@@ -916,27 +1001,50 @@ fn decompress_picture(
     } else {
         decoder.decode(&frame)
     };
-    let picture = decoder.picture(width, height);
     if let Err(e) = decoded {
         cpu.bus.log_string(&format!("[W32] ICDecompress: {e}"));
     }
-    let Some(picture) = picture else {
-        return ICERR_OK;
-    };
+    let given = crate::win32::process(cpu).vfw.palettes.get(slot).cloned().flatten();
+    // Indeo 4's driver writes indexes of its own palette in 8 bits,
+    // whatever the DIB's colours, unless the program gave it another
+    // (`decompress_get_palette`, `decompress_set_palette`).
+    let own_indexes = layout == msvideo1::Output::Indexes && fourcc == IV41 && given.is_none();
     let Place { left, top, zoom } = at.unwrap_or(Place {
         left: 0,
         top: 0,
         zoom: 1,
     });
-    let (picture, width, height) = match zoom {
-        2 => (zoom_by_two(&picture, width, height), 2 * width, 2 * height),
-        _ => (picture, width, height),
+    let decoder = &crate::win32::process(cpu).vfw.decoders[slot];
+    let picture = if own_indexes {
+        decoder.indeo_4_indexes(width, height, zoom)
+    } else {
+        decoder.picture(width, height)
     };
-    let colours = match layout {
-        msvideo1::Output::Indexes => output_colours(cpu, output).unwrap_or_default(),
-        _ => Vec::new(),
+    let Some(picture) = picture else {
+        return ICERR_OK;
     };
-    let pixels = from_rgb24(&picture, width, height, layout, top_down, &colours);
+    let pixels = if own_indexes {
+        indexes_dib(&picture, zoom * width, top_down)
+    } else {
+        let picture = match zoom {
+            2 => zoom_by_two(&picture, width, height),
+            _ => picture,
+        };
+        let colours = match (layout, given) {
+            (msvideo1::Output::Indexes, Some(given)) => given
+                .iter()
+                .map(|c| {
+                    let [r, g, b, _] = c.to_le_bytes();
+                    [r, g, b]
+                })
+                .collect(),
+            (msvideo1::Output::Indexes, None) => output_colours(cpu, output).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let (w, h) = (zoom * width, zoom * height);
+        from_rgb24(&picture, w, h, layout, top_down, &colours)
+    };
+    let (width, height) = (zoom * width, zoom * height);
     if (left, top) == (0, 0) && out_size == (width, height) {
         cpu.bus.guest_write_bytes(bits, &pixels);
         return ICERR_OK;
@@ -953,6 +1061,20 @@ fn decompress_picture(
         cpu.bus.guest_write_bytes(at, source);
     }
     ICERR_OK
+}
+
+/// The 8-bit DIB of the rows of indexes `rows` (from the top) of
+/// `width`, its rows from the top when `top_down`.
+fn indexes_dib(rows: &[u8], width: u32, top_down: bool) -> Vec<u8> {
+    let w = width as usize;
+    let h = rows.len() / w.max(1);
+    let stride = crate::win32::gdi32::surface::dib_stride(width as i32, 8);
+    let mut out = vec![0; stride * h];
+    for (y, source) in rows.chunks_exact(w.max(1)).enumerate() {
+        let row = if top_down { y } else { h - 1 - y };
+        out[row * stride..][..w].copy_from_slice(source);
+    }
+    out
 }
 
 /// The 24-bit DIB `picture` of `width` by `height` at twice its size,
