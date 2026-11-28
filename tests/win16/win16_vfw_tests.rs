@@ -4,6 +4,7 @@
 
 use crate::win16;
 use crate::win16_mmsystem_tests::avi_clip;
+use rust_dos::config::WindowsVersion;
 
 use win16::{CODE, Code, program, run_with};
 
@@ -63,10 +64,26 @@ fn push_dword(code: &mut Code, at: u16) {
 /// A program opens an AVI file with the built-in AVIFILE, gets its video
 /// stream and its AVISTREAMINFO in the 16-bit layout: 132 bytes, with
 /// rcFrame as four words, and nothing written after them. MSVIDEO's
-/// VideoForWindowsVersion is 98 SE's, 4.03.1998. The program ends with 1,
-/// or the number of the check that failed.
+/// VideoForWindowsVersion is 98 SE's, 4.03.1998.
 #[test]
 fn avifile_gives_a_streams_info_in_the_16_bit_layout() {
+    let (exit, log) = stream_info("vfw16_stream_info", WindowsVersion::Win98Se, 0x0403_07CE);
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// On the built-in Windows 95, VideoForWindowsVersion is Windows 95's,
+/// 4.00.950, as its MSVIDEO.DLL in SYSTEM is.
+#[test]
+fn video_for_windows_version_is_windows_95s_there() {
+    let (exit, log) = stream_info("vfw16_stream_info_95", WindowsVersion::Win95, 0x0400_03B6);
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// The program of `avifile_gives_a_streams_info_in_the_16_bit_layout`,
+/// run on the built-in Windows `version`, which VideoForWindowsVersion
+/// gives as `vfw`: its exit code, 1 or the number of the check that
+/// failed, and the log.
+fn stream_info(test: &str, version: WindowsVersion, vfw: u32) -> (u8, String) {
     let mut code = Code::new();
     code.call("AVIFILE", AVI_FILE_INIT);
     // AVIFileOpen(&file, "CLIP.AVI", OF_READ, NULL)
@@ -102,13 +119,13 @@ fn avifile_gives_a_streams_info_in_the_16_bit_layout() {
     code.call("AVIFILE", AVI_FILE_RELEASE);
     code.call("AVIFILE", AVI_FILE_EXIT);
     code.call("MSVIDEO", VIDEO_FOR_WINDOWS_VERSION);
-    expect_dx_ax(&mut code, 0x0403_07CE, 12);
+    expect_dx_ax(&mut code, vfw, 12);
     code.emit(&[0xB0, 0x01]).exit_al();
     let name_at = code.here();
     code.emit(b"CLIP.AVI\0");
     code.patch(name, name_at);
-    let (exit, log) = run_with("vfw16_stream_info", program(&code, CODE), |_, dir| {
+    run_with(test, program(&code, CODE), |cpu, dir| {
+        cpu.bus.win32.version = version;
         std::fs::write(dir.join("CLIP.AVI"), avi_clip()).unwrap();
-    });
-    assert_eq!(exit, 1, "{log}");
+    })
 }
