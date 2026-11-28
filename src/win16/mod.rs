@@ -43,6 +43,7 @@ mod typelib;
 mod typelib_invoke;
 pub(crate) mod universal;
 mod user;
+mod vfw;
 
 pub use builtin::{function_name, trap_name};
 

@@ -488,6 +488,8 @@ fn builtin_node(
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
         "MSACM32" | "DCIMAN32" if windows.is_98() => [4, 3, 0, 1998],
+        // The 16-bit AVIFILE.DLL and MSVIDEO.DLL (win16/vfw.rs).
+        "AVIFILE" | "MSVIDEO" if windows.is_98() => [4, 3, 0, 1998],
         "IMM32" | "NTDLL" if windows.is_98() => [4, 10, 0, 1998],
         // DirectX 6.1's DirectShow, as Windows 98 SE has it.
         "QUARTZ" => [6, 1, 5, 319],

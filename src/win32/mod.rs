@@ -89,7 +89,7 @@ pub mod user32;
 pub mod version;
 mod verdll;
 mod vmm;
-mod vfw;
+pub(crate) mod vfw;
 mod wing32;
 pub(crate) mod winmm;
 mod winspool;
