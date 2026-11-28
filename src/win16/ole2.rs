@@ -1,20 +1,19 @@
 //! The 16-bit OLE 2 modules Windows 95 and 98 have in their SYSTEM
 //! directory: COMPOBJ (the component object library: initialization,
-//! the task allocator, class objects, GUIDs as text), STORAGE (compound
-//! files), OLE2 (linking and embedding, drag and drop, the clipboard)
-//! and OLE2NLS (locales); OLE2DISP (automation) has ole2disp.rs. A
-//! program made with Visual Basic 4's 16-bit edition imports all of
-//! them through VB40016.DLL.
+//! the task allocator, class objects, GUIDs as text), OLE2 (linking and
+//! embedding, drag and drop, the clipboard) and OLE2NLS (locales);
+//! STORAGE (compound files) has storage.rs and OLE2DISP (automation)
+//! ole2disp.rs. A program made with Visual Basic 4's 16-bit edition
+//! imports all of them through VB40016.DLL.
 //!
 //! The ordinals and names are those of the modules of Windows 98 SE, as
 //! Wine's compobj.dll16, storage.dll16, ole2.dll16 and ole2nls.dll16
 //! spec files list them. What a program calls is done as OLE 2.02 does
 //! it, much of it after Wine's implementations (LGPL 2.1 or later). The
 //! rest is in two kinds. A function with a documented way to fail that a
-//! program checks (compound files, which need IStorage objects of 16-bit
-//! code's own) fails with E_NOTIMPL, saying so in the log. One without
-//! (the OLE 1 conversion, the monikers, the data cache) is `missing`: a
-//! call ends the program saying which function it was.
+//! program checks fails with E_NOTIMPL, saying so in the log. One
+//! without (the OLE 1 conversion, the monikers, the data cache) is
+//! `missing`: a call ends the program saying which function it was.
 //!
 //! Interfaces: a 16-bit interface's methods are far cdecl functions, the
 //! object's 16:16 pointer first, as OLE 2's STDMETHODCALLTYPE has them
@@ -340,21 +339,6 @@ const MALLOC_METHODS: [&str; 9] = [
     "IMalloc_HeapMinimize",
 ];
 
-pub static STORAGE: Def = Def {
-    name: "STORAGE",
-    file: "STORAGE.DLL",
-    apis: &[
-        rust("StgCreateDocfile", 1, "pllp", no_storage),
-        rust("StgCreateDocfileOnILockBytes", 2, "lllp", no_storage),
-        rust("StgOpenStorage", 3, "pllllp", no_storage),
-        rust("StgOpenStorageOnILockBytes", 4, "lllllp", no_storage),
-        rust("StgIsStorageFile", 5, "p", not_implemented),
-        rust("StgIsStorageILockBytes", 6, "l", not_implemented),
-        rust("StgSetTimes", 7, "pppp", not_implemented),
-    ],
-    library: true,
-};
-
 pub static OLE2: Def = Def {
     name: "OLE2",
     file: "OLE2.DLL",
@@ -549,14 +533,14 @@ fn s_ok(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// A function the built-in Windows doesn't do that has a way to fail:
 /// E_NOTIMPL, said in the log.
-fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     log_not_implemented(cpu);
     Some(E_NOTIMPL)
 }
 
 /// A compound file's functions, whose last argument is where the
 /// IStorage goes: NULL there, and E_NOTIMPL.
-fn no_storage(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(super) fn no_storage(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let out = *args.last().expect("an IStorage's place");
     if out != 0 {
         super::write_32(cpu, out, 0);
@@ -983,8 +967,15 @@ pub(super) fn dx_ax(ctx: &mut Context, result: u32) -> Option<u32> {
 /// E_OUTOFMEMORY (and NULL at `out`) when there is no block. The program
 /// frees the block with the allocator CoGetMalloc gives it, so when
 /// CoInitialize was given the program's own allocator, its Alloc makes
-/// the block (`then_block` fills it); otherwise the built-in one does.
+/// the block (`then_blocks` fills it); otherwise the built-in one does.
 fn task_block(cpu: &mut Cpu, out: u32, bytes: &[u8]) -> Option<u32> {
+    task_blocks(cpu, S_OK, &[(out, bytes.to_vec())])
+}
+
+/// `task_block` for several blocks, each `(out, bytes)`, made in turn:
+/// then return `value`, or E_OUTOFMEMORY when one of them got no block
+/// (and NULL at its `out`).
+pub fn task_blocks(cpu: &mut Cpu, value: u32, blocks: &[(u32, Vec<u8>)]) -> Option<u32> {
     let app = this_task(cpu).map_or(0, |t| t.app_malloc);
     let target = if app == 0 {
         0
@@ -992,17 +983,94 @@ fn task_block(cpu: &mut Cpu, out: u32, bytes: &[u8]) -> Option<u32> {
         method_address(cpu, app, 3)
     };
     if target == 0 {
-        let p = alloc(cpu, bytes.len() as u32);
-        return Some(fill_block(cpu, out, p, bytes));
+        let mut result = value;
+        for (out, bytes) in blocks {
+            let p = alloc(cpu, bytes.len() as u32);
+            if fill_block(cpu, *out, p, bytes) != S_OK {
+                result = E_OUTOFMEMORY;
+            }
+        }
+        return Some(result);
     }
-    let mut data = vec![out, bytes.len() as u32];
-    for chunk in bytes.chunks(4) {
-        let mut word = [0; 4];
-        word[..chunk.len()].copy_from_slice(chunk);
-        data.push(u32::from_le_bytes(word));
+    let Some((_, first)) = blocks.first() else {
+        return Some(value);
+    };
+    // [value, then each block's out, its bytes' count and the bytes,
+    // four in each dword].
+    let mut data = vec![value];
+    for (out, bytes) in blocks {
+        data.extend([*out, bytes.len() as u32]);
+        for chunk in bytes.chunks(4) {
+            let mut word = [0; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            data.push(u32::from_le_bytes(word));
+        }
     }
-    let size = bytes.len() as u32;
-    call_at(cpu, target, app, &[size], "l", thunk::THEN_OLE_BLOCK, data);
+    let size = first.len() as u32;
+    call_at(cpu, target, app, &[size], "l", thunk::THEN_OLE_BLOCKS, data);
+    None
+}
+
+/// The program's IMalloc::Alloc that `task_blocks` called returned the
+/// block `value` for the first block of `data`: fill it, then ask for
+/// the next one's, or return the value to the function's caller.
+pub(super) fn then_blocks(
+    cpu: &mut Cpu,
+    value: u32,
+    data: &[u32],
+    ctx: &mut Context,
+) -> Option<u32> {
+    let (out, len) = (data[1], data[2] as usize);
+    let words = len.div_ceil(4);
+    let bytes: Vec<u8> = data[3..3 + words]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let mut result = data[0];
+    if fill_block(cpu, out, value, &bytes[..len]) != S_OK {
+        result = E_OUTOFMEMORY;
+    }
+    let rest = &data[3 + words..];
+    if rest.is_empty() {
+        return dx_ax(ctx, result);
+    }
+    let app = this_task(cpu).map_or(0, |t| t.app_malloc);
+    let target = if app == 0 {
+        0
+    } else {
+        method_address(cpu, app, 3)
+    };
+    if target == 0 {
+        // The program's allocator went in its Alloc (CoUninitialize):
+        // the built-in one, which CoGetMalloc gives now, makes the rest.
+        let mut blocks = Vec::new();
+        let mut at = 0;
+        while at + 2 <= rest.len() {
+            let (out, len) = (rest[at], rest[at + 1] as usize);
+            let words = len.div_ceil(4);
+            let bytes: Vec<u8> = rest[at + 2..at + 2 + words]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .take(len)
+                .collect();
+            blocks.push((out, bytes));
+            at += 2 + words;
+        }
+        let result = task_blocks(cpu, result, &blocks).unwrap_or(result);
+        return dx_ax(ctx, result);
+    }
+    let mut more = vec![result];
+    more.extend_from_slice(rest);
+    // The next block's IMalloc::Alloc(this, size), as `call_at` pushes
+    // it.
+    let size = rest[1];
+    let words = [
+        (size >> 16) as u16,
+        size as u16,
+        (app >> 16) as u16,
+        app as u16,
+    ];
+    thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_BLOCKS, more);
     None
 }
 
@@ -1024,9 +1092,10 @@ fn fill_block(cpu: &mut Cpu, out: u32, p: u32, bytes: &[u8]) -> u32 {
     S_OK
 }
 
-/// The program's IMalloc::Alloc that `task_block` called returned the
-/// block `value`: `data` is `out`, the bytes' count, and the bytes, four
-/// in each dword.
+/// The program's IMalloc::Alloc that `task_block` called in an earlier
+/// build, whose saved states can hold the call, returned the block
+/// `value`: `data` is `out`, the bytes' count, and the bytes, four in
+/// each dword. `task_block` calls through `task_blocks` now.
 pub(super) fn then_block(
     cpu: &mut Cpu,
     value: u32,

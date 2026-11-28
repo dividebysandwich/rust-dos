@@ -427,10 +427,13 @@ ivec4 combineTexture(int mode, ivec4 local, ivec4 other, int level, ivec3 detail
     } else if (select == 5) {
         ba = level & 0xFF;
     }
-    if (!bit(mode, 17)) {
+    // With trilinear on (bit 30), the reverse blend bits flip at odd
+    // levels, as in raster.rs's texture_combine.
+    bool odd = bit(mode, 30) && ((level >> 8) & 1) != 0;
+    if (bit(mode, 17) == odd) {
         b ^= ivec3(0xFF);
     }
-    if (!bit(mode, 26)) {
+    if (bit(mode, 26) == odd) {
         ba ^= 0xFF;
     }
     c = (c * (b + 1)) >> 8;

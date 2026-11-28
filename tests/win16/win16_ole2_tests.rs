@@ -133,7 +133,7 @@ fn put_text(code: &mut Code, at: u16, text: &[u8]) {
 /// allocator from CoGetMalloc and a block from it, BSTRs, a VARIANT
 /// changed to text, numbers from and to text, an interface's GUID
 /// imported as a variable, StringFromCLSID, the locale, and a compound
-/// file, which the built-in Windows doesn't make (E_NOTIMPL).
+/// file.
 #[test]
 fn a_vb4_programs_ole_calls_work() {
     let mut code = Code::new();
@@ -257,14 +257,16 @@ fn a_vb4_programs_ole_calls_work() {
     code.call("OLE2NLS", GET_USER_DEFAULT_LCID);
     expect_dx_ax(&mut code, 0x0409, 27);
 
-    // StgCreateDocfile(name, mode, 0, &storage): E_NOTIMPL, and NULL.
-    set(&mut code, OUT, 1);
+    // StgCreateDocfile(name, mode, 0, &storage): S_OK, and a storage.
+    set(&mut code, OUT + 2, 0);
     push_ds(&mut code, TEXT);
     code.push(0).push(0x1012).push(0).push(0);
     push_ds(&mut code, OUT);
     code.call("STORAGE", STG_CREATE_DOCFILE);
-    expect_dx_ax(&mut code, 0x8000_4001, 28);
-    expect(&mut code, OUT, 0, 29);
+    expect_dx_ax(&mut code, 0, 28);
+    code.emit(&[0x83, 0x3E, lo(OUT + 2), hi(OUT + 2), 0x00]); // cmp word [..],0
+    code.emit(&[0x75, 0x06]) // jne over the exit
+        .emit(&[0xB0, 29, 0xB4, 0x4C, 0xCD, 0x21]);
 
     code.emit(&[0xB0, 0x00]).exit_al();
     let (exit, log) = run("ole2_vb4_calls", program(&code, CODE));
@@ -928,5 +930,299 @@ fn a_program_raises_an_error_object() {
     code.emit(&[0xB0, 0x00]).exit_al();
 
     let (exit, log) = run("ole2_error_info", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// STORAGE's functions and the methods of its objects.
+const STG_OPEN_STORAGE: u16 = 3;
+const STG_IS_STORAGE_FILE: u16 = 5;
+const CREATE_STREAM: u8 = 3;
+const OPEN_STREAM: u8 = 4;
+const ENUM_ELEMENTS: u8 = 11;
+const READ: u8 = 3;
+const WRITE: u8 = 4;
+const STREAM_STAT: u8 = 12;
+const NEXT: u8 = 3;
+
+/// TITLE.TDF in `dir`: a compound file with a stream "Contents" of 11
+/// bytes and a storage "Sub", as a Windows 3.1 title keeps its data.
+fn title_file(dir: &std::path::Path) {
+    let mut file = cfb::create(dir.join("TITLE.TDF")).unwrap();
+    let mut stream = file.create_stream("/Contents").unwrap();
+    std::io::Write::write_all(&mut stream, b"HELLO WORLD").unwrap();
+    drop(stream);
+    file.create_storage("/Sub").unwrap();
+    file.flush().unwrap();
+}
+
+/// push ds; pop es; mov bx,`at`.
+fn es_bx_ds(code: &mut Code, at: u16) {
+    code.emit(&[0x1E, 0x07, 0xBB, lo(at), hi(at)]);
+}
+
+/// StgOpenStorage(path at `path`, NULL, STGM_SHARE_DENY_WRITE, NULL, 0,
+/// &storage at `out`), as Pascal pushes it.
+fn open_title(code: &mut Code, path: u16, out: u16) {
+    push_ds(code, path);
+    code.push(0).push(0).push(0).push(0x20);
+    code.push(0).push(0).push(0).push(0);
+    push_ds(code, out);
+    code.call("STORAGE", STG_OPEN_STORAGE);
+}
+
+/// IStorage::OpenStream(name at `name`, NULL, STGM_SHARE_EXCLUSIVE, 0,
+/// &stream at `out`) of the storage at `storage`.
+fn open_stream(code: &mut Code, storage: u16, name: u16, out: u16) {
+    call_object(
+        code,
+        storage,
+        OPEN_STREAM,
+        |c| {
+            push_ds(c, out);
+            c.push(0).push(0).push(0).push(0x10).push(0).push(0);
+            push_ds(c, name);
+        },
+        10,
+    );
+}
+
+/// IStorage::EnumElements(0, NULL, 0, &enumerator at `out`).
+fn enum_elements(code: &mut Code, storage: u16, out: u16) {
+    call_object(
+        code,
+        storage,
+        ENUM_ELEMENTS,
+        |c| {
+            push_ds(c, out);
+            c.push(0).push(0).push(0).push(0).push(0).push(0);
+        },
+        8,
+    );
+}
+
+/// IEnumSTATSTG::Next(count, STATSTGs at `stats`, &fetched at `got`).
+fn next(code: &mut Code, enumerator: u16, count: u16, stats: u16, got: u16) {
+    call_object(
+        code,
+        enumerator,
+        NEXT,
+        |c| {
+            push_ds(c, got);
+            push_ds(c, stats);
+            c.push(0).push(count);
+        },
+        6,
+    );
+}
+
+/// IStream::Stat(&stat at `stats`, STATFLAG_DEFAULT) of the stream at
+/// `stream`.
+fn stream_stat(code: &mut Code, stream: u16, stats: u16) {
+    call_object(
+        code,
+        stream,
+        STREAM_STAT,
+        |c| {
+            c.push(0).push(0);
+            push_ds(c, stats);
+        },
+        4,
+    );
+}
+
+/// End with `fail` unless the first letters of the names of the two
+/// STATSTGs at `stats` are C and S, in either order: "Contents" and
+/// "Sub".
+fn expect_both_names(code: &mut Code, stats: u16, fail: u8) {
+    les_bx(code, stats);
+    code.emit(&[0x26, 0x8A, 0x07]); // mov al,es:[bx]
+    les_bx(code, stats + 72);
+    code.emit(&[0x26, 0x02, 0x07]) // add al,es:[bx]
+        .emit(&[0x3C, b'C' + b'S']); // cmp al,'C'+'S'
+    or_fail(code, fail);
+}
+
+/// A Windows 3.1 title reads its compound file through STORAGE, as The
+/// Magic School Bus Explores the Solar System reads MSBSOLAR.TDF:
+/// StgOpenStorage, a stream opened, read and its Stat with its name in
+/// ANSI, the storage's elements enumerated, StgIsStorageFile. Then a
+/// new docfile made with a stream written, which the file has after
+/// the last Release.
+#[test]
+fn a_program_reads_and_writes_compound_files() {
+    const STORAGE: u16 = 0x10;
+    const STREAM: u16 = 0x14;
+    const ENUMERATOR: u16 = 0x18;
+    const COUNT: u16 = 0x1C;
+    const PATH: u16 = 0x20;
+    const NAME: u16 = 0x30;
+    const BUFFER: u16 = 0x40;
+    const OTHER: u16 = 0x50;
+    const STATS: u16 = 0x60;
+    let mut code = Code::new();
+    code.push(0).push(0).call("OLE2", OLE_INITIALIZE);
+    put_text(&mut code, PATH, b"C:\\TITLE.TDF");
+    put_text(&mut code, NAME, b"Contents");
+
+    open_title(&mut code, PATH, STORAGE);
+    expect_dx_ax(&mut code, 0, 1);
+    open_stream(&mut code, STORAGE, NAME, STREAM);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // IStream::Read(buffer, 16, &count): the stream's 11 bytes.
+    call_object(
+        &mut code,
+        STREAM,
+        READ,
+        |c| {
+            push_ds(c, COUNT);
+            c.push(0).push(16);
+            push_ds(c, BUFFER);
+        },
+        6,
+    );
+    expect_dx_ax(&mut code, 0, 3);
+    expect(&mut code, COUNT, 11, 4);
+    es_bx_ds(&mut code, BUFFER);
+    expect_es_bx(&mut code, 0, b'H', 5);
+    expect_es_bx(&mut code, 10, b'D', 6);
+
+    // IStream::Stat: a stream (2) of 11 bytes, its name ANSI text.
+    stream_stat(&mut code, STREAM, STATS);
+    expect_dx_ax(&mut code, 0, 7);
+    expect(&mut code, STATS + 4, 2, 8);
+    expect(&mut code, STATS + 8, 11, 9);
+    les_bx(&mut code, STATS);
+    expect_es_bx(&mut code, 0, b'C', 10);
+    expect_es_bx(&mut code, 7, b's', 11);
+    expect_es_bx(&mut code, 8, 0, 12);
+
+    // EnumElements, then Next(2): both elements, a stream (2) and a
+    // storage (1); Next(1) after them: S_FALSE and none.
+    enum_elements(&mut code, STORAGE, ENUMERATOR);
+    expect_dx_ax(&mut code, 0, 13);
+    next(&mut code, ENUMERATOR, 2, STATS, COUNT);
+    expect_dx_ax(&mut code, 0, 14);
+    expect(&mut code, COUNT, 2, 15);
+    code.emit(&[0xA1, lo(STATS + 4), hi(STATS + 4)]) // mov ax,[type]
+        .emit(&[0x03, 0x06, lo(STATS + 76), hi(STATS + 76)]) // add ax,[type]
+        .emit(&[0x3D, 3, 0]); // cmp ax,3
+    or_fail(&mut code, 16);
+    expect_both_names(&mut code, STATS, 17);
+    next(&mut code, ENUMERATOR, 1, STATS, COUNT);
+    expect_dx_ax(&mut code, 1, 18);
+    expect(&mut code, COUNT, 0, 19);
+    for object in [ENUMERATOR, STREAM, STORAGE] {
+        call_object(&mut code, object, RELEASE, |_| {}, 0);
+    }
+
+    // StgIsStorageFile: S_OK for the docfile, S_FALSE for the program.
+    push_ds(&mut code, PATH);
+    code.call("STORAGE", STG_IS_STORAGE_FILE);
+    expect_dx_ax(&mut code, 0, 20);
+    put_text(&mut code, OTHER, b"C:\\T.EXE");
+    push_ds(&mut code, OTHER);
+    code.call("STORAGE", STG_IS_STORAGE_FILE);
+    expect_dx_ax(&mut code, 1, 21);
+
+    // StgCreateDocfile("C:\NEW.STG", STGM_CREATE | STGM_READWRITE |
+    // STGM_SHARE_EXCLUSIVE), CreateStream("Data"), Write("ABC").
+    put_text(&mut code, PATH, b"C:\\NEW.STG");
+    put_text(&mut code, NAME, b"Data");
+    put_text(&mut code, BUFFER, b"ABC");
+    push_ds(&mut code, PATH);
+    code.push(0).push(0x1012).push(0).push(0);
+    push_ds(&mut code, STORAGE);
+    code.call("STORAGE", STG_CREATE_DOCFILE);
+    expect_dx_ax(&mut code, 0, 22);
+    call_object(
+        &mut code,
+        STORAGE,
+        CREATE_STREAM,
+        |c| {
+            push_ds(c, STREAM);
+            c.push(0).push(0).push(0).push(0).push(0).push(0x1012);
+            push_ds(c, NAME);
+        },
+        10,
+    );
+    expect_dx_ax(&mut code, 0, 23);
+    call_object(
+        &mut code,
+        STREAM,
+        WRITE,
+        |c| {
+            c.push(0).push(0).push(0).push(3);
+            push_ds(c, BUFFER);
+        },
+        6,
+    );
+    expect_dx_ax(&mut code, 0, 24);
+    for object in [STREAM, STORAGE] {
+        call_object(&mut code, object, RELEASE, |_| {}, 0);
+    }
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let mut dir = std::path::PathBuf::new();
+    let (exit, log) = win16::run_with("ole2_storage", program(&code, CODE), |_, d| {
+        title_file(d);
+        dir = d.to_path_buf();
+    });
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+    let mut file = cfb::open(dir.join("NEW.STG")).unwrap();
+    let mut data = Vec::new();
+    let mut stream = file.open_stream("/Data").unwrap();
+    std::io::Read::read_to_end(&mut stream, &mut data).unwrap();
+    assert_eq!(data, b"ABC");
+}
+
+/// The names in STATSTGs are the program's to free with the allocator
+/// CoGetMalloc gives it, so they come from the program's own allocator
+/// when OleInitialize was given one: Stat asks its Alloc for one block,
+/// and IEnumSTATSTG::Next for one for each element, in turn.
+#[test]
+fn storage_names_take_the_programs_allocator() {
+    const STATS: u16 = 0x10;
+    const STORAGE: u16 = 0xA0;
+    const STREAM: u16 = 0xA4;
+    const ENUMERATOR: u16 = 0xA8;
+    const COUNT: u16 = 0xAC;
+    const PATH: u16 = 0xDC;
+    const NAME: u16 = 0xEA;
+    let mut code = Code::new();
+    counting_allocator(&mut code);
+    push_ds(&mut code, COUNTER);
+    code.call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+    put_text(&mut code, PATH, b"C:\\TITLE.TDF");
+    put_text(&mut code, NAME, b"Contents");
+    open_title(&mut code, PATH, STORAGE);
+    expect_dx_ax(&mut code, 0, 2);
+    open_stream(&mut code, STORAGE, NAME, STREAM);
+    expect_dx_ax(&mut code, 0, 3);
+
+    stream_stat(&mut code, STREAM, STATS);
+    expect_dx_ax(&mut code, 0, 4);
+    expect(&mut code, ALLOCS, 1, 5);
+    expect(&mut code, COUNTER_ASKED, 9, 6);
+    les_bx(&mut code, STATS);
+    expect_es_bx(&mut code, 0, b'C', 7);
+    expect_es_bx(&mut code, 8, 0, 8);
+
+    enum_elements(&mut code, STORAGE, ENUMERATOR);
+    expect_dx_ax(&mut code, 0, 9);
+    next(&mut code, ENUMERATOR, 2, STATS, COUNT);
+    expect_dx_ax(&mut code, 0, 10);
+    expect(&mut code, COUNT, 2, 11);
+    expect(&mut code, ALLOCS, 3, 12);
+    expect_both_names(&mut code, STATS, 13);
+    for object in [ENUMERATOR, STREAM, STORAGE] {
+        call_object(&mut code, object, RELEASE, |_| {}, 0);
+    }
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let (exit, log) = win16::run_with("ole2_storage_app_malloc", program(&code, CODE), |_, d| {
+        title_file(d)
+    });
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }
