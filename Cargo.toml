@@ -150,9 +150,10 @@ md-5 = "0.11"
 symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
 # CD images in MAME's compressed CHD files (src/cdrom/chd.rs).
 chd = { version = "0.4", optional = true }
-# The manuals and extras of game profiles (src/manuals): JPEG pictures, and
-# PDF pages rasterized.
-jpeg-decoder = { version = "0.3", default-features = false, optional = true }
+# JPEG pictures: OLE's picture objects (src/win32/oleaut32/picture.rs),
+# the manuals and extras of game profiles (src/manuals) and the VR scene.
+jpeg-decoder = { version = "0.3", default-features = false }
+# The manuals' PDF pages, rasterized.
 hayro = { version = "0.8", optional = true }
 # 7z archives as drives (src/archive/sevenz.rs).
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["bzip2", "deflate", "ppmd"], optional = true }
@@ -233,7 +234,7 @@ voodoo-gl = ["dep:glow"]
 # The picture on a screen in a 3D scene: in a window with a camera to fly
 # (--vr-desktop), or in a VR headset through OpenXR (--vr, on Linux and
 # Windows).
-vr = ["gl", "dep:gltf", "dep:glam", "dep:openxr", "dep:ash", "dep:jpeg-decoder"]
+vr = ["gl", "dep:gltf", "dep:glam", "dep:openxr", "dep:ash"]
 midi = ["rust-dos-mpu401/midi"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]
@@ -243,7 +244,7 @@ chd = ["dep:chd"]
 sevenz = ["dep:sevenz-rust2"]
 # JPEG pictures and PDF documents among games' manuals (PNG and GIF are
 # always read).
-manuals = ["dep:jpeg-decoder", "dep:hayro"]
+manuals = ["dep:hayro"]
 # The MPU-401's MIDI out of the host's MIDI ports (ALSA on Linux, which
 # needs libasound2-dev to build).
 hostmidi = ["rust-dos-mpu401/hostmidi"]
