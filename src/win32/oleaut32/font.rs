@@ -201,7 +201,7 @@ crate::state_fields!(Fonts {
 });
 
 /// The W32 section's version that added the font objects.
-pub const FONTS_SAVED: u16 = 118;
+pub const FONTS_SAVED: u16 = 119;
 
 pub type Saved = Since<FONTS_SAVED, Fonts>;
 
