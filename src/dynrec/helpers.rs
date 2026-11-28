@@ -226,6 +226,10 @@ pub struct JitCtx {
 
 /// What `card_state` found: a Banshee's or Voodoo3's memory
 /// (`Bus::banshee_direct`) or the VESA frame buffer (`Bus::lfb_direct`).
+/// There is one, in the `JitCtx`, which `card_state` compares with what
+/// it finds each time: boxing the frame buffer's, which names up to
+/// `lfb::AHEAD` surfaces, would allocate on each call instead.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CardKey {
     Banshee(u32, Direct),
