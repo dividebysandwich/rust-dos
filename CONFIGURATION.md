@@ -2115,24 +2115,29 @@ order.
   `/System/Library/Fonts/Supplemental` and `/Library/Fonts`).
   `liberation` draws them from the Liberation fonts that come with
   rust-dos. A folder's path, such as `D:\w98fonts` or `~/fonts`, reads
-  the files there. The files have the names Windows gives them
-  (`arial.ttf`, `arialbd.ttf`, `ariali.ttf`, `arialbi.ttf`, `times.ttf`,
-  `timesbd.ttf`, `timesi.ttf`, `timesbi.ttf`, `cour.ttf`, `courbd.ttf`,
-  `couri.ttf`, `courbi.ttf`) or macOS gives them (`Arial Bold.ttf`), in
-  any case. Each font missing from the folders, or whose file isn't
-  that font, is drawn from Liberation: a folder with only `arial.ttf`
-  gives the regular Arial and nothing else. Windows 98's own files
-  draw what Windows 98 drew; a newer Windows' Arial differs from them
-  in a few characters, and Liberation in the shapes of most, by a
-  pixel or two. Whatever draws them, each character takes the width it
-  has on Windows 98, so text takes the same room. The files are read
-  the first time a program draws in one of these faces, so DOS
-  programs, and a Windows installed on the emulated machine, never
-  read them. A `--deterministic` run doesn't read the computer's fonts
-  folder, so its pictures are the same on every machine; the emulated
-  C: and a folder named here are read as usual. The log names the file
-  each font is drawn from. A change takes effect for the text drawn
-  after it.
+  the files there; a relative path is from the configuration file's
+  folder. The files have the names Windows gives them (`arial.ttf`,
+  `arialbd.ttf`, `ariali.ttf`, `arialbi.ttf`, `times.ttf`, `timesbd.ttf`,
+  `timesi.ttf`, `timesbi.ttf`, `cour.ttf`, `courbd.ttf`, `couri.ttf`,
+  `courbi.ttf`), in any case. In a folder of the computer they may also
+  have the names macOS gives them (`Arial Bold.ttf`). Each font missing
+  from the folders, or whose file isn't that font, is drawn from
+  Liberation: a folder with only `arial.ttf` gives the regular Arial and
+  nothing else. Windows 98's own files draw close to what Windows 98
+  drew, a few pixels a line apart where the hinting rounds otherwise; a
+  newer Windows' Arial differs from them in a few characters, and
+  Liberation in the shapes of most, by a pixel or two. Whatever draws
+  them, each character takes the width it has on Windows 98, so text
+  takes the same room. The files are read the first time a program
+  draws or measures text in one of these faces, or lists the fonts, so
+  DOS programs, and a Windows installed on the emulated machine, never
+  read them. A font drawn from Liberation for want of a file is looked
+  for again by the next program, which finds a file a setup copied to
+  `C:\WINDOWS\FONTS`. A `--deterministic` run doesn't read the
+  computer's fonts folder, so its pictures are the same on every
+  machine; the emulated C: and a folder named here are read as usual.
+  The log names the file each font is drawn from. A change takes effect
+  for the text drawn after it.
 
 #### DOS
 

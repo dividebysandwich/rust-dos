@@ -322,8 +322,10 @@ pub enum Win32Fonts {
 
 impl Win32Fonts {
     /// "auto", "liberation" (in any case) or a host folder's path, with
-    /// "~/" for the folder `home`. None for an empty value.
-    pub fn parse(s: &str, home: Option<&Path>) -> Option<Self> {
+    /// "~/" for the folder `home` and a relative path from `base_dir`,
+    /// the configuration file's folder, as a drive's. None for an empty
+    /// value.
+    pub fn parse(s: &str, base_dir: &Path, home: Option<&Path>) -> Option<Self> {
         let s = s.trim().trim_matches('"');
         if s.eq_ignore_ascii_case("auto") {
             Some(Self::Auto)
@@ -334,7 +336,7 @@ impl Win32Fonts {
         } else {
             Some(Self::Folder(match (s.strip_prefix("~/"), home) {
                 (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
-                _ => PathBuf::from(s),
+                _ => base_dir.join(s),
             }))
         }
     }

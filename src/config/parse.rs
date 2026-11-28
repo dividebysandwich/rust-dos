@@ -399,7 +399,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 Win32Locale::ALL.map(Win32Locale::name).join(", ")
                             )),
                         },
-                        "win32_fonts" => match Win32Fonts::parse(value, home) {
+                        "win32_fonts" => match Win32Fonts::parse(value, base_dir, home) {
                             Some(fonts) => config.win32_fonts = Some(fonts),
                             None => warn(format!(
                                 "invalid win32_fonts '{}' (auto, liberation or a folder)",

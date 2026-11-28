@@ -1804,23 +1804,26 @@ fn the_system_locale_is_read() {
 #[test]
 fn win32_fonts_takes_auto_liberation_or_a_folder() {
     let fonts = |text: &str| {
-        let config = parse(&format!("[emulator]
-win32_fonts={text}
-"), Path::new("/cfg"), Some(Path::new("/home/u")));
+        let text = format!("[emulator]\nwin32_fonts={text}\n");
+        let config = parse(&text, Path::new("/cfg"), Some(Path::new("/home/u")));
         (Settings::from_config(&config).win32_fonts, config.warnings)
     };
+    let folder = |path: PathBuf| (Win32Fonts::Folder(path), vec![]);
     assert_eq!(Settings::default().win32_fonts, Win32Fonts::Auto);
     assert_eq!(fonts("AUTO"), (Win32Fonts::Auto, vec![]));
     assert_eq!(fonts("Liberation"), (Win32Fonts::Liberation, vec![]));
-    assert_eq!(fonts("~/fonts"), (Win32Fonts::Folder(PathBuf::from("/home/u/fonts")), vec![]));
-    assert_eq!(
-        fonts(r#""D:\w98 fonts""#),
-        (Win32Fonts::Folder(PathBuf::from(r"D:\w98 fonts")), vec![])
-    );
+    assert_eq!(fonts("~/fonts"), folder(PathBuf::from("/home/u/fonts")));
+    // A relative folder is the configuration file's, as a drive's.
+    assert_eq!(fonts("w98"), folder(Path::new("/cfg").join("w98")));
+    let absolute = std::env::temp_dir().join("w98 fonts");
+    assert_eq!(fonts(&format!("\"{}\"", absolute.display())), folder(absolute));
     let (empty, warnings) = fonts("");
     assert_eq!((empty, warnings.len()), (Win32Fonts::Auto, 1));
     let home = Some(Path::new("/home/u"));
-    assert_eq!(Win32Fonts::Folder(PathBuf::from("/home/u/fonts")).name(home), "~/fonts");
+    assert_eq!(
+        Win32Fonts::Folder(PathBuf::from("/home/u/fonts")).name(home),
+        "~/fonts"
+    );
 }
 
 #[test]

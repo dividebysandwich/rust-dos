@@ -28,10 +28,14 @@
 //! them, draws with Liberation alone.
 //!
 //! The fonts are looked for the first time GDI draws or measures text in
-//! one of the faces: a DOS program, or a Windows installed on the
-//! emulated machine, never reads a font file. A file read from outside
-//! is untrusted: it goes through the parser that reads a program's own
-//! font files (`Ttf::parse`), and one it refuses falls back.
+//! one of the faces, or lists the faces: a DOS program, or a Windows
+//! installed on the emulated machine, never reads a font file. The files
+//! read outlast the program; a font drawn from Liberation for want of
+//! one is looked for again by the next program
+//! (`Outlines::for_next_program`), as a setup may have copied its file
+//! to C:\WINDOWS\FONTS. A file read from outside is untrusted: it goes
+//! through the parser that reads a program's own font files
+//! (`Ttf::parse`), and one it refuses falls back.
 
 use std::cell::OnceCell;
 use std::hash::{Hash, Hasher};
@@ -129,6 +133,23 @@ impl Outlines {
             };
         }
     }
+
+    /// The setting and the fonts as the next program finds them, taken
+    /// from the machine as a program ends. The files read are kept, and
+    /// a font drawn from Liberation for want of a file is looked for
+    /// again: a setup may have copied Windows' file to C:\WINDOWS\FONTS
+    /// since.
+    pub fn for_next_program(&mut self) -> Self {
+        let mut next = std::mem::take(self);
+        if next.setting != Win32Fonts::Liberation {
+            for font in &mut next.fonts {
+                if font.as_ref().is_some_and(|o| o.id == 0) {
+                    *font = None;
+                }
+            }
+        }
+        next
+    }
 }
 
 thread_local! {
@@ -191,10 +212,11 @@ fn find(cpu: &mut Cpu, style: usize) -> Option<Rc<Outline>> {
 fn from_drive(cpu: &mut Cpu, style: usize) -> Option<Rc<Outline>> {
     use crate::win32::kernel32::path::WINDOWS;
     let path = format!("{WINDOWS}\\FONTS\\{}", WINDOWS_NAMES[style].to_uppercase());
-    let bytes = cpu.bus.disk.file_data(&path)?.read().ok()?.into_owned();
-    if bytes.len() as u64 > MOST_BYTES {
+    let data = cpu.bus.disk.file_data(&path)?;
+    if data.size().ok()? > MOST_BYTES {
         return None;
     }
+    let bytes = data.read().ok()?.into_owned();
     outline(style, bytes, path)
 }
 
@@ -269,7 +291,6 @@ fn outline(style: usize, bytes: Vec<u8>, from: String) -> Option<Rc<Outline>> {
     Some(Rc::new(Outline { ttf, id, from }))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::super::ttf::{Metrics, SizeKey, sample};
@@ -277,10 +298,8 @@ mod tests {
 
     /// A folder of the host for a test, made anew with `files`.
     fn folder(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rust-dos-outlines-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rust-dos-outlines-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (file, bytes) in files {
@@ -344,8 +363,12 @@ mod tests {
         for style in 1..12 {
             assert_eq!(of(&mut cpu, style).unwrap().id, 0, "{style}");
         }
-        // The setting and the fonts read outlast the programs.
+        // The setting and the fonts read outlast the programs. Those drawn
+        // from Liberation are looked for again, as a setup may have copied
+        // their files since.
         cpu.bus.win32.reset();
+        let kept = &cpu.bus.win32.outlines.fonts;
+        assert!(kept[0].is_some() && kept[1..].iter().all(Option::is_none));
         assert_eq!(of(&mut cpu, 0).unwrap().id, drawn.id);
         cpu.bus.win32.outlines.set(&Win32Fonts::Liberation);
         assert_eq!(of(&mut cpu, 0).unwrap().id, 0);
@@ -371,7 +394,9 @@ mod tests {
             average: s.average,
             max: s.max,
         };
-        let mut files: Vec<Vec<u8>> = (0..64).map(|i| whole[..whole.len() * i / 64].to_vec()).collect();
+        let mut files: Vec<Vec<u8>> = (0..64)
+            .map(|i| whole[..whole.len() * i / 64].to_vec())
+            .collect();
         for i in 0..64 {
             let mut b = whole.to_vec();
             let at = b.len() * i / 64;
