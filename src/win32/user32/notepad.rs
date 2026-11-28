@@ -83,6 +83,14 @@ const S_EDIT_CLASS: u32 = 64;
 /// is NotepadMain and then the message loop, which ends the process
 /// with the exit code of WM_QUIT.
 pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
+    loop_program(bus, "NotepadMain")
+}
+
+/// The file of a built-in program for the GUI subsystem whose code calls
+/// USER32's function `main` and, if it returns nonzero, runs the message
+/// loop, which ends the process with the exit code of WM_QUIT. A 0 from
+/// `main` ends it with 0.
+pub(super) fn loop_program(bus: &crate::bus::Bus, main: &str) -> Vec<u8> {
     let mut b = Builder::exe(BASE);
     b.subsystem(pe::SUBSYSTEM_GUI);
     let kernel32 = [Imp::Name("ExitProcess")];
@@ -96,8 +104,8 @@ pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
     // The MSG the loop reads into.
     let data = pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE;
     let msg = BASE + b.section_sized(".data", &[], 28, data);
-    // Where NotepadMain is in the USER32 image the process will have.
-    let main = super::address_for_new(bus, "NotepadMain");
+    // Where `main` is in the USER32 image the process will have.
+    let main = super::address_for_new(bus, main);
     let mut code = Vec::new();
     let mut op = |bytes: &[u8], value: Option<u32>| {
         code.extend_from_slice(bytes);
@@ -105,7 +113,7 @@ pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
             code.extend_from_slice(&v.to_le_bytes());
         }
     };
-    op(&[0xB8], Some(main)); // mov eax, NotepadMain
+    op(&[0xB8], Some(main)); // mov eax, main
     op(&[0xFF, 0xD0], None); // call eax
     op(&[0x85, 0xC0], None); // test eax, eax
     op(&[0x74, 45], None); // jz done
@@ -134,7 +142,7 @@ pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
 
 /// The file the command line `line` names after the program's name, its
 /// quotes taken off, or None if it names none.
-fn file_named(line: &str) -> Option<&str> {
+pub(super) fn file_named(line: &str) -> Option<&str> {
     let line = line.trim_start();
     let rest = match line.strip_prefix('"') {
         Some(quoted) => quoted.split_once('"').map_or("", |(_, rest)| rest),

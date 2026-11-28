@@ -370,24 +370,29 @@ impl Tmu {
                 (reg[self.base + r] & TEXADDR_MASK) << TEXADDR_SHIFT
             }
         };
-        let mut base = address(TEX_BASE_ADDR);
-        self.lodoffset[0] = base & self.mask;
-        // A Voodoo2 with tLOD bit 24 has levels 1 and 2 and from 3 on at
-        // addresses of their own; MAME leaves it off where bits 31:28 are
-        // set, which games leave so without meaning it. Otherwise the
-        // levels follow each other.
+        // Each level is at a base address plus the bytes of the levels
+        // before it that the texture has, as if they all followed level 0.
+        // A Voodoo2 with tLOD bit 24 takes the base of level 1, of level 2
+        // and of levels 3 to 8 from registers of their own, and adds the
+        // same offsets to them: Glide's grTexMultibaseAddress writes each
+        // range's start less the bytes of the levels before it
+        // (_grTexCalcBaseAddress), and 86Box adds them back. MAME leaves
+        // it off where bits 31:28 are set, which games leave so without
+        // meaning it.
         let multibase = self.v2 && lod & (1 << 24) != 0 && lod >> 28 == 0;
-        for level in 1..=8usize {
-            if multibase && level <= 3 {
-                base = address([TEX_BASE_ADDR_1, TEX_BASE_ADDR_2, TEX_BASE_ADDR_3_8][level - 1]);
-            } else if self.lodmask & (1 << (level - 1)) != 0 {
+        let bases = [TEX_BASE_ADDR, TEX_BASE_ADDR_1, TEX_BASE_ADDR_2, TEX_BASE_ADDR_3_8];
+        let mut offset = 0u32;
+        for level in 0..=8usize {
+            if level > 0 && self.lodmask & (1 << (level - 1)) != 0 {
                 let mut size = ((self.wmask >> (level - 1)) + 1) * ((self.hmask >> (level - 1)) + 1);
                 if level >= 4 {
                     size = size.max(4);
                 }
-                base = base.wrapping_add(size << bppscale);
+                offset = offset.wrapping_add(size << bppscale);
             }
-            self.lodoffset[level] = base & self.mask;
+            let range = if multibase { level.min(3) } else { 0 };
+            let base = address(bases[range]);
+            self.lodoffset[level] = base.wrapping_add(offset) & self.mask;
         }
 
         self.detailmax = (detail & 0xFF) as i32;
@@ -625,12 +630,52 @@ mod tests {
         assert_eq!(tmu.lodoffset[1], 0x800 + 256 * 256 * 2);
         tmu.v2 = true;
         tmu.recompute(&reg);
-        assert_eq!(tmu.lodoffset[..4], [0x800, 0x10000, 0x18000, 0x20000]);
+        // Each base plus the bytes of the levels before it, of 256x256,
+        // 128x128 and 64x64 texels.
+        let before = [0, 256 * 256 * 2, (256 * 256 + 128 * 128) * 2];
+        let level3 = 0x20000 + (256 * 256 + 128 * 128 + 64 * 64) * 2;
+        assert_eq!(
+            tmu.lodoffset[..4],
+            [0x800, 0x10000 + before[1], 0x18000 + before[2], level3]
+        );
         // Level 4 follows level 3, of 32x32 texels.
-        assert_eq!(tmu.lodoffset[4], 0x20000 + 32 * 32 * 2);
+        assert_eq!(tmu.lodoffset[4], level3 + 32 * 32 * 2);
         // Not with bits 31:28 set.
         reg[0x100 + T_LOD] |= 0xF000_0000;
         tmu.recompute(&reg);
         assert_eq!(tmu.lodoffset[1], 0x800 + 256 * 256 * 2);
+    }
+
+    #[test]
+    fn multibase_levels_split_between_two_units() {
+        // Leadfoot's menu textures on a Voodoo 3 (#2187): a 5-6-5 texture
+        // of levels 256 to 32, the even ones on TMU 0 and the odd ones on
+        // TMU 1, each range at an address of its own. Glide 2's
+        // grTexMultibaseAddress writes each range's start less the bytes
+        // of the unit's levels before it (_grTexCalcBaseAddress), and the
+        // card adds them back.
+        let unit = |odd: bool, ranges: [u32; 4]| {
+            let mut reg = regs();
+            let mut tmu = Tmu::new(16 << 20, 0x100);
+            (tmu.v2, tmu.byte_base) = (true, true);
+            reg[0x100 + TEXTURE_MODE] = 10 << 8;
+            reg[0x100 + T_LOD] = 1 << 24 | 1 << 19 | (odd as u32) << 18 | 12 << 6;
+            let bases = [TEX_BASE_ADDR, TEX_BASE_ADDR_1, TEX_BASE_ADDR_2, TEX_BASE_ADDR_3_8];
+            for (r, base) in bases.into_iter().zip(ranges) {
+                reg[0x100 + r] = base;
+            }
+            tmu.recompute(&reg);
+            tmu
+        };
+        // TMU 0: GR_TEXBASE_256 at 0x640000 and GR_TEXBASE_64 at
+        // 0x6A4000, past level 0 (256x256).
+        let even = unit(false, [0x64_0000, 0, 0x6A_4000 - 256 * 256 * 2, 0]);
+        assert_eq!(even.lodmask, 0x155);
+        assert_eq!([even.lodoffset[0], even.lodoffset[2]], [0x64_0000, 0x6A_4000]);
+        // TMU 1: GR_TEXBASE_128 at 0x678000 and GR_TEXBASE_32_TO_1 at
+        // 0x680800, past level 1 (128x128).
+        let odd = unit(true, [0, 0x67_8000, 0, 0x68_0800 - 128 * 128 * 2]);
+        assert_eq!(odd.lodmask, 0x0AA);
+        assert_eq!([odd.lodoffset[1], odd.lodoffset[3]], [0x67_8000, 0x68_0800]);
     }
 }

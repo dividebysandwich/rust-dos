@@ -45,6 +45,31 @@ const DLLS: &[&str] = &[
     "ADVAPI32.DLL",
 ];
 
+/// Map the built-in DLL `dll` in the Win16 process if it isn't there:
+/// one a system module goes on to that `DLLS` doesn't map from the
+/// start, as AVIFILE.DLL goes on to AVIFIL32.DLL (vfw.rs). Its index in
+/// `stubs::DLLS` once it is there, or None for one that isn't a built-in
+/// DLL or couldn't be mapped.
+pub fn map_dll(cpu: &mut Cpu, dll: &str) -> Option<usize> {
+    let index = crate::win32::stubs::find_dll(dll)?;
+    let base = crate::win32::stubs::DLLS[index].base;
+    let pid = cpu.bus.win32.win16.pid;
+    let processes = &cpu.bus.win32.processes;
+    if let Some(p) = processes.iter().find(|p| p.id == pid)
+        && p.modules.iter().any(|m| m.base == base)
+    {
+        return Some(index);
+    }
+    super::with_win16(cpu, pid, |p, bus| {
+        let mut memory = std::mem::take(&mut p.memory);
+        let mapped = crate::win32::loader::map_builtin(bus, &mut memory, p, index);
+        p.memory = memory;
+        mapped
+    })
+    .flatten()
+    .map(|_| index)
+}
+
 /// The image of the Win16 process's program: one byte of code, which
 /// never runs, as its main thread is the first task's.
 fn process_image() -> Vec<u8> {

@@ -223,11 +223,70 @@ pub(crate) enum Command {
     /// Write a disk image's changes into the image: the delta file beside
     /// it (IMAGE.rdelta), or the one --delta names, which is deleted after
     Commit(CommitArgs),
+    /// Report to almanac.rust-dos.com how a game plays with the settings
+    /// rust-dos starts with: the configuration file's (or --config's),
+    /// the machine options given before `report`, and the profile --game
+    /// names. The program's file tells the almanac which game and version
+    /// it is
+    Report(ReportArgs),
     /// Hold the machine-wide run lock around a command, or list who holds
     /// it: `lock shared|exclusive -- CMD`, `lock status`, as rust-dos-lock
     /// does (`lock --help`)
     #[command(disable_help_flag = true)]
     Lock(LockArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct ReportArgs {
+    /// The game's program on the host: the file its players start, whose
+    /// name, size and checksums the almanac knows it by
+    pub(crate) program: std::path::PathBuf,
+
+    /// How it plays: green (runs great), yellow (playable, some problems)
+    /// or red (not playable)
+    #[arg(long, default_value = "green", value_parser = parse_rating)]
+    pub(crate) rating: rust_dos::almanac::Rating,
+
+    /// The game's name, which finds it in the almanac when its file isn't
+    /// known there, and names a new game [default: --game's profile's]
+    #[arg(long)]
+    pub(crate) name: Option<String>,
+
+    /// The year the game came out, for a game the almanac hasn't one of
+    /// [default: --game's profile's]
+    #[arg(long, value_parser = clap::value_parser!(i32).range(1970..=2100))]
+    pub(crate) year: Option<i32>,
+
+    /// Its publisher, for a game the almanac hasn't one of [default:
+    /// --game's profile's]
+    #[arg(long)]
+    pub(crate) publisher: Option<String>,
+
+    /// What players should know: what the game needs, a problem left
+    /// [default: --game's profile's]
+    #[arg(long)]
+    pub(crate) notes: Option<String>,
+
+    /// The report's key, a UUID: a later report with the same key on the
+    /// same game replaces this one. [default: --game's profile's, which
+    /// gets one if it has none; else a new one, printed]
+    #[arg(long, value_name = "UUID")]
+    pub(crate) key: Option<String>,
+
+    /// Print the game the report would go to and its settings, and send
+    /// nothing
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+}
+
+/// `report --rating`'s value.
+fn parse_rating(value: &str) -> Result<rust_dos::almanac::Rating, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "green" => Ok(rust_dos::almanac::Rating::Green),
+        "yellow" => Ok(rust_dos::almanac::Rating::Yellow),
+        "red" => Ok(rust_dos::almanac::Rating::Red),
+        _ => Err("green, yellow or red".to_string()),
+    }
 }
 
 #[derive(clap::Args, Debug)]

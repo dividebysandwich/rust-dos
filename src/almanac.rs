@@ -14,6 +14,9 @@
 //! profile says of the game (`About`): its year, publisher and the
 //! player's notes, and its UUID, with which the almanac replaces the
 //! report the profile sent before instead of adding another.
+//!
+//! `rust-dos report` (main_report.rs) sends a report from the command
+//! line: the settings rust-dos would start with, for a program's file.
 
 use crate::config::{self, Settings};
 use crate::cpu::Cpu;
@@ -27,6 +30,11 @@ pub const SITE: &str = "almanac.rust-dos.com";
 pub const API: &str = "https://almanac.rust-dos.com/api/v1";
 /// The variable that names another almanac's API, one's own or a test's.
 pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
+/// The variable that holds an almanac staff member's token (from the
+/// API's `POST /auth/login`), sent with every request. The almanac
+/// limits how many games, versions and reports an address may add
+/// without one; a moderator seeding it with many reports sends one.
+pub const TOKEN_VARIABLE: &str = "RUST_DOS_ALMANAC_TOKEN";
 
 /// The settings the almanac knows, by section and key: those of the
 /// machine a game runs on, the frame rate cap, which some games need
@@ -197,15 +205,18 @@ impl About {
 }
 
 /// A report the almanac took: its number, whether it replaced the one
-/// the profile sent before, and whether the game it was to add as a new
-/// one was in the almanac already, so it went to that game.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+/// the profile sent before, whether the game it was to add as a new one
+/// was in the almanac already, so it went to that game, and the slug of
+/// the game it went to.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Reported {
     pub id: i64,
     #[serde(default)]
     pub replaced: bool,
     #[serde(skip)]
     pub existing: bool,
+    #[serde(skip)]
+    pub slug: String,
 }
 
 /// The program at the DOS path `path`, read from the machine's drives.
@@ -450,6 +461,40 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
     usable().find(blessed).or_else(|| usable().next())
 }
 
+/// Where a report from the command line goes (`rust-dos report`), given
+/// the candidates for the program's file and the game's `name`: the
+/// game and version its file matched by checksum (the one with that
+/// name where the file is in several, as a mission pack's is in its
+/// game's), else the game with that name (the report adds the file as a
+/// version of it), else a new game of that name. None if the file
+/// matched nothing and there is no name to add a game by.
+pub fn subject_for(candidates: &[Candidate], name: Option<&str>) -> Option<Subject> {
+    let words = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let named = |c: &&Candidate| name.is_some_and(|n| words(&c.name) == words(n));
+    let matched = || candidates.iter().filter(|c| c.hash_match);
+    if let Some(c) = matched().find(named).or_else(|| matched().next()) {
+        return Some(Subject::Game {
+            slug: c.slug.clone(),
+            version: c.version.as_ref().map(|(id, _)| *id),
+        });
+    }
+    let name = name.map(str::trim).filter(|n| !n.is_empty())?;
+    Some(
+        match candidates.iter().find(|c| words(&c.name) == words(name)) {
+            Some(c) => Subject::Game {
+                slug: c.slug.clone(),
+                version: None,
+            },
+            None => Subject::New(name.to_string()),
+        },
+    )
+}
+
 /// The settings a report sends: `settings`' values of `KEYS`, by section.
 /// The memory is `memory_mb`, the size the machine runs with, also where
 /// `memsize` isn't set: the default for its CPU and display adapter is
@@ -647,6 +692,17 @@ pub fn candidates(
     }
 }
 
+/// `client::matches`, where this rust-dos asks the almanac.
+pub fn matches(files: &[FileInfo], name: &str, with_names: bool) -> Result<Vec<Candidate>, String> {
+    #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
+    return client::matches(files, name, with_names);
+    #[cfg(not(all(feature = "sdl", not(target_arch = "wasm32"))))]
+    {
+        let _ = (files, name, with_names);
+        Err(format!("This Rust-DOS doesn't ask {}", SITE))
+    }
+}
+
 /// `client::report`, where this rust-dos asks the almanac.
 pub fn report(
     subject: &Subject,
@@ -742,8 +798,22 @@ pub mod client {
             .unwrap_or_else(|| API.to_string())
     }
 
+    /// `Authorization`'s value for the token `TOKEN_VARIABLE` holds, if
+    /// it holds one.
+    fn authorization() -> Option<String> {
+        std::env::var(TOKEN_VARIABLE)
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("Bearer {}", t))
+    }
+
     fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
-        answer(agent().get(&format!("{}{}", api(), path)).call())
+        let request = agent().get(&format!("{}{}", api(), path));
+        answer(match authorization() {
+            Some(value) => request.header("Authorization", &value).call(),
+            None => request.call(),
+        })
     }
 
     fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, String> {
@@ -753,12 +823,13 @@ pub mod client {
     /// `post`, with why the almanac said no.
     fn post_reply<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, Problem> {
         let body = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        reply(
-            agent()
-                .post(&format!("{}{}", api(), path))
-                .header("Content-Type", "application/json")
-                .send(body),
-        )
+        let request = agent()
+            .post(&format!("{}{}", api(), path))
+            .header("Content-Type", "application/json");
+        reply(match authorization() {
+            Some(value) => request.header("Authorization", &value).send(body),
+            None => request.send(body),
+        })
     }
 
     /// `text` for a URL's query.
@@ -797,6 +868,23 @@ pub mod client {
     /// matched first, then those named like `name`, each with its
     /// settings. Without `with_names`, only the matches.
     pub fn candidates(
+        files: &[FileInfo],
+        name: &str,
+        with_names: bool,
+    ) -> Result<Vec<Candidate>, String> {
+        let mut out = matches(files, name, with_names)?;
+        for c in &mut out {
+            c.recommendation = recommendation(&c.slug, c.version.as_ref().map(|(id, _)| *id)).ok();
+            if let Some(r) = &c.recommendation {
+                c.ratings = r.rating.clone();
+            }
+        }
+        Ok(out)
+    }
+
+    /// `candidates` without their settings, which a report doesn't need:
+    /// one request for each game less.
+    pub fn matches(
         files: &[FileInfo],
         name: &str,
         with_names: bool,
@@ -841,12 +929,6 @@ pub mod client {
             }
         }
         out.truncate(25);
-        for c in &mut out {
-            c.recommendation = recommendation(&c.slug, c.version.as_ref().map(|(id, _)| *id)).ok();
-            if let Some(r) = &c.recommendation {
-                c.ratings = r.rating.clone();
-            }
-        }
         Ok(out)
     }
 
@@ -982,6 +1064,7 @@ pub mod client {
         let reported: Reported = post("/reports", &body)?;
         Ok(Reported {
             existing,
+            slug,
             ..reported
         })
     }
@@ -1071,6 +1154,58 @@ mod tests {
             "\u{201C}Voodoo 3: crashes in the menu\u{201D} (red, 1.8.3) \
              \u{201C}Needs the CD in D: Fine on Voodoo 2\u{201D} (green)"
         );
+    }
+
+    fn candidate(slug: &str, name: &str, version: Option<i64>, hash_match: bool) -> Candidate {
+        Candidate {
+            slug: slug.to_string(),
+            name: name.to_string(),
+            version: version.map(|id| (id, "LOLG.EXE".to_string())),
+            hash_match,
+            ratings: Ratings::default(),
+            recommendation: None,
+        }
+    }
+
+    #[test]
+    fn a_command_line_report_goes_to_the_game_its_file_matched() {
+        let candidates = [
+            candidate("lands-of-lore", "Lands of Lore", None, false),
+            candidate("lands-of-lore-2", "Lands of Lore 2", Some(7), true),
+        ];
+        let game = |slug: &str, version| Subject::Game {
+            slug: slug.to_string(),
+            version,
+        };
+        // The checksum wins over the name typed.
+        assert_eq!(
+            subject_for(&candidates, Some("Lands of Lore")),
+            Some(game("lands-of-lore-2", Some(7)))
+        );
+        // Without a match, the game of that name, in any case and
+        // punctuation, gets the file as a version of its own.
+        let named = &candidates[..1];
+        assert_eq!(
+            subject_for(named, Some("lands of LORE!")),
+            Some(game("lands-of-lore", None))
+        );
+        // Of two games the file matched, the one named.
+        let both = [
+            candidate("quake", "Quake", Some(3), true),
+            candidate("scourge", "Scourge of Armagon", Some(9), true),
+        ];
+        assert_eq!(
+            subject_for(&both, Some("Scourge of Armagon")),
+            Some(game("scourge", Some(9)))
+        );
+        assert_eq!(subject_for(&both, None), Some(game("quake", Some(3))));
+        // A name the almanac hasn't is a new game; no name, no report.
+        assert_eq!(
+            subject_for(named, Some(" Dune ")),
+            Some(Subject::New("Dune".to_string()))
+        );
+        assert_eq!(subject_for(named, None), None);
+        assert_eq!(subject_for(&[], Some("  ")), None);
     }
 
     #[test]

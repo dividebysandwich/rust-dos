@@ -421,7 +421,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "win32_depth" => match DesktopDepth::parse(value) {
                             Some(depth) => config.win32_depth = Some(depth),
                             None => warn(format!(
-                                "invalid win32_depth '{}' (auto, 8 or 16)",
+                                "invalid win32_depth '{}' (auto, 8, 16, 24 or 32)",
                                 value
                             )),
                         },

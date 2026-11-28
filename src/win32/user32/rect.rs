@@ -183,8 +183,15 @@ pub fn inflate_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// PtInRect(rect, x, y): the point is passed by value.
+/// PtInRect(rect, x, y): the point is passed by value. It reads only its
+/// arguments and the rectangle, so an idle proof goes through it, as
+/// through GetWindowRect (#1284).
 pub fn pt_in_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
+    if args[0] != 0 {
+        crate::idle::reads_also(cpu, args[0], 16);
+    }
     let Some(r) = read(cpu, args[0]) else {
         return Some(FALSE);
     };

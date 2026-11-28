@@ -412,6 +412,13 @@ static APIS: &[Api16] = &[
         "CreateScalableFontResourceA",
         b'b',
     ),
+    // 0 for every font, as GDI32's GetOutlineTextMetricsA gives, since
+    // neither builds an OUTLINETEXTMETRIC yet. Windows answers 0 for a
+    // raster font, such as a new DC's System, and fills the structure
+    // for a TrueType one; Arial, Times New Roman, Courier New and added
+    // .TTF fonts are TrueType here (GetTextMetrics says so) and get 0
+    // too. Authorware's runtime calls it for every font it sets up.
+    rust("GetOutlineTextMetrics", 308, "wwp", zero),
 ];
 
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {

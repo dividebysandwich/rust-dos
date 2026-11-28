@@ -2943,8 +2943,14 @@ pub fn set_window_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-/// GetWindowRect(hwnd, rect): its rectangle on the screen.
+/// GetWindowRect(hwnd, rect): its rectangle on the screen. It reads the
+/// window, which only a call or a message moves, and writes the rectangle
+/// (noted as it writes it), so an idle proof goes through it: Warhammer:
+/// Shadow of the Horned Rat asks it in every pass of the loop it waits in
+/// on its screens (#1284).
 pub fn get_window_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     if get(cpu, args[0]).is_none() {
         return Some(FALSE);
     }

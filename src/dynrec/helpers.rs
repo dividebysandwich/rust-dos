@@ -206,7 +206,7 @@ pub struct JitCtx {
     /// For a write into a page with `PAGE_COUNT`: a ToadForce's counts
     /// of the writes to each page, the generation and the first page's
     /// (null without its host renderer), and the surfaces ahead on the
-    /// host whose written bytes the code notes (`PAGE_NOTE`).
+    /// host whose written bytes the code notes (`PAGE_NOTE_SHIFT`).
     pub card_generation: *mut u64,
     pub card_counts: *mut u64,
     pub card_notes: [NoteSlot; NOTES],
@@ -226,6 +226,10 @@ pub struct JitCtx {
 
 /// What `card_state` found: a Banshee's or Voodoo3's memory
 /// (`Bus::banshee_direct`) or the VESA frame buffer (`Bus::lfb_direct`).
+/// There is one, in the `JitCtx`, which `card_state` compares with what
+/// it finds each time: boxing the frame buffer's, which names up to
+/// `lfb::AHEAD` surfaces, would allocate on each call instead.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CardKey {
     Banshee(u32, Direct),
@@ -354,29 +358,35 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
             // bus's.
             counted_pages(&mut ctx.card_map, direct.counted, PAGE_SHOWN);
             ctx.card_notes = [NO_SLOT; NOTES];
-            for (i, note) in direct.notes[..direct.ahead].iter().enumerate() {
-                ctx.card_notes[i] = NoteSlot {
-                    start: note.start,
-                    len: note.end.saturating_sub(note.start),
-                    bits: note.bits,
-                    any: note.any,
-                    _pad: 0,
-                };
-                let Some((first, last)) = page_span(note.start, note.end, ctx.card_map.len()) else {
+            // The surfaces with a slot, and the others without.
+            let noted = direct.ahead.min(NOTES);
+            let slotted = direct.notes[..noted].iter().map(|n| (n.start, n.end, Some(n)));
+            let rest = direct.rest[..direct.ahead - noted].iter().map(|&(s, e)| (s, e, None));
+            for (i, (start, end, note)) in slotted.chain(rest).enumerate() {
+                if let Some(note) = note {
+                    ctx.card_notes[i] = NoteSlot {
+                        start,
+                        len: end.saturating_sub(start),
+                        bits: note.bits,
+                        any: note.any,
+                        _pad: 0,
+                    };
+                }
+                let Some((first, last)) = page_span(start, end, ctx.card_map.len()) else {
                     continue;
                 };
                 for page in &mut ctx.card_map[first..=last] {
                     // The bus answers reads with the host's pixels. A
-                    // write is noted where one surface has the page and
-                    // its bits are there.
+                    // write is noted where one surface with a slot has
+                    // the page and its bits are there.
                     *page &= !PAGE_READ;
-                    if note.bits.is_null() {
+                    match note {
+                        // Without a slot, the bus notes its bytes.
+                        None => *page &= !PAGE_WRITE,
                         // The bus's first write there makes them.
-                        *page = *page & !PAGE_WRITE | PAGE_RETRY;
-                    } else if *page >> PAGE_NOTE_SHIFT & 7 != 0 {
-                        *page &= !PAGE_WRITE;
-                    } else {
-                        *page |= (i as u8 + 1) << PAGE_NOTE_SHIFT;
+                        Some(n) if n.bits.is_null() => *page = *page & !PAGE_WRITE | PAGE_RETRY,
+                        Some(_) if *page >> PAGE_NOTE_SHIFT & 7 != 0 => *page &= !PAGE_WRITE,
+                        Some(_) => *page |= (i as u8 + 1) << PAGE_NOTE_SHIFT,
                     }
                 }
             }
@@ -1485,11 +1495,19 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.dev += 1;
+        let p = phys as usize;
+        // Dwords into a Voodoo Graphics' or Voodoo2's window, which
+        // Glide's triangle setup writes tens of thousands of a frame: they
+        // change neither the VGA's planes nor what the code may do with a
+        // frame buffer, and aren't in RAM. (A panic in it is the store's,
+        // which isn't made again below.)
+        if size == 4 && guard(ctx, true, || cpu.bus.dword_to_voodoo(p, value)) {
+            return 0;
+        }
         // Pixels into the linear frame buffer, which DirectDraw's own copy
         // loops write a dword at a time: nothing the VGA's state has, and
-        // nothing in RAM. (A panic in it is the store's, which isn't made
-        // again below.)
-        if guard(ctx, true, || cpu.bus.write_lfb(phys as usize, value, size as usize)) {
+        // nothing in RAM. (A panic in it is the store's, as above.)
+        if guard(ctx, true, || cpu.bus.write_lfb(p, value, size as usize)) {
             // A ToadForce ran its queued commands, or noted the first
             // bytes written into a surface its host drew into: what the
             // code may do with the frame buffer changed.
@@ -1501,22 +1519,21 @@ jit_fn! {
         // Pixels into the VGA's planes, which mode X programs write one or
         // two at a time. (They can't be in the block's bytes, which are in
         // RAM.)
-        if cpu.bus.write_planes_plainly(phys as usize, value, size as usize) {
+        if cpu.bus.write_planes_plainly(p, value, size as usize) {
             return 0;
         }
         // Pixels into a Banshee's or Voodoo3's memory, which the same
         // loops and a software renderer's write a byte, word or dword at
         // a time: without what a write to its registers would need. (A
         // panic in it is the store's, as above.)
-        let p = phys as usize;
         if guard(ctx, true, || cpu.bus.write_banshee_linear(p, value, size as usize)) {
             // The card may let the code write the page itself now.
             card_granted(cpu, ctx, phys);
             return 0;
         }
-        // Dwords into a 3dfx card's frame buffer through its 3D engine,
-        // or into a Voodoo Graphics' or Voodoo2's window: what they queue
-        // changes what the code may do with a Banshee's memory.
+        // Dwords into a Banshee's or Voodoo3's memory that the way above
+        // doesn't take, its 3D engine's frame buffer among them: what they
+        // queue changes what the code may do with the memory.
         if size == 4 && guard(ctx, true, || cpu.bus.write_to_voodoo(p, &value.to_le_bytes())) {
             card_state(cpu, ctx);
             return 0;
@@ -1586,6 +1603,32 @@ mod tests {
         INITIAL_BAR1, LFB_MEMORY_CONFIG, VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE,
         VID_DESKTOP_START_ADDR, VID_PROC_CFG,
     };
+
+    #[test]
+    fn the_codes_dwords_reach_a_voodoo_graphics_registers_as_the_bus_writes_them() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let mut ctx = JitCtx::new(0);
+        cpu.bus.configure_voodoo(Some(crate::voodoo::Board::Max));
+        let base = cpu.bus.voodoo.as_ref().unwrap().base().unwrap();
+        let (cpu_ptr, ctx_ptr) = (&mut *cpu as *mut Cpu, &mut ctx as *mut JitCtx);
+        // fbzMode (110h), which reads back the bits the chip has.
+        assert_eq!(
+            jit_dev_write(cpu_ptr, ctx_ptr, base + 0x110, 0xFFFF_0310, 4),
+            0
+        );
+        assert_eq!(cpu.bus.read_32(base as usize + 0x110), 0x001F_0310);
+        // A misaligned dword, as the bus splits it: the high half of
+        // fbzMode and the low half of the register after it (lfbMode).
+        jit_dev_write(cpu_ptr, ctx_ptr, base + 0x112, 0x0005_0007, 4);
+        assert_eq!(cpu.bus.read_32(base as usize + 0x110) >> 16, 0x0007);
+        // The bus's own way takes a dword outside the window, and every
+        // dword of a Voodoo3, whose memory has ways of its own.
+        assert!(cpu.bus.dword_to_voodoo(base as usize + 0x112, 0x0005_0007));
+        assert!(!cpu.bus.dword_to_voodoo(base as usize - 4, 0));
+        cpu.bus.configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+        assert!(cpu.bus.voodoo_at(INITIAL_BAR1 as usize).is_some());
+        assert!(!cpu.bus.dword_to_voodoo(INITIAL_BAR1 as usize, 0));
+    }
 
     #[test]
     fn the_code_writes_a_voodoo3s_memory_and_counts_the_desktop_shown() {

@@ -1186,6 +1186,66 @@ fn a_loop_that_polls_a_key_and_the_cursor_is_skipped() {
     assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
 }
 
+#[test]
+fn a_loop_that_asks_where_the_cursor_is_on_a_window_is_skipped() {
+    // Shadow of the Horned Rat waits on its screens in a loop that reads
+    // the buttons' setting with SwapMouseButton(FALSE) twice, then asks
+    // GetCursorPos, GetWindowRect and PtInRect whether the cursor is on a
+    // window, and GetAsyncKeyState(VK_RETURN) (#1284): here all of them
+    // and timeGetTime, for 300 ms. None changes anything but the POINT
+    // and the RECT written, so the passes are skipped.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("USER", 286) // GetDesktopWindow
+        .emit(&[0xA3, 0x30, 0x00]) // mov [30h],ax
+        .call("MMSYSTEM", 607)
+        .emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.push(0) // FALSE
+        .call("USER", 186) // SwapMouseButton
+        .push(0)
+        .call("USER", 186)
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the POINT at DS:10h
+        .call("USER", 17) // GetCursorPos
+        .emit(&[0xFF, 0x36, 0x30, 0x00]) // push word [30h]
+        .emit(&[0x1E]) // push ds
+        .push(0x20) // the RECT at DS:20h
+        .call("USER", 32) // GetWindowRect
+        .emit(&[0x1E]) // push ds
+        .push(0x20)
+        .emit(&[0xFF, 0x36, 0x12, 0x00]) // push word [12h], y
+        .emit(&[0xFF, 0x36, 0x10, 0x00]) // push word [10h], x
+        .call("USER", 76) // PtInRect
+        .push(0x0D) // VK_RETURN
+        .call("USER", 249) // GetAsyncKeyState
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_cursor_on_window";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
 /// A loop of GetAsyncKeyState(VK_ESCAPE) and GetCursorPos that ends
 /// when the key is down or was pressed (exit code 1), when the cursor
 /// left where it was at the start (2), or after 3 s (3). `input` acts on

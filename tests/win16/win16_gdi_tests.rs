@@ -16,6 +16,7 @@ const SELECT_PALETTE: u16 = 282;
 
 /// GDI's ordinals.
 const CREATE_COMPATIBLE_DC: u16 = 52;
+const GET_OUTLINE_TEXT_METRICS: u16 = 308;
 const CREATE_SCALABLE_FONT_RESOURCE: u16 = 310;
 const CREATE_PALETTE: u16 = 360;
 const GDI_SELECT_PALETTE: u16 = 361;
@@ -409,4 +410,34 @@ fn create_scalable_font_resource_takes_an_empty_path_as_none() {
     // The documentation asks for a NULL path or an empty one when the
     // file is named with its full path.
     scalable_truetype("create_scalable_empty_path", b"C:\\SUB\\F.TTF", b"");
+}
+
+#[test]
+fn get_outline_text_metrics_answers_0_for_the_system_font() {
+    // GDI.308, which Authorware's runtime (Civilization II's
+    // Civilopedia) calls for each font it sets up. A new memory DC has
+    // the System font, a raster font, which Windows answers 0 for, for
+    // the size (no buffer) and for a buffer, which it leaves alone.
+    // Exit code 1 when the DC is made, both answer 0 and the buffer's
+    // first word is as it was.
+    let mut code = Code::new();
+    code.push(0)
+        .call("GDI", CREATE_COMPATIBLE_DC)
+        .emit(&[0x8B, 0xF8]) // mov di,ax
+        .emit(&[0x0B, 0xC0, 0x75, 0x06]) // or ax,ax; jnz over the exit
+        .emit(&[0xB0, 0x05])
+        .exit_al();
+    code.emit(&[0x57]).push(0).push(0).push(0); // di, 0, NULL
+    code.call("GDI", GET_OUTLINE_TEXT_METRICS);
+    expect_ax(&mut code, 0, 2);
+    // A buffer in the static data, at 40h: mov word [40h],0BEEFh
+    code.emit(&[0xC7, 0x06, 0x40, 0x00, 0xEF, 0xBE]);
+    code.emit(&[0x57]).push(0x80).emit(&[0x1E]).push(0x40);
+    code.call("GDI", GET_OUTLINE_TEXT_METRICS);
+    expect_ax(&mut code, 0, 3);
+    code.emit(&[0x81, 0x3E, 0x40, 0x00, 0xEF, 0xBE]) // cmp word [40h],0BEEFh
+        .emit(&[0x74, 0x06, 0xB0, 0x04, 0xB4, 0x4C, 0xCD, 0x21]);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("get_outline_text_metrics", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
 }

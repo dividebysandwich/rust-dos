@@ -425,11 +425,25 @@ impl Path {
         }
         let (left, top) = (x0.floor(), y0.floor());
         let full = (x1.ceil() - left) as i32;
-        let width = full.clamp(1, MOST_WIDTH) as usize;
+        // The rasterizer keeps its rows in one buffer and sums coverage
+        // across it, so a part of a line right of its last column lands
+        // in the next row and fills that row where the glyph has a gap.
+        // It is as wide as the whole glyph, and the bitmap keeps the
+        // first `MOST_WIDTH` columns of it.
+        let width = full.clamp(1, 4 * MOST_PPEM) as usize;
         let depth = ((y1.ceil() - top) as i32).clamp(1, 4 * height.max(1)) as usize;
-        let at =
-            |(x, y): (f32, f32)| -> Point { point(x * stretch - left, ascent as f32 - y - top) };
-        let mut r = Rasterizer::new(width, depth);
+        // The rasterizer drops the part of a line in its first row that
+        // starts left of its first column, and puts it in the row above's
+        // last column in the other rows. A point on the glyph's left edge
+        // can land there by rounding: the coverage it would have taken
+        // off then carries on through every pixel after it, which turned
+        // Comic Sans MS Bold's "Y" at 13 pixels to the em inside out in
+        // Sorry!'s questions (#2262). A column to the left of the glyph's
+        // keeps such a part in the rasterizer, in its own row.
+        let at = |(x, y): (f32, f32)| -> Point {
+            point(x * stretch - left + 1.0, ascent as f32 - y - top)
+        };
+        let mut r = Rasterizer::new(width + 1, depth);
         for s in &self.segments {
             match s {
                 Segment::Line([a, b]) => r.draw_line(at(*a), at(*b)),
@@ -441,6 +455,8 @@ impl Path {
         r.for_each_pixel_2d(|x, y, coverage| {
             let row = top + y as i32;
             if coverage >= 0.5
+                && let Some(x) = x.checked_sub(1)
+                && x < MOST_WIDTH as u32
                 && let Some(bits) = usize::try_from(row).ok().and_then(|i| rows.get_mut(i))
             {
                 *bits |= 1 << x;
@@ -679,5 +695,108 @@ pub(super) mod tests {
     fn bytes_that_arent_ttf_give_no_fonts() {
         assert!(Ttf::fonts_of_file(b"not a font at all").is_empty());
         assert!(Ttf::fonts_of_file(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_line_on_the_left_edge_of_the_first_row_is_kept() {
+        // Comic Sans MS Bold's "Y" at 13 pixels to the em as its hinting
+        // leaves it. The curve on its left edge from (0, 9.16) to
+        // (0.34, 9.77) lies in the glyph's first row, and the rasterizer
+        // worked a part of it out a hair left of 0, dropped it, and drew
+        // the arms inside out (#2262). FreeType draws this outline as the
+        // rows below.
+        let q = [
+            (7.640625, 8.203125),
+            (7.328125, 7.53125),
+            (6.375, 5.34375),
+            (5.59375, 3.5),
+            (5.03125, 2.46875),
+            (4.0625, 0.65625),
+            (4.0, 0.546875),
+            (3.578125, 0.0),
+            (3.03125, 0.0),
+            (2.625, 0.0),
+            (2.328125, 0.21875),
+            (2.0, 0.484375),
+            (2.0, 0.84375),
+            (2.0, 1.15625),
+            (3.28125, 3.4375),
+            (2.828125, 4.140625),
+            (1.984375, 5.5625),
+            (1.34375, 6.59375),
+            (0.125, 8.703125),
+            (0.0, 8.921875),
+            (0.0, 9.15625),
+            (0.0, 9.515625),
+            (0.34375, 9.765625),
+            (0.65625, 10.0),
+            (1.09375, 10.0),
+            (1.59375, 10.0),
+            (2.0, 9.578125),
+        ];
+        let r = [
+            (2.359375, 8.828125),
+            (2.40625, 8.75),
+            (3.203125, 6.984375),
+            (3.71875, 5.859375),
+            (4.109375, 5.203125),
+            (4.578125, 6.171875),
+            (5.453125, 8.125),
+            (5.640625, 8.546875),
+            (6.0, 9.4375),
+            (6.28125, 10.0),
+            (6.953125, 10.0),
+            (7.359375, 10.0),
+            (7.65625, 9.78125),
+            (8.0, 9.53125),
+            (8.0, 9.15625),
+            (8.0, 8.9375),
+            (7.640625, 8.203125),
+        ];
+        let mut p = Path::default();
+        p.move_to(q[0].0, q[0].1);
+        for c in q[1..].chunks(2) {
+            p.quad_to(c[0].0, c[0].1, c[1].0, c[1].1);
+        }
+        p.line_to(r[0].0, r[0].1);
+        for c in r[1..].chunks(2) {
+            p.quad_to(c[0].0, c[0].1, c[1].0, c[1].1);
+        }
+        p.close();
+        let (rows, offset) = p.fill(1.0, 14, 18);
+        let drawn: Vec<String> = rows[4..14]
+            .iter()
+            .map(|r| {
+                (0..8)
+                    .map(|i| if r >> i & 1 != 0 { '#' } else { '.' })
+                    .collect()
+            })
+            .collect();
+        let freetype = [
+            "##....##", "###...##", ".##..##.", ".##..##.", "..####..", "...###..", "...###..",
+            "...##...", "..###...", "..##....",
+        ];
+        assert_eq!(offset, 0);
+        assert_eq!(drawn, freetype);
+        assert!(rows[..4].iter().chain(&rows[14..]).all(|&r| r == 0));
+    }
+
+    #[test]
+    fn a_glyph_wider_than_a_row_loses_only_its_right_part() {
+        // Two bars 10 pixels wide, 70 apart: the right one is past the
+        // bitmap's 64 columns, and its coverage stays out of the rows
+        // below instead of filling the gap after the left one.
+        let mut p = Path::default();
+        for x in [0.0, 70.0] {
+            p.move_to(x, 0.0);
+            p.line_to(x + 10.0, 0.0);
+            p.line_to(x + 10.0, 10.0);
+            p.line_to(x, 10.0);
+            p.close();
+        }
+        let (rows, offset) = p.fill(1.0, 12, 14);
+        assert_eq!(offset, 0);
+        assert!(rows[..2].iter().chain(&rows[12..]).all(|&r| r == 0));
+        assert!(rows[2..12].iter().all(|&r| r == 0x3FF), "{rows:x?}");
     }
 }

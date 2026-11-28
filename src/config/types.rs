@@ -274,23 +274,29 @@ impl WindowsVersion {
 
 /// The depth of the built-in Windows' desktop (`win32_depth`): the
 /// display adapter's own (32 bits a pixel, 24 on an S3 ViRGE, 16 on a
-/// Banshee or Voodoo3), 8 bits a pixel, 256 colours from a palette, or
-/// 16 bits a pixel, High Color.
+/// Banshee or Voodoo3), 8 bits a pixel, 256 colours from a palette, 16
+/// bits a pixel, High Color, or True Color of 24 (packed) or 32 bits a
+/// pixel. An adapter without the True Color depth asked for has its
+/// own (`win32::screen::desktop`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum DesktopDepth {
     #[default]
     Adapter,
     Palette,
     HighColor,
+    TrueColor24,
+    TrueColor32,
 }
 
 impl DesktopDepth {
-    /// "auto", "8" or "16".
+    /// "auto", "8", "16", "24" or "32".
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Adapter),
             "8" => Some(Self::Palette),
             "16" => Some(Self::HighColor),
+            "24" => Some(Self::TrueColor24),
+            "32" => Some(Self::TrueColor32),
             _ => None,
         }
     }
@@ -300,6 +306,8 @@ impl DesktopDepth {
             Self::Adapter => "auto",
             Self::Palette => "8",
             Self::HighColor => "16",
+            Self::TrueColor24 => "24",
+            Self::TrueColor32 => "32",
         }
     }
 }

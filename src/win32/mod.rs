@@ -58,7 +58,7 @@ mod ntdll;
 pub(crate) mod object;
 #[cfg(test)]
 mod ordinals;
-mod ole32;
+pub(crate) mod ole32;
 pub(crate) mod oleaut32;
 mod oledlg;
 mod olepro32;
@@ -89,7 +89,7 @@ pub mod user32;
 pub mod version;
 mod verdll;
 mod vmm;
-mod vfw;
+pub(crate) mod vfw;
 mod wing32;
 pub(crate) mod winmm;
 mod winspool;
@@ -979,6 +979,9 @@ fn start(cpu: &mut Cpu) {
     win32.cr4 = cr4;
     version::start(win32);
     nls::start(win32);
+    if first {
+        screen::log_depth_fallback(cpu);
+    }
     dll_files::sync(&mut cpu.bus);
     directories::session_starts(&mut cpu.bus.win32);
     boot::session_starts(cpu);

@@ -62,6 +62,8 @@ fn the_system_modules_are_files_in_the_system_directory() {
         ("USER.EXE", "C:\\WINDOWS\\SYSTEM\\USER.EXE"),
         ("GDI.EXE", "C:\\WINDOWS\\SYSTEM\\GDI.EXE"),
         ("COMMDLG.DLL", "C:\\WINDOWS\\SYSTEM\\COMMDLG.DLL"),
+        ("MSVIDEO.DLL", "C:\\WINDOWS\\SYSTEM\\MSVIDEO.DLL"),
+        ("AVIFILE.DLL", "C:\\WINDOWS\\SYSTEM\\AVIFILE.DLL"),
     ] {
         let test = format!("system_file_{}", name.replace('.', "_"));
         let (exit, log) = run(&test, open_file(name));

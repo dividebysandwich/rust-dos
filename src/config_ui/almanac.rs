@@ -181,6 +181,7 @@ impl ConfigUi {
                         id,
                         replaced,
                         existing: true,
+                        ..
                     }) => {
                         let done = if replaced { "updated" } else { "added" };
                         let text = format!(
