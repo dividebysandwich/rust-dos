@@ -1610,3 +1610,59 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
         assert_eq!(exit, 1, "{test}: {log}");
     }
 }
+
+#[test]
+fn a_full_64_kb_mmio_buffer_ends_at_the_next_tile() {
+    // A memory file with a 64 KB buffer MMIO_ALLOCBUF gives, opened as
+    // Civilization II opens its intro's sound. mmioGetInfo's
+    // pchEndWrite is just past the buffer: the selector stepped by
+    // __AHINCR (8) at offset 0, as a huge pointer is. mmioSetInfo takes
+    // it back, and the next mmioGetInfo gives the same.
+    const MMIO_OPEN: u16 = 1210;
+    const MMIO_CLOSE: u16 = 1211;
+    const MMIO_GET_INFO: u16 = 1215;
+    const MMIO_SET_INFO: u16 = 1216;
+    const INFO: u16 = 0x100;
+    const INFO2: u16 = 0x180;
+    let mut code = Code::new();
+    // push ds; pop es; mov di,INFO; mov cx,80h; xor ax,ax; cld; rep stosw
+    code.emit(&[0x1E, 0x07, 0xBF, lo(INFO), hi(INFO), 0xB9, 0x80, 0x00])
+        .emit(&[0x31, 0xC0, 0xFC, 0xF3, 0xAB]);
+    set(&mut code, INFO + 4, 0x454D); // fccIOProc "MEM "
+    set(&mut code, INFO + 6, 0x204D);
+    set(&mut code, INFO + 18, 1); // cchBuffer 10000h
+    // mmioOpen(NULL, &info, MMIO_ALLOCBUF | MMIO_CREATE | MMIO_READWRITE)
+    code.push(0)
+        .push(0)
+        .emit(&[0x1E])
+        .push(INFO)
+        .push(1)
+        .push(0x1002);
+    code.call("MMSYSTEM", MMIO_OPEN);
+    code.emit(&[0x85, 0xC0]) // test ax,ax
+        .emit(&[0x75, 0x06, 0xB0, 2, 0xB4, 0x4C, 0xCD, 0x21]);
+    code.emit(&[0xA3, lo(HANDLE), hi(HANDLE)]); // mov [HANDLE],ax
+    let get_info = |code: &mut Code, at: u16, fail: u8| {
+        push_word(code, HANDLE);
+        code.emit(&[0x1E]).push(at).push(0);
+        code.call("MMSYSTEM", MMIO_GET_INFO);
+        expect_ax(code, 0, fail);
+        expect(code, at + 20, 0, true, fail + 1); // pchBuffer's offset
+        expect(code, at + 32, 0, true, fail + 2); // pchEndWrite's
+        // mov ax,[pchBuffer's selector]; add ax,8; cmp ax,[pchEndWrite's]
+        code.emit(&[0xA1, lo(at + 22), hi(at + 22), 0x05, 0x08, 0x00])
+            .emit(&[0x3B, 0x06, lo(at + 34), hi(at + 34)])
+            .emit(&[0x74, 0x06, 0xB0, fail + 3, 0xB4, 0x4C, 0xCD, 0x21]);
+    };
+    get_info(&mut code, INFO2, 3);
+    push_word(&mut code, HANDLE);
+    code.emit(&[0x1E]).push(INFO2).push(0);
+    code.call("MMSYSTEM", MMIO_SET_INFO);
+    expect_ax(&mut code, 0, 7);
+    get_info(&mut code, INFO, 8);
+    push_word(&mut code, HANDLE);
+    code.push(0).call("MMSYSTEM", MMIO_CLOSE);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("mmio_huge_end", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
