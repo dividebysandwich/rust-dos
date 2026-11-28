@@ -558,7 +558,9 @@ pub fn restore_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if let Some(b) = gdi(cpu).bitmap_mut(old_bitmap) {
             b.dc = 0;
         }
-        if let Some(b) = gdi(cpu).bitmap_mut(new_bitmap) {
+        // The stock bitmap is in every memory DC at once (`select_object`).
+        let stock = gdi(cpu).get(new_bitmap).is_some_and(|o| o.stock);
+        if !stock && let Some(b) = gdi(cpu).bitmap_mut(new_bitmap) {
             b.dc = hdc;
         }
     }
