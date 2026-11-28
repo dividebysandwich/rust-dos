@@ -16,6 +16,7 @@ const AVI_FILE_GET_STREAM: u16 = 143;
 const AVI_STREAM_RELEASE: u16 = 161;
 const AVI_STREAM_INFO: u16 = 162;
 const VIDEO_FOR_WINDOWS_VERSION: u16 = 2;
+const IC_GET_INFO: u16 = 212;
 
 /// Where the program keeps things in its data segment: the IAVIFile and
 /// IAVIStream pointers, and the AVISTREAMINFO with a word after it.
@@ -128,4 +129,21 @@ fn stream_info(test: &str, version: WindowsVersion, vfw: u32) -> (u8, String) {
         cpu.bus.win32.version = version;
         std::fs::write(dir.join("CLIP.AVI"), avi_clip()).unwrap();
     })
+}
+
+/// ICGetInfo of a handle that isn't an open codec's gives MSVFW32's
+/// ICERR_BADHANDLE (-8) and writes nothing into the 16-bit ICINFO.
+#[test]
+fn ic_get_info_of_a_bad_handle_is_an_error() {
+    let mut code = Code::new();
+    // mov word [INFO],0BEEFh
+    code.emit(&[0xC7, 0x06, lo(INFO), hi(INFO), 0xEF, 0xBE]);
+    // ICGetInfo(1234h, &info, 296)
+    code.push(0x1234).emit(&[0x1E]).push(INFO).push(0).push(296);
+    code.call("MSVIDEO", IC_GET_INFO);
+    expect_dx_ax(&mut code, 0xFFFF_FFF8, 2);
+    expect_word(&mut code, INFO, 0xBEEF, 3);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run_with("vfw16_get_info_bad", program(&code, CODE), |_, _| {});
+    assert_eq!(exit, 1, "{log}");
 }
