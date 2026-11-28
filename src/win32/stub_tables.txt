@@ -6241,6 +6241,11 @@ midiInStop
 midiInReset
 midiInGetID
 midiInMessage
+mciSetDriverData
+mciGetDriverData
+mciDriverYield
+mciDriverNotify
+DrvDefDriverProc
 
 MODULE LZEXPAND
 LZCopy
