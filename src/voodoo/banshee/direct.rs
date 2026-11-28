@@ -25,8 +25,8 @@ use super::super::tracker::{DIRECT_WRITE, PAGE};
 use super::{BAR_SIZE, blit2d};
 
 /// How many ranges of the memory translated code leaves to the bus when
-/// it writes: the desktop shown and the two command FIFOs' rings.
-pub const KEPT: usize = 3;
+/// it writes: the two command FIFOs' rings.
+pub const KEPT: usize = 2;
 
 /// The part of the card's memory that a program's reads and writes need
 /// nothing done for but the bytes (`Voodoo::banshee_direct`).
@@ -38,11 +38,15 @@ pub struct Direct {
     /// below the tile base that the memory has.
     pub len: u32,
     /// Byte ranges of them (start, end) whose writes do more than store
-    /// the bytes: the desktop shown, whose writes count as the program's
-    /// output for `cycles=auto` (`Bus::note_banshee_memory_write`), and
-    /// the command FIFOs' rings, whose dwords are commands. Reads of
-    /// them are only the bytes.
+    /// the bytes: the command FIFOs' rings, whose dwords are commands.
+    /// Reads of them are only the bytes.
     pub kept: [(u32, u32); KEPT],
+    /// The bytes (start, end) of the desktop shown in the card's own
+    /// modes, (0, 0) without one. Their writes count as the program's
+    /// output for `cycles=auto` (`Bus::note_banshee_memory_write`), which
+    /// translated code does itself on its whole pages, as it does for
+    /// the VESA frame buffer (`dynrec`'s `card_state`).
+    pub shown: (u32, u32),
     /// None if every page is only its bytes. Otherwise only those that
     /// the card says are (`Voodoo::banshee_grant`), with the count that
     /// changes when a page stops being so (`Tracker::direct_generation`):
@@ -155,15 +159,16 @@ impl Voodoo {
             .then(|| self.gpu.borrow().tracker.direct_generation());
         let bytes = self.fbi.ram.bytes().min(self.fbi.mask as usize + 1) as u64;
         let len = bytes.min(b.tile_base() as u64).min(BAR_SIZE as u64) as u32;
-        let mut kept = [(0, 0); KEPT];
+        let mut shown = (0, 0);
         if b.extended() {
             let (start, span) = b.desktop_memory();
             let end = (start as u64 + span).min(len as u64) as u32;
             if start < end {
-                kept[0] = (start, end);
+                shown = (start, end);
             }
         }
-        for (keep, f) in kept[1..].iter_mut().zip(&b.fifo) {
+        let mut kept = [(0, 0); KEPT];
+        for (keep, f) in kept.iter_mut().zip(&b.fifo) {
             if f.enabled && f.base < f.end.min(len) {
                 *keep = (f.base, f.end.min(len));
             }
@@ -172,6 +177,7 @@ impl Voodoo {
             base: self.fbi.ram.as_mut_ptr(),
             len,
             kept,
+            shown,
             grants,
         })
     }

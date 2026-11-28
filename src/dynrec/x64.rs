@@ -352,7 +352,8 @@ fn load_thunk(ops: &mut Asm) {
 }
 
 /// What the bus does for a write of `s` bytes into the VESA frame
-/// buffer out of the picture shown (`Bus::write_lfb`, `write_to_lfb`),
+/// buffer out of the picture shown (`Bus::write_lfb`, `write_to_lfb`), or
+/// into a Banshee's desktop shown (`Bus::note_banshee_memory_write`),
 /// where it only counts: the bytes of a burst for `cycles=auto`, as the
 /// VGA's in `store_thunk` (a write that starts a burst goes to the bus),
 /// on a page of the picture `cycles=auto` knows also as that picture's,
@@ -406,7 +407,8 @@ fn card_count(ops: &mut Asm, s: i32) {
         ; mov BYTE [rax], 1
         ; noted:
         // Bytes of the picture `cycles=auto` knows: their count, and the
-        // lowest offset and the one past the highest of the burst's.
+        // lowest offset and the one past the highest of the burst's, from
+        // the offset its counts start at (`JitCtx::card_origin`).
         ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
         ; mov eax, r8d
         ; shr eax, 12
@@ -414,6 +416,7 @@ fn card_count(ops: &mut Asm, s: i32) {
         ; jz >unshown
         ; add QWORD [rbx + layout::SHOWN_BYTES as i32], s
         ; mov r9d, r8d
+        ; sub r9d, DWORD [r12 + CTX_CARD_ORIGIN]
         ; cmp r9, QWORD [rbx + layout::LOW as i32]
         ; jae >low
         ; mov QWORD [rbx + layout::LOW as i32], r9

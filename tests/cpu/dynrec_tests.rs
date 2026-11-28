@@ -7874,23 +7874,121 @@ fn a_software_renderers_loops_on_a_voodoo3s_memory_are_the_interpreters() {
     let (start, span) = card.desktop_memory();
     assert_eq!(start, 0x8000);
     assert!((0x1010..0x2000).contains(&span), "{span:#x} bytes");
-    // The bytes written into it count the same, and the picture changed
-    // for both.
+    // The bytes written into it count the same, with all the rest of
+    // what `cycles=auto` counts (the bursts, their span, the last
+    // write's time), and the picture changed for both.
     assert_eq!(a.cpu.bus.activity.video_bytes, span);
     assert_eq!(b.cpu.bus.activity.video_bytes, span);
+    assert_same_activity(&a, &b);
     for rig in [&mut a, &mut b] {
         assert!(rig.cpu.bus.voodoo.as_mut().unwrap().prepare_display());
     }
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert_eq!(untranslated(&stats), 0, "{:?}", stats);
-        // The code makes the stores and loads out of sight itself: of
-        // some 36,000, those left to the bus are the 2000h bytes stored
-        // into the desktop's two pages, the tiles and the words and
-        // dwords across two pages.
+        // The code makes the stores and loads itself, counting those
+        // into the desktop's whole page: of some 36,000, those left to
+        // the bus are the 1000h bytes stored into the page the desktop
+        // has in part, the store that starts the burst, the tiles and
+        // the words and dwords across two pages.
         // (A few run in the interpreter where the lockstep's batches
         // stop in a loop.)
         let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
-        assert!((0x2000 - 128..0x2000 + 64).contains(&calls), "{calls} calls");
+        assert!((0x1000 - 128..0x1000 + 64).contains(&calls), "{calls} calls");
+    }
+}
+
+/// What `cycles=auto` counts (`Activity`) is the same in both rigs, but
+/// for the last write's instruction count, which translated code takes
+/// from its block's count and may have a block's instructions off
+/// (`Activity::video_write`).
+fn assert_same_activity(a: &Rig, b: &Rig) {
+    let split = |rig: &Rig| -> (String, u64) {
+        let text = format!("{:?}", rig.cpu.bus.activity);
+        let at = text.find("last_write: ").expect("a last write") + "last_write: ".len();
+        let end = at + text[at..].find(',').expect("more after it");
+        let count = text[at..end].parse().expect("a count");
+        (format!("{}{}", &text[..at], &text[end..]), count)
+    };
+    let ((a, a_at), (b, b_at)) = (split(a), split(b));
+    assert_eq!(a, b);
+    assert!(a_at.abs_diff(b_at) < 64, "last writes at {a_at} and {b_at}");
+}
+
+/// A game's MMX copy of its frame into the desktop shown in a Voodoo3's
+/// memory (Rage of Mages's, 64 bytes a turn), 4000h bytes from the
+/// desktop's first, at 1800h: its first page is the desktop's in part.
+/// Then a pause longer than a burst's gap, and a second copy.
+/// `cycles=auto` counts the same, and the code makes the stores into the
+/// desktop's whole pages itself.
+#[test]
+fn an_mmx_copy_into_a_voodoo3s_desktop_counts_as_the_interpreters() {
+    use rust_dos::voodoo::banshee::{
+        LFB_MEMORY_CONFIG, VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR,
+        VID_PROC_CFG,
+    };
+    const BAR0: usize = 0xD000_0000;
+    const BAR1: u32 = 0xD200_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
+        rig.cpu.bus.configure_voodoo(Some(rust_dos::voodoo::Board::Voodoo3));
+        let bus = &mut rig.cpu.bus;
+        bus.write_32(BAR0 + LFB_MEMORY_CONFIG as usize, 0x400);
+        bus.write_32(BAR0 + VGA_INIT0 as usize, 0x0000_1140);
+        bus.write_32(BAR0 + VID_PROC_CFG as usize, 0x0004_0081);
+        bus.write_32(BAR0 + VID_DESKTOP_OVERLAY_STRIDE as usize, 0x400);
+        bus.write_32(BAR0 + VID_DESKTOP_START_ADDR as usize, 0x1800);
+        for i in 0..0x1000u32 {
+            rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507));
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let (mut copy, mut turn, mut pause) =
+                    (a.create_label(), a.create_label(), a.create_label());
+                a.mov(ebp, 2u32)?;
+                a.set_label(&mut copy)?;
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x1800)?;
+                a.mov(ecx, 0x100u32)?;
+                a.set_label(&mut turn)?;
+                for at in (0..64).step_by(8) {
+                    a.movq(mm0, qword_ptr(esi + at))?;
+                    a.movq(qword_ptr(edi + at), mm0)?;
+                }
+                a.add(esi, 64)?;
+                a.and(esi, DATA + 0x3FFF)?;
+                a.add(edi, 64)?;
+                a.dec(ecx)?;
+                a.jnz(turn)?;
+                a.mov(ecx, 8000u32)?;
+                a.set_label(&mut pause)?;
+                a.dec(ecx)?;
+                a.jnz(pause)?;
+                a.dec(ebp)?;
+                a.jnz(copy)?;
+                a.emms()?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let card = b.cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap();
+    assert_eq!(card.desktop_memory().0, 0x1800);
+    let memory = |rig: &Rig| -> Vec<u32> {
+        (0x1800..0x5800).step_by(4).map(|i| rig.cpu.bus.read_32(BAR1 as usize + i)).collect()
+    };
+    assert!(memory(&a) == memory(&b), "the card's memory differs");
+    assert_eq!(b.cpu.bus.read_32(BAR1 as usize + 0x1804), 0x0103_0507);
+    // Both copies are bursts of 4000h bytes, from the desktop's first.
+    assert_same_activity(&a, &b);
+    assert_eq!(b.cpu.bus.activity.video_bytes, 0x8000);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+        // Of each copy's 800h stores, those through the bus are the
+        // 100h into the page the desktop has in part (1800h to 2000h),
+        // the first of which starts the burst.
+        let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+        assert!((0x200 - 16..0x200 + 64).contains(&calls), "{calls} calls");
     }
 }
 
