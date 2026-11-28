@@ -387,19 +387,23 @@ const STALLED: f64 = 2.0;
 /// with, a run of long frames comes now and then, and its measurements say
 /// what they cost.
 ///
-/// Nor is a step once it has run `STALL_RUN` frames in a row on time: a
-/// speed past what the host keeps up with makes the frames late from the
-/// step on, or alternates late ones with ones that catch up, and never
-/// runs that many on time first (see `STALL_RUN`). From there late frames
-/// count in a row only while each leaves the host further behind than the
-/// one before, a backlog that grows, as a speed a little past what the
-/// host has makes it after a run on time. Redguard's ship fight on the
-/// 7700X ran 33 frames on time at 432,689 after a step up from 360,059,
-/// then three of 35, 48 and 36 ms, dropping nothing, and at 414,068 27 on
-/// time and then three of 29, 30 and 28 ms. The watch ended both, and the
-/// speed held at 360,059 for 30 measurements, where the fight drew 39
-/// frames a second, against 54 at 414,067, which the host kept up with
-/// whole holds at (#1567).
+/// Once a step has run `STALL_RUN` frames in a row on time, it takes
+/// `STALL_FRAMES` late frames in a row to end it, or `TRY_DROPS` drops, as
+/// before. A speed past what the host keeps up with makes the frames late
+/// from the step on, or alternates late ones with ones that catch up, and
+/// never runs that many on time first (see `STALL_RUN`). One a little past
+/// what the host has can, and then its frames stay late: Omikron's
+/// dialogue at 30,417, a tenth past what the host keeps up with, runs
+/// frames of 12 and 23 ms in turn, then ten of about 40 and one of 77, and
+/// the pacer drops the backlog. A scene's burst of long frames at a speed
+/// the host keeps up with comes and goes in a few frames. Redguard's ship
+/// fight on the 7700X ran 33 frames on time at 432,689 after a step up
+/// from 360,059, then three of 35, 48 and 36 ms, dropping nothing, and at
+/// 414,068 27 on time and then three of 29, 30 and 28 ms. Ended at the
+/// third late frame in a row, as before a run on time, both steps went
+/// back to 360,059 for 30 measurements, where the fight drew 39 frames a
+/// second, against 54 a step higher, which the host kept up with for whole
+/// holds (#1567).
 const TRY_BEHIND_NS: u64 = 25_000_000;
 pub(crate) const TRY_BEHIND_FRAMES: u32 = 3;
 const TRY_DROPS: u32 = 2;
@@ -1823,15 +1827,13 @@ pub struct AutoSpeed {
     /// until the first frame at the new speed is in: what the pacer dropped
     /// at its start was the frame before's backlog, at the speed before.
     /// The frames on time in a row since it began, up to `STALL_RUN`, which
-    /// show the host keeps up with it (`TRY_BEHIND_NS`), and how far behind
-    /// the last frame left the host.
+    /// show the host keeps up with it (`TRY_BEHIND_NS`).
     trying: Option<u32>,
     try_behind: u32,
     try_drops: u32,
     try_lost_ns: u64,
     try_fresh: bool,
     try_on_time: u32,
-    try_last_ns: u64,
     /// The least speed the host fell behind at, by a measurement or a step
     /// up's frames, until it keeps up above it. A step up goes no further
     /// than a step under it at once, and past it by `FINE_STEP`; a faster CPU
@@ -1988,7 +1990,6 @@ impl AutoSpeed {
             try_lost_ns: 0,
             try_fresh: false,
             try_on_time: 0,
-            try_last_ns: 0,
             fell_at: None,
             far_more: 0,
             slow_host: None,
@@ -2683,14 +2684,12 @@ impl AutoSpeed {
         let fresh = std::mem::take(&mut self.try_fresh);
         let dropped = lag.lost_ns > self.try_lost_ns && !fresh;
         self.try_lost_ns = lag.lost_ns;
-        // Once the step has run `STALL_RUN` frames on time, late frames
-        // count in a row only while each leaves the host further behind
-        // than the one before (see `TRY_BEHIND_NS`).
+        // Once the step has run `STALL_RUN` frames on time, a burst of late
+        // frames that ends within `STALL_FRAMES` doesn't end it (see
+        // `TRY_BEHIND_NS`).
         let kept = self.try_on_time >= STALL_RUN;
-        let grows = lag.behind_ns > std::mem::replace(&mut self.try_last_ns, lag.behind_ns);
         self.try_behind = match lag.late {
             0 => 0,
-            late if kept && !grows => late,
             late => self.try_behind + late,
         };
         let from = self.trying?;
@@ -2708,16 +2707,18 @@ impl AutoSpeed {
         };
         if trace() {
             eprintln!(
-                "[auto] watch from {}: frame behind {:.1}ms, late {}, dropped {}",
+                "[auto] watch from {}: frame behind {:.1}ms, late {}, dropped {}, on time {}",
                 from,
                 lag.behind_ns as f64 / 1e6,
                 self.try_behind,
-                u32::from(dropped)
+                u32::from(dropped),
+                self.try_on_time
             );
         }
         let drops = self.try_drops;
         let frames = std::mem::take(&mut self.try_behind);
-        if drops < TRY_DROPS && frames < TRY_BEHIND_FRAMES {
+        let most = if kept { STALL_FRAMES } else { TRY_BEHIND_FRAMES };
+        if drops < TRY_DROPS && frames < most {
             self.try_behind = frames;
             return None;
         }
@@ -5869,19 +5870,39 @@ mod tests {
             assert_eq!(auto.falling_behind(bus, unsorted(behind * MS, 0)), None);
         }
         assert_eq!(auto.trying, Some(360_059));
-        // A backlog that grows frame by frame is the host falling behind
-        // at the step, after a run on time too.
-        let mut ended = None;
-        for behind in [26, 27, 28] {
-            ended = auto.falling_behind(bus, unsorted(behind * MS, 0));
+        assert_eq!(auto.falling_behind(bus, unsorted(14 * MS, 0)), None);
+        // Late frames that last aren't a burst: the host is behind at the
+        // step, whether they grow or not.
+        for _ in 1..STALL_FRAMES {
+            assert_eq!(auto.falling_behind(bus, unsorted(40 * MS, 0)), None);
         }
-        assert_eq!(ended, Some((360_059.0 * FINE_STEP).round() as u32));
+        let cut = auto.falling_behind(bus, unsorted(40 * MS, 0));
+        assert_eq!(cut, Some((360_059.0 * FINE_STEP).round() as u32));
     }
 
     #[test]
-    fn a_step_late_from_its_start_ends_at_its_third_late_frame() {
-        // Late frames before the step has run on time end it as they come,
-        // whether they grow or not: the step is too far.
+    fn a_step_that_kept_up_still_ends_at_its_second_drop() {
+        // A run on time changes how late frames count, not drops: two
+        // backlogs dropped end the step as they would before the run.
+        const MS: u64 = 1_000_000;
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let mut auto = AutoSpeed::new(3000, None);
+        bus.set_cycles_per_ms(432_689);
+        auto.watch(360_059);
+        for _ in 0..STALL_RUN + 2 {
+            assert_eq!(auto.falling_behind(bus, unsorted(14 * MS, 0)), None);
+        }
+        assert_eq!(auto.falling_behind(bus, unsorted(14 * MS, 60 * MS)), None);
+        assert_eq!(auto.falling_behind(bus, unsorted(14 * MS, 60 * MS)), None);
+        let cut = auto.falling_behind(bus, unsorted(14 * MS, 120 * MS));
+        assert_eq!(cut, Some((360_059.0 * FINE_STEP).round() as u32));
+    }
+
+    #[test]
+    fn a_step_late_before_a_run_on_time_ends_at_its_third_late_frame() {
+        // Late frames before the step has run `STALL_RUN` on time end it as
+        // they come, whether they grow or not: the step is too far.
         const MS: u64 = 1_000_000;
         let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
         let bus = &mut cpu.bus;
