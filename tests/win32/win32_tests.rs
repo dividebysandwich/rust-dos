@@ -21810,6 +21810,77 @@ fn deleteobject_deletes_a_memory_dc_and_keeps_a_window_dc() {
     assert_eq!(cpu.errorlevel, 0x1F);
 }
 
+/// The stock 1x1 bitmap a memory DC starts with goes back into two DCs
+/// at once, as every program that frees its bitmaps so does: Windows
+/// keeps a bitmap to one DC, but not that one. Civilization II's
+/// Civilopedia stops with "Internal Error" when the second SelectObject
+/// fails. A program selects a bitmap of its own into each of two memory
+/// DCs and then the bitmap each replaced back. Its exit code: one bit
+/// each for the two old bitmaps being one, the first SelectObject of it
+/// back, the second, and DeleteObject of each of its own bitmaps.
+#[test]
+fn the_default_bitmap_goes_back_into_two_dcs() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "CreateCompatibleBitmap",
+        "SelectObject",
+        "DeleteObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let bit = |a: &mut CodeAssembler, n: u32| -> Result<(), IcedError> {
+            a.neg(eax)?;
+            a.sbb(eax, eax)?;
+            a.and(eax, 1 << n)?;
+            a.or(ebx, eax)
+        };
+        a.xor(ebx, ebx)?;
+        // esi, edi: the DCs; [esp+0], [esp+4]: their bitmaps; [esp+8],
+        // [esp+12]: the bitmaps those replaced.
+        a.sub(esp, 16)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(edi, eax)?;
+        for (dc, at) in [(esi, 0), (edi, 4)] {
+            a.push(8)?;
+            a.push(8)?;
+            a.push(dc)?;
+            a.call(f("CreateCompatibleBitmap"))?;
+            a.mov(dword_ptr(esp + at), eax)?;
+            a.push(eax)?;
+            a.push(dc)?;
+            a.call(f("SelectObject"))?;
+            a.mov(dword_ptr(esp + at + 8), eax)?;
+        }
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, dword_ptr(esp + 12))?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 0)?;
+        for (dc, at, n) in [(esi, 8, 1), (edi, 12, 2)] {
+            a.push(dword_ptr(esp + at))?;
+            a.push(dc)?;
+            a.call(f("SelectObject"))?;
+            bit(a, n)?;
+        }
+        for (at, n) in [(0, 3), (4, 4)] {
+            a.push(dword_ptr(esp + at))?;
+            a.call(f("DeleteObject"))?;
+            bit(a, n)?;
+        }
+        a.add(esp, 16)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let mut cpu = machine_with("default_bitmap_two_dcs", &[("T.EXE", exe)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x1F);
+}
+
 /// A program adds F.FON, a file of two sizes of the face "Test Face",
 /// with AddFontResourceA, measures two characters in a font of the face
 /// 12 pixels high and counts the sizes EnumFontsA lists of the face. Its

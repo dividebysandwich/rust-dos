@@ -958,7 +958,12 @@ pub fn select_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if dc.kind != MEMORY {
                 return Some(0);
             }
-            if bitmap.dc != 0 && bitmap.dc != hdc {
+            // A bitmap goes into one DC at a time, except the stock 1x1
+            // bitmap every new memory DC starts with, which is in all of
+            // them. A program that selects it back into two DCs to free
+            // its own bitmaps gets it in both (Civilization II's
+            // Civilopedia).
+            if !object.stock && bitmap.dc != 0 && bitmap.dc != hdc {
                 return Some(0);
             }
             // A bitmap of GDI's must be monochrome or the display's
@@ -986,7 +991,9 @@ pub fn select_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             crate::win32::shims::win31::gdi_heap::refresh(cpu, handle);
             let mut size = None;
             if let Some(b) = gdi(cpu).bitmap_mut(handle) {
-                b.dc = hdc;
+                if !object.stock {
+                    b.dc = hdc;
+                }
                 size = Some((b.width, b.height));
             }
             with(cpu, hdc, |d| {
