@@ -763,6 +763,15 @@ pub(crate) struct Footprint {
 }
 
 impl Footprint {
+    /// The footprint of a unit that takes no texels: every pixel's level
+    /// is below every lodmin.
+    const NONE: Footprint = Footprint {
+        across: 0.0,
+        across_lod: NO_FOOTPRINT,
+        down: [0.0; 2],
+        step: [0.0; 2],
+    };
+
     /// The footprint of a row whose first pixel has `iters`, `itert` and
     /// `iterw`.
     pub(crate) fn new(q: &TmuParams, iters: i64, itert: i64, iterw: i64) -> Self {
@@ -1263,29 +1272,28 @@ macro_rules! variants {
     };
 }
 
-// V0-V6 are the pipelines of Quake's 3dfx renderers (textures in TMU 0
-// alone and lightmapped ones in two units, blended or not, and the
-// untextured ones), which other Glide games share; V4 and V7 were V1 with
-// other settings Glide left in TMU 1. V8 and V9 fix the two states observed in a 60-batch
-// Oni main-menu capture. C0 and C1 are 3dfx's OpenGL driver (`3DFXVGL.DLL`)
-// with one texture, which it gives TMU 1 while TMU 0 passes its colour
-// on: the texture times the iterated colour, with the iterated alpha or
-// the texture's times it. Oni draws its menu and its levels with these.
-// V10-V15 and C2 are 3dfx's Direct3D driver for the Voodoo2, which also
-// gives the texture to TMU 1 and has TMU 0 pass it on, modulated by the
-// iterated colour. V10-V14 are its textured states in a saved Omikron
-// scene, most drawn area first: the frame darkened by the colour, opaque,
-// blended by alpha with fog, opaque with fog, and added. V15 darkens
-// without a texture, and C2 covers the driver's other blends, fog and
-// formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel alone,
-// which it draws its terrain, units and lighting with, opaque or
-// blended, in its palettized, intensity and 16-bit formats. V16-V19 and
-// C4 are the built-in Windows' Direct3D HAL (`win32::ddraw::d3d::hal`),
-// which gives the texture to TMU 0 and leaves TMU 1's texel unused (TMU
-// 0's combine sets zero_other). V16 and V17 are its textured states with
-// the most area in Omikron's first dialogue, with two alpha blends, and
-// V18 and V19 the same blends untextured; C4 covers its other blends, fog
-// modes, filtering and texel formats.
+// V0-V3, V5 and V6 are the pipelines of Quake's 3dfx renderers (textures in
+// TMU 0 alone and lightmapped ones in two units, blended or not, and the
+// untextured ones), which other Glide games share. V8 and V9 fix the two
+// states observed in a 60-batch Oni main-menu capture. C0 and C1 are 3dfx's
+// OpenGL driver (`3DFXVGL.DLL`) with one texture, which it gives TMU 1
+// while TMU 0 passes its colour on: the texture times the iterated colour,
+// with the iterated alpha or the texture's times it. Oni draws its menu and
+// its levels with these. V10-V15 and C2 are 3dfx's Direct3D driver for the
+// Voodoo2, which also gives the texture to TMU 1 and has TMU 0 pass it on,
+// modulated by the iterated colour. V10-V14 are its textured states in a
+// saved Omikron scene, most drawn area first: the frame darkened by the
+// colour, opaque, blended by alpha with fog, opaque with fog, and added.
+// V15 darkens without a texture, and C2 covers the driver's other blends,
+// fog and formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel
+// alone, which it draws its terrain, units and lighting with, opaque or
+// blended, in its palettized, intensity and 16-bit formats. V16-V19 and C4
+// are the built-in Windows' Direct3D HAL (`win32::ddraw::d3d::hal`), which
+// gives the texture to TMU 0 and leaves TMU 1's texel unused (TMU 0's
+// combine sets zero_other). V16 and V17 are its textured states with the
+// most area in Omikron's first dialogue, with two alpha blends, and V18 and
+// V19 the same blends untextured; C4 covers its other blends, fog modes,
+// filtering and texel formats.
 //
 // A triangle whose TMU 0 ignores TMU 1 draws with one unit (`units`), so
 // V0, V1, V16, V17, C3 and C4 are one-unit variants: they take those
@@ -1411,7 +1419,12 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         let q = &p.tmu[i];
         *t = (at64(q.starts, q.dsdy, q.dsdx), at64(q.startt, q.dtdy, q.dtdx), at64(q.startw, q.dwdy, q.dwdx));
     }
+    // A unit the triangle doesn't draw with (`units`) has none to work
+    // out.
     let fp: [Footprint; 2] = std::array::from_fn(|i| {
+        if i >= TMUS {
+            return Footprint::NONE;
+        }
         let (s, tc, w) = tex[i];
         Footprint::new(&p.tmu[i], s, tc, w)
     });

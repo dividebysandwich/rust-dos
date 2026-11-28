@@ -71,9 +71,30 @@ fn triangles_whose_tmu_0_ignores_tmu_1_draw_the_same_with_one_unit() {
     // Myth's states, Quake's with TMU 1 iterating the same W (which two
     // units divide by once), and the HAL's.
     let states = STATES.into_iter().chain([
-        [0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F],
-        [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F],
-        [0x94391, 0x0C00_2401, 0x0004_4410, 0, 0x0C26_1A0F, 0x0422_10C0],
+        [
+            0x90110,
+            0x0D42_0009,
+            0x0004_0400,
+            0,
+            0x8C26_1A0F,
+            0x8422_1C0F,
+        ],
+        [
+            0x90110,
+            0x0D42_0009,
+            0x0000_6010,
+            0,
+            0x8C26_130F,
+            0x8422_130F,
+        ],
+        [
+            0x94391,
+            0x0C00_2401,
+            0x0004_4410,
+            0,
+            0x0C26_1A0F,
+            0x0422_10C0,
+        ],
     ]);
     for mut regs in states {
         // Colour and depth written, the depth test always passing.
