@@ -16,6 +16,10 @@ const WAVE_OUT_RESET: u16 = 411;
 const WAVE_OUT_GET_POSITION: u16 = 412;
 const WAVE_OUT_GET_DEV_CAPS: u16 = 402;
 const WAVE_OUT_GET_ID: u16 = 420;
+const WAVE_OUT_GET_PITCH: u16 = 413;
+const WAVE_OUT_SET_PITCH: u16 = 414;
+const WAVE_OUT_GET_PLAYBACK_RATE: u16 = 417;
+const WAVE_OUT_SET_PLAYBACK_RATE: u16 = 418;
 const MIDI_OUT_GET_ID: u16 = 215;
 const AUX_GET_NUM_DEVS: u16 = 350;
 const AUX_GET_DEV_CAPS: u16 = 351;
@@ -267,6 +271,43 @@ fn wave_out_get_id_writes_a_16_bit_uint() {
         .emit(&[0xB0, 0x01])
         .exit_al();
     let (exit, log) = run("wave_get_id", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// MMSYSTEM has waveOutGetPitch, waveOutSetPitch, waveOutGetPlaybackRate
+/// and waveOutSetPlaybackRate, as Windows 3.1's does. Authorware's
+/// runtime (Civilization II's Civilopedia) looks all four up and stops
+/// if one is missing. The device has neither control, so each answers
+/// MMSYSERR_NOTSUPPORTED and a Get leaves its DWORD alone.
+#[test]
+fn wave_out_pitch_and_rate_are_not_supported() {
+    let mut code = Code::new();
+    open_wave(&mut code, |code| _ = code.push(0), 0, 7);
+    for (i, (ordinal, get)) in [
+        (WAVE_OUT_GET_PITCH, true),
+        (WAVE_OUT_SET_PITCH, false),
+        (WAVE_OUT_GET_PLAYBACK_RATE, true),
+        (WAVE_OUT_SET_PLAYBACK_RATE, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        mark(&mut code);
+        push_word(&mut code, HANDLE);
+        if get {
+            code.emit(&[0x1E]).push(TIME);
+        } else {
+            code.push(1).push(0); // 1.0 in 16.16
+        }
+        code.call("MMSYSTEM", ordinal);
+        expect_ax(&mut code, 8, 2 + 2 * i as u8);
+        expect(&mut code, TIME, 0xEEEE, true, 3 + 2 * i as u8);
+    }
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_CLOSE)
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let (exit, log) = run("wave_pitch_rate", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
 }
 
