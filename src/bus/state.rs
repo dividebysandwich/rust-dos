@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 4;
-const WIN32_VERSION: u16 = 117;
+const WIN32_VERSION: u16 = 118;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -96,10 +96,11 @@ const WIN32_VERSION: u16 = 117;
 /// (`win32::thread::TIB_98`, which the load moves), 71's to 114's no
 /// VxD handles (`object::Kind::Vxd`, which they load without), 71's
 /// to 115's no Unicode interfaces of DirectInput
-/// (`dinput::WIDE_SAVED`), and 71's to 116's no True Color desktop
-/// depths (`DesktopDepth::TrueColor24` and `TrueColor32`, which they
-/// load without).
-const WIN32_LOADS: [u16; 47] = [
+/// (`dinput::WIDE_SAVED`), 71's to 116's no True Color desktop depths
+/// (`DesktopDepth::TrueColor24` and `TrueColor32`, which they load
+/// without), and 71's to 117's not the order the Win16 selectors were
+/// freed in (`win16::ldt::FREED_SAVED`).
+const WIN32_LOADS: [u16; 48] = [
     71,
     72,
     73,
@@ -146,6 +147,7 @@ const WIN32_LOADS: [u16; 47] = [
     114,
     115,
     116,
+    117,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1312,6 +1314,7 @@ mod tests {
         (115, 0x3DE4_F58C_0828_F3E7), // VxD handles of DeviceIoControl
         (116, 0x331A_F2D2_3CFD_2C62), // DirectInput's Unicode interfaces
         (117, 0x6D75_7369_BF80_C137), // the desktop depths of 24 and 32 bits
+        (118, 0x014E_6DAC_6954_2375), // the order the Win16 selectors were freed in
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
