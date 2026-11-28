@@ -1651,13 +1651,23 @@ pub fn enum_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             continue;
         }
         let at = out + n * STATSTG_SIZE as u32;
-        if !cpu.bus.guest_probe(at, STATSTG_SIZE, true) {
-            return Some(STG_E_INVALIDPOINTER);
+        let error = if !cpu.bus.guest_probe(at, STATSTG_SIZE, true) {
+            STG_E_INVALIDPOINTER
+        } else if !write_stat(cpu, doc_id, index, 0, at, 0) {
+            E_OUTOFMEMORY
+        } else {
+            n += 1;
+            continue;
+        };
+        // A failed call gives the caller nothing to free: the names of
+        // the STATSTGs written so far go back to the allocator.
+        for k in 0..n {
+            let name_at = out + k * STATSTG_SIZE as u32;
+            let name = cpu.bus.guest_read_32(name_at);
+            super::task_free(cpu, name);
+            cpu.bus.guest_write_32(name_at, 0);
         }
-        if !write_stat(cpu, doc_id, index, 0, at, 0) {
-            return Some(E_OUTOFMEMORY);
-        }
-        n += 1;
+        return Some(error);
     }
     if fetched != 0 {
         com::write_out(cpu, fetched, n);

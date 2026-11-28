@@ -6,8 +6,8 @@
 //! reads and writes the compound file format: a 16-bit object here holds
 //! an object of OLE32's, and each of its methods calls that object's
 //! method with the arguments made 32-bit ones. The 16-bit interfaces
-//! differ from the 32-bit ones in what they pass, not in their methods,
-//! which are in the same order:
+//! have the 32-bit ones' methods in the same order, and pass their
+//! arguments in other forms:
 //!
 //! - The methods are far cdecl functions, the object's 16:16 pointer
 //!   first (ole2.rs), here stubs of STORAGE that aren't exported.
@@ -173,14 +173,15 @@ impl Kind {
         }
     }
 
-    /// OLE32's Release of an object of this kind.
-    fn release32(self, cpu: &mut Cpu, this: u32) {
+    /// OLE32's Release of an object of this kind: what it returned.
+    fn release32(self, cpu: &mut Cpu, this: u32) -> u32 {
         let args = [this];
         match self {
             Kind::Storage => stg::storage_release(cpu, &args),
             Kind::Stream => stg::stream_release(cpu, &args),
             Kind::Enum => stg::enum_release(cpu, &args),
-        };
+        }
+        .unwrap_or(0)
     }
 }
 
@@ -195,24 +196,35 @@ const MAX_TEXT: usize = 1024;
 // The 16-bit objects.
 
 /// A new 16-bit object of the kind `kind` for OLE32's object `this`:
-/// its 16:16 pointer, or 0 when there is no memory or no STORAGE.
-fn wrap(cpu: &mut Cpu, this: u32, kind: Kind) -> u32 {
-    let Some(module) = super::builtin::find("STORAGE") else {
-        return 0;
-    };
+/// its 16:16 pointer, or the HRESULT to fail with. A STORAGE of a state
+/// saved by a build before its objects has no stubs for their methods
+/// (`builtin::stub_offset`), and a vtable of NULLs would end the program
+/// at its first call: E_NOTIMPL then, as that build answered.
+fn wrap(cpu: &mut Cpu, this: u32, kind: Kind) -> Result<u32, u32> {
+    let module = super::builtin::find("STORAGE").ok_or(E_NOTIMPL)?;
     let methods = kind.methods();
+    let stubs: Option<Vec<u32>> = methods
+        .iter()
+        .map(|name| super::builtin::stub_address(cpu, module, name))
+        .collect();
+    let Some(stubs) = stubs else {
+        cpu.bus.log_string(
+            "[W16] STORAGE: the module of a state saved by an older build has no \
+             stubs for its objects' methods: E_NOTIMPL",
+        );
+        return Err(E_NOTIMPL);
+    };
     let p = ole2::alloc(cpu, 8 + 4 * methods.len() as u32);
     let base = super::linear(cpu, p);
     if base == 0 {
-        return 0;
+        return Err(E_OUTOFMEMORY);
     }
     super::write_32(cpu, base, p + 8);
     super::write_32(cpu, base + 4, this);
-    for (i, name) in methods.iter().enumerate() {
-        let stub = super::builtin::stub_address(cpu, module, name).unwrap_or(0);
+    for (i, stub) in stubs.into_iter().enumerate() {
         super::write_32(cpu, base + 8 + 4 * i as u32, stub);
     }
-    p
+    Ok(p)
 }
 
 /// OLE32's object of the 16-bit object `this`, if `this` is one of these
@@ -242,13 +254,17 @@ fn give(cpu: &mut Cpu, result: Option<u32>, out: u32, kind: Kind) -> Option<u32>
         return Some(result);
     }
     let this = super::read_32(cpu, out);
-    let p = wrap(cpu, this, kind);
-    super::write_32(cpu, out, p);
-    if p == 0 {
-        kind.release32(cpu, this);
-        return Some(E_OUTOFMEMORY);
+    match wrap(cpu, this, kind) {
+        Ok(p) => {
+            super::write_32(cpu, out, p);
+            Some(S_OK)
+        }
+        Err(e) => {
+            super::write_32(cpu, out, 0);
+            kind.release32(cpu, this);
+            Some(e)
+        }
     }
-    Some(S_OK)
 }
 
 /// The ANSI text at the 16:16 `p` in Unicode, in a block of the process
@@ -380,13 +396,13 @@ fn add_ref(cpu: &mut Cpu, args: &[u32], kind: Kind) -> Option<u32> {
 }
 
 /// Release: OLE32's object's, and the 16-bit object goes when that one
-/// went.
+/// went. The value is what OLE32's Release returned.
 fn release(cpu: &mut Cpu, args: &[u32], kind: Kind) -> Option<u32> {
     let this16 = args[0];
     let Some(this) = target(cpu, this16, kind) else {
         return Some(0);
     };
-    kind.release32(cpu, this);
+    let refs = kind.release32(cpu, this);
     if !stg::is_object(cpu, this) {
         // Its vtable no longer, so a call through a pointer the program
         // kept fails as one to an object that is gone.
@@ -394,7 +410,7 @@ fn release(cpu: &mut Cpu, args: &[u32], kind: Kind) -> Option<u32> {
         super::write_32(cpu, at, 0);
         ole2::free(cpu, this16);
     }
-    Some(0)
+    Some(refs)
 }
 
 fn storage_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

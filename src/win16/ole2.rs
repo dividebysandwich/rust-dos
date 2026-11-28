@@ -967,7 +967,7 @@ pub(super) fn dx_ax(ctx: &mut Context, result: u32) -> Option<u32> {
 /// E_OUTOFMEMORY (and NULL at `out`) when there is no block. The program
 /// frees the block with the allocator CoGetMalloc gives it, so when
 /// CoInitialize was given the program's own allocator, its Alloc makes
-/// the block (`then_block` fills it); otherwise the built-in one does.
+/// the block (`then_blocks` fills it); otherwise the built-in one does.
 fn task_block(cpu: &mut Cpu, out: u32, bytes: &[u8]) -> Option<u32> {
     task_blocks(cpu, S_OK, &[(out, bytes.to_vec())])
 }
@@ -1031,13 +1031,32 @@ pub(super) fn then_blocks(
         result = E_OUTOFMEMORY;
     }
     let rest = &data[3 + words..];
+    if rest.is_empty() {
+        return dx_ax(ctx, result);
+    }
     let app = this_task(cpu).map_or(0, |t| t.app_malloc);
     let target = if app == 0 {
         0
     } else {
         method_address(cpu, app, 3)
     };
-    if rest.is_empty() || target == 0 {
+    if target == 0 {
+        // The program's allocator went in its Alloc (CoUninitialize):
+        // the built-in one, which CoGetMalloc gives now, makes the rest.
+        let mut blocks = Vec::new();
+        let mut at = 0;
+        while at + 2 <= rest.len() {
+            let (out, len) = (rest[at], rest[at + 1] as usize);
+            let words = len.div_ceil(4);
+            let bytes: Vec<u8> = rest[at + 2..at + 2 + words]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .take(len)
+                .collect();
+            blocks.push((out, bytes));
+            at += 2 + words;
+        }
+        let result = task_blocks(cpu, result, &blocks).unwrap_or(result);
         return dx_ax(ctx, result);
     }
     let mut more = vec![result];
