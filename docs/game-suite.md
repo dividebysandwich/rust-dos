@@ -18,6 +18,12 @@ Each game is played on machines set up in many ways:
 The suite is opt-in and local. It downloads about 20 MB of games on first
 use, and it never runs in CI or in a plain `cargo test`.
 
+The suite covers DOS games on the interpreter and the recompiler, the
+sound cards and the CGA, EGA and VGA modes. For the other programs a
+pull request's regression check runs (Windows games, 3D cards, the
+built-in Windows' libraries), see
+[regression-programs.md](regression-programs.md).
+
 ```sh
 cargo test --release --test program game_suite:: -- --ignored --nocapture       # fetch, install, play
 cargo test --release --test program game_suite::fetch -- --ignored --nocapture  # only download and install
