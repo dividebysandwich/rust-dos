@@ -879,7 +879,7 @@ static APIS: &[Api] = &[
     stdcall("ShowCursor", 579, 1, input::show_cursor),
     stdcall("GetDoubleClickTime", 256, 0, input::get_double_click_time),
     stdcall("SetDoubleClickTime", 528, 1, succeed),
-    stdcall("SwapMouseButton", 585, 1, nothing),
+    stdcall("SwapMouseButton", 585, 1, input::swap_mouse_button),
     stdcall("DragDetect", 157, 3, nothing),
     stdcall("CreateCaret", 75, 4, input::create_caret),
     stdcall("DestroyCaret", 138, 0, input::destroy_caret),

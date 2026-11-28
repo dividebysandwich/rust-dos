@@ -1171,8 +1171,13 @@ fn child_window_from_point(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// PtInRect(rect, pt): it reads only its arguments and the rectangle, so
+/// an idle proof goes through it, as through USER32's (#1284).
 fn pt_in_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let r = args[0];
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
+    crate::idle::reads_also(cpu, r, 8);
     let side = |i: u32| r16(cpu, r + 2 * i) as u16 as i16;
     let (x, y) = (args[1] as u16 as i16, (args[1] >> 16) as u16 as i16);
     Some((x >= side(0) && x < side(2) && y >= side(1) && y < side(3)) as u32)

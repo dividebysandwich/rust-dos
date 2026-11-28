@@ -1626,6 +1626,70 @@ fn a_peek_message_loop_is_not_proven_again_where_its_timer_comes() {
     assert_eq!(stats.failures, 0, "{stats:?}");
 }
 
+/// Shadow of the Horned Rat's wait on its screens (#1284), as the game
+/// makes it in USER32: SwapMouseButton(FALSE) twice, GetCursorPos,
+/// GetWindowRect of the desktop, PtInRect of the cursor in that
+/// rectangle and GetAsyncKeyState(VK_RETURN) in every pass, for 200 ms
+/// by GetTickCount. None changes anything but the POINT and the RECT
+/// written, so the passes are skipped, and come out the same as when
+/// they all run. The program ends with 0x2A only if the cursor was in
+/// the rectangle.
+#[test]
+fn a_win32_loop_that_asks_where_the_cursor_is_on_a_window_is_skipped() {
+    let names: &[&str] = &[
+        "GetDesktopWindow",
+        "SwapMouseButton",
+        "GetCursorPos",
+        "GetWindowRect",
+        "PtInRect",
+        "GetAsyncKeyState",
+    ];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names), ("KERNEL32.DLL", &["GetTickCount"])];
+    // The POINT at 0, the RECT at 16, PtInRect's answer at 32.
+    let image = program(BASE, false, imports, &[0; 48], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let tick = l.import(names.len());
+        let mut spin = a.create_label();
+        let mut outside = a.create_label();
+        a.call(f("GetDesktopWindow"))?;
+        a.mov(esi, eax)?;
+        a.call(tick)?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        for _ in 0..2 {
+            a.push(0)?;
+            a.call(f("SwapMouseButton"))?;
+        }
+        a.push(l.data)?;
+        a.call(f("GetCursorPos"))?;
+        a.push(l.data + 16)?;
+        a.push(esi)?;
+        a.call(f("GetWindowRect"))?;
+        // The POINT by value: y, then x, then the RECT.
+        a.push(dword_ptr(l.at(4)))?;
+        a.push(dword_ptr(l.at(0)))?;
+        a.push(l.data + 16)?;
+        a.call(f("PtInRect"))?;
+        a.mov(dword_ptr(l.at(32)), eax)?;
+        // VK_RETURN.
+        a.push(0x0D)?;
+        a.call(f("GetAsyncKeyState"))?;
+        a.call(tick)?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.cmp(dword_ptr(l.at(32)), 1)?;
+        a.jne(outside)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut outside)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("cursor_on_window", image);
+    assert!(stats.skipped > 100 * ms, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips idle loops and one that doesn't,
 /// in lockstep, up to its exit with 0x2A: the skips found and the
 /// instructions in a millisecond.
