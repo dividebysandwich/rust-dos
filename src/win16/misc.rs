@@ -2069,14 +2069,15 @@ fn mmio_to16(cpu: &Cpu, buffer: Option<[u32; 4]>, flat: u32) -> u32 {
     ((sel & 0xFFFF) << 16) | (at & 0xFFFF)
 }
 
-/// A 16:16 pointer into the file's buffer, in any of its tiles, as a
-/// flat one.
+/// A 16:16 pointer into the file's buffer, in any of its tiles or just
+/// past its last one (the selector after them at offset 0), as a flat
+/// one: the bounds `mmio_to16` gives pointers in.
 fn mmio_to32(cpu: &Cpu, buffer: Option<[u32; 4]>, segptr: u32) -> u32 {
     if let Some([_, seg, base, _]) = buffer {
         let step = ((segptr >> 16) as u16).wrapping_sub((seg >> 16) as u16);
-        let tile = u32::from(step / super::ldt::AHINCR);
-        if step % super::ldt::AHINCR == 0 && tile <= mmio_tiles(cpu, seg) {
-            return (base + (tile << 16) + (segptr & 0xFFFF)).wrapping_sub(seg & 0xFFFF);
+        let at = (u32::from(step / super::ldt::AHINCR) << 16) | (segptr & 0xFFFF);
+        if step % super::ldt::AHINCR == 0 && at <= mmio_tiles(cpu, seg) << 16 {
+            return base.wrapping_add(at).wrapping_sub(seg & 0xFFFF);
         }
     }
     super::linear(cpu, segptr)
