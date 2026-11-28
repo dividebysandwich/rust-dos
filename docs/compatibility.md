@@ -19,6 +19,11 @@ ways:
   started from it runs with the profile's settings, and Rust-DOS doesn't
   ask the almanac for it.
 
+A report can also be sent from the host's command line, without starting
+the emulator: `rust-dos report` sends the settings a configuration or a
+game profile would start the game with
+([Reporting a game to the almanac](../CONFIGURATION.md#reporting-a-game-to-the-almanac)).
+
 Rust-DOS finds a game in the almanac by the name, size and checksums of the
 program file started last: at its prompt, or on the built-in Windows from
 Explorer, a game's launcher or its autorun. `almanac_auto` takes the
