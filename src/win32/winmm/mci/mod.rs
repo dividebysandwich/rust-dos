@@ -244,6 +244,8 @@ pub struct Parms {
     pub window_text: String,
     pub rect: [i32; 4],
     pub hdc: u32,
+    /// MCI_SETVIDEO's value (MCI_DGV_SETVIDEO_VALUE), for its `item`.
+    pub value: u32,
     /// Whether a digitalvideo device opens without a window: the device
     /// of a DirectShow graph whose pictures go to the program's own
     /// renderer (dshow/filter.rs), which plays only the sound.
@@ -869,7 +871,7 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let size: u32 = match msg {
         MCI_OPEN | MCI_SYSINFO => 20,
         video::MCI_UPDATE => 24,
-        MCI_STATUS | video::MCI_WINDOW => 16,
+        MCI_STATUS | video::MCI_WINDOW | video::MCI_SETVIDEO | video::MCI_SETAUDIO => 16,
         MCI_PLAY | MCI_GETDEVCAPS | MCI_INFO => 12,
         MCI_SET | video::MCI_PUT | video::MCI_WHERE => 20,
         MCI_SEEK | MCI_STEP => 8,
@@ -952,6 +954,12 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             p.track = r(cpu, 12);
         }
         MCI_GETDEVCAPS => p.item = r(cpu, 8),
+        // MCI_DGV_SETVIDEO_PARMS's and MCI_DGV_SETAUDIO_PARMS's item and
+        // value.
+        video::MCI_SETVIDEO | video::MCI_SETAUDIO => {
+            p.item = r(cpu, 4);
+            p.value = r(cpu, 8);
+        }
         MCI_SYSINFO => {
             p.number = r(cpu, 12);
             p.dev_type = r(cpu, 16);
