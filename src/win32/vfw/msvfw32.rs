@@ -1026,9 +1026,12 @@ thread_local! {
     /// A film's frames go to one DIB, whose colours stay from frame to
     /// frame, and a table takes 4096 times as many sums as there are
     /// colours: about a million for 256.
-    static NEAREST: std::cell::RefCell<(Vec<[u8; 3]>, std::rc::Rc<[u8]>)> =
+    static NEAREST: std::cell::RefCell<Nearest> =
         std::cell::RefCell::new((Vec::new(), std::rc::Rc::from([0; 4096])));
 }
+
+/// Colours, and the table of the nearest of them (`nearest_table`).
+type Nearest = (Vec<[u8; 3]>, std::rc::Rc<[u8]>);
 
 /// For each colour of 4 bits a channel (red, green and blue, from the
 /// high bits), the index of the nearest of `colours` to the colour each
