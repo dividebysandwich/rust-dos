@@ -53,6 +53,8 @@ crate::state_enum!(crate::config::DesktopDepth {
     crate::config::DesktopDepth::Adapter,
     crate::config::DesktopDepth::Palette,
     crate::config::DesktopDepth::HighColor,
+    crate::config::DesktopDepth::TrueColor24,
+    crate::config::DesktopDepth::TrueColor32,
 });
 
 crate::state_enum!(crate::config::DesktopSize {
