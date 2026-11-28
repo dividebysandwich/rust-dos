@@ -154,7 +154,7 @@ crate::state_fields!(OleTask {
 
 /// The W32 state version that first saves the in-process servers a
 /// task loaded (`OleTask::libraries`).
-pub const SERVERS_SAVED: u16 = 118;
+pub const SERVERS_SAVED: u16 = 119;
 
 /// A class object CoRegisterClassObject registered.
 #[derive(Clone, Debug, Default)]
