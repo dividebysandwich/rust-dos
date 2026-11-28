@@ -595,6 +595,7 @@ impl Win32 {
             desktop: self.desktop,
             locale: self.locale,
             shims: self.shims,
+            outlines: std::mem::take(&mut self.outlines),
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
             trace3d: self.trace3d.take(),

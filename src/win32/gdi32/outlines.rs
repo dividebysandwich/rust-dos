@@ -327,8 +327,9 @@ mod tests {
 
     /// `auto` reads the emulated C:'s C:\WINDOWS\FONTS, and in a
     /// deterministic run nothing of the host's: the fonts C: lacks are
-    /// Liberation's. A machine without settings, as the tests make them,
-    /// draws with Liberation whatever C: has, and so does `liberation`.
+    /// Liberation's. The setting outlasts the end of a program. A machine
+    /// without settings, as the tests make them, draws with Liberation
+    /// whatever C: has, and so does `liberation`.
     #[test]
     fn auto_reads_c_and_a_deterministic_run_not_the_host() {
         let arial = sample("Arial", false);
@@ -343,6 +344,9 @@ mod tests {
         for style in 1..12 {
             assert_eq!(of(&mut cpu, style).unwrap().id, 0, "{style}");
         }
+        // The setting and the fonts read outlast the programs.
+        cpu.bus.win32.reset();
+        assert_eq!(of(&mut cpu, 0).unwrap().id, drawn.id);
         cpu.bus.win32.outlines.set(&Win32Fonts::Liberation);
         assert_eq!(of(&mut cpu, 0).unwrap().id, 0);
         let _ = std::fs::remove_dir_all(&c);
