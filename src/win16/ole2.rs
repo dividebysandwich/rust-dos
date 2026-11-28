@@ -221,13 +221,13 @@ pub static COMPOBJ: Def = Def {
             co_register_class_object,
         ),
         rust("CoRevokeClassObject", 6, "l", co_revoke_class_object),
-        rust("CoGetClassObject", 7, "pllll", co_get_class_object),
+        rust("CoGetClassObject", 7, "lllll", co_get_class_object),
         missing("CoMarshalInterface", 8),
         missing("CoUnmarshalInterface", 9),
         missing("CoLoadLibrary", 10),
         missing("CoFreeLibrary", 11),
         missing("CoFreeAllLibraries", 12),
-        rust("CoCreateInstance", 13, "pllll", co_create_instance),
+        rust("CoCreateInstance", 13, "lllll", co_create_instance),
         rust("StringFromIID", 14, "pl", string_from_clsid),
         rust("CoDisconnectObject", 15, "ll", s_ok),
         missing("CoReleaseMarshalData", 16),
@@ -1201,12 +1201,11 @@ fn registered(cpu: &mut Cpu, clsid: u32) -> Option<u32> {
 }
 
 /// CoGetClassObject(rclsid, dwClsContext, pvReserved, riid, ppv): the
-/// class object registered in this process, asked for the interface.
-/// The built-in Windows starts no server for a class, so one not
-/// registered is REGDB_E_CLASSNOTREG. `riid` and `ppv` come as 16:16
-/// pointers, which the method gets.
+/// class object registered in this process, asked for the interface,
+/// else that of the class's in-process server (`server`). The pointers
+/// come as 16:16 ones, which the method and the server get.
 fn co_get_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [clsid, _context, _reserved, riid, out] = args[..] else {
+    let [clsid, context, _reserved, riid, out] = args[..] else {
         unreachable!()
     };
     let at = super::linear(cpu, out);
@@ -1214,18 +1213,20 @@ fn co_get_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     }
     super::write_32(cpu, at, 0);
-    match registered(cpu, clsid) {
+    let clsid_at = super::linear(cpu, clsid);
+    match registered(cpu, clsid_at) {
         Some(unk) => call_method(cpu, unk, 0, &[riid, out], "ll", None),
-        None => Some(REGDB_E_CLASSNOTREG),
+        None => server(cpu, clsid, context, Server::Object { riid, out }),
     }
 }
 
 /// CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv): an
-/// object of a class registered in this process, made by its class
-/// object's IClassFactory::CreateInstance (the object registered is the
-/// class factory, as CoRegisterClassObject's callers register it).
+/// object of the class, made by its class object's
+/// IClassFactory::CreateInstance: the object registered in this process
+/// (the class factory, as CoRegisterClassObject's callers register it),
+/// else the in-process server's.
 fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [clsid, outer, _context, riid, out] = args[..] else {
+    let [clsid, outer, context, riid, out] = args[..] else {
         unreachable!()
     };
     let at = super::linear(cpu, out);
@@ -1233,10 +1234,179 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     }
     super::write_32(cpu, at, 0);
-    match registered(cpu, clsid) {
+    let clsid_at = super::linear(cpu, clsid);
+    match registered(cpu, clsid_at) {
         Some(factory) => call_method(cpu, factory, 3, &[outer, riid, out], "lll", None),
-        None => Some(REGDB_E_CLASSNOTREG),
+        None => server(cpu, clsid, context, Server::Instance { outer, riid, out }),
     }
+}
+
+// In-process servers.
+
+const CLSCTX_INPROC_SERVER: u32 = 1;
+const CLSCTX_INPROC_HANDLER: u32 = 2;
+const CO_E_DLLNOTFOUND: u32 = 0x8004_01F8;
+const CO_E_ERRORINDLL: u32 = 0x8004_01F9;
+
+/// What a call wants of a class's server: its class object's interface
+/// `riid` at `out` (CoGetClassObject), or an object made by its class
+/// factory (CoCreateInstance). The pointers are 16:16.
+enum Server {
+    Object { riid: u32, out: u32 },
+    Instance { outer: u32, riid: u32, out: u32 },
+}
+
+/// The steps of a call to a server, the first dword of a THEN_OLE_SERVER
+/// frame's data: the libraries' entry points run, then DllGetClassObject,
+/// then for CoCreateInstance the factory's CreateInstance and Release
+/// (`then_method` calls Release).
+const STEP_INITS: u32 = 0;
+const STEP_FACTORY: u32 = 1;
+
+/// The class `clsid` (16:16) from its in-process server, as OLE 2's
+/// COMPOBJ gets it: the DLL that HKEY_CLASSES_ROOT\CLSID\{clsid}'s
+/// `InprocServer` (for CLSCTX_INPROC_SERVER) or `InprocHandler` (for
+/// CLSCTX_INPROC_HANDLER) names is loaded where LoadLibrary looks for
+/// it, its entry point runs, and its exported DllGetClassObject(rclsid,
+/// riid, ppv) gives the class object. The DLL stays loaded, as
+/// CoFreeUnusedLibraries frees nothing here.
+fn server(cpu: &mut Cpu, clsid: u32, context: u32, want: Server) -> Option<u32> {
+    let text = guid_text(&read_guid(cpu, super::linear(cpu, clsid)));
+    let path = [
+        (CLSCTX_INPROC_SERVER, "InprocServer"),
+        (CLSCTX_INPROC_HANDLER, "InprocHandler"),
+    ]
+    .into_iter()
+    .filter(|&(flag, _)| context & flag != 0)
+    .find_map(|(_, key)| {
+        let key = format!("CLSID\\{text}\\{key}");
+        crate::win32::registry::string_value(cpu, HKEY_CLASSES_ROOT, &key, "")
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+    });
+    let Some(path) = path else {
+        return Some(REGDB_E_CLASSNOTREG);
+    };
+    let dir = super::module::task_dir(cpu);
+    let mut inits = Vec::new();
+    let index = match super::module::load(cpu, &path, &dir, &mut inits) {
+        Ok(i) => i,
+        Err(e) => {
+            cpu.bus.log_string(&format!(
+                "[W16] COMPOBJ: the server of {text}, {path}: {}",
+                e.message
+            ));
+            return Some(CO_E_DLLNOTFOUND);
+        }
+    };
+    let handle = cpu.bus.win32.win16.modules[index].handle as u32;
+    let mut data = vec![STEP_INITS, handle, clsid];
+    match want {
+        Server::Object { riid, out } => data.extend([0, 0, riid, out]),
+        Server::Instance { outer, riid, out } => data.extend([1, outer, riid, out]),
+    }
+    data.extend(
+        inits
+            .iter()
+            .map(|&i| cpu.bus.win32.win16.modules[i].handle as u32),
+    );
+    // A value given back at once is the caller's DX:AX, as `dx_ax`
+    // leaves it for a `then`.
+    let mut ctx = Context::of(cpu);
+    then_server(cpu, 0, &data, &mut ctx)
+        .map(|ax| (ctx.gpr[thunk::EDX] & 0xFFFF) << 16 | ax & 0xFFFF)
+}
+
+/// The next step of a call to a server (`server`), `value` what the last
+/// one returned. `data` is the step, then for STEP_INITS the module, the
+/// class, whether an instance is made, CreateInstance's outer object,
+/// the interface and where it goes, and the libraries whose entry points
+/// are still to run; for STEP_FACTORY the block that holds the factory,
+/// then the outer object, interface and place.
+pub(super) fn then_server(
+    cpu: &mut Cpu,
+    value: u32,
+    data: &[u32],
+    ctx: &mut Context,
+) -> Option<u32> {
+    match data[0] {
+        STEP_INITS => {
+            let [_, module, clsid, instance, outer, riid, out] = data[..7] else {
+                unreachable!()
+            };
+            if let Some((&init, rest)) = data[7..].split_first() {
+                let mut more = data[..7].to_vec();
+                more.extend_from_slice(rest);
+                super::task::call_lib_init(cpu, init as u16, *ctx, thunk::THEN_OLE_SERVER, more);
+                return None;
+            }
+            let module = module as u16;
+            let entry = super::module::ordinal_of(cpu, module, "DllGetClassObject")
+                .map_or(0, |o| super::module::entry_point(cpu, module, o));
+            if entry == 0 {
+                cpu.bus.log_string(&format!(
+                    "[W16] COMPOBJ: module {module:04X} has no DllGetClassObject"
+                ));
+                return dx_ax(ctx, CO_E_ERRORINDLL);
+            }
+            if instance == 0 {
+                // DllGetClassObject's value goes to the caller.
+                let words = pascal(&[clsid, riid, out]);
+                thunk::call16(
+                    cpu,
+                    entry,
+                    &words,
+                    0,
+                    *ctx,
+                    thunk::THEN_OLE_METHOD,
+                    vec![0, 0],
+                );
+                return None;
+            }
+            // The factory goes to a block of COMPOBJ's, with
+            // IID_IClassFactory after it to ask for.
+            let block = alloc(cpu, 20);
+            let at = super::linear(cpu, block);
+            if at == 0 {
+                return dx_ax(ctx, E_OUTOFMEMORY);
+            }
+            super::write_32(cpu, at, 0);
+            super::poke(cpu, at + 4, &ole_guid(1));
+            let words = pascal(&[clsid, block + 4, block]);
+            let more = vec![STEP_FACTORY, block, outer, riid, out];
+            thunk::call16(cpu, entry, &words, 0, *ctx, thunk::THEN_OLE_SERVER, more);
+            None
+        }
+        STEP_FACTORY => {
+            let [_, block, outer, riid, out] = data[..] else {
+                unreachable!()
+            };
+            let factory = super::read_32(cpu, super::linear(cpu, block));
+            free(cpu, block);
+            if value != S_OK || factory == 0 {
+                return dx_ax(ctx, if value == S_OK { E_NOINTERFACE } else { value });
+            }
+            // CreateInstance(this, outer, riid, ppv), as C calls it; then
+            // the factory's Release, and CreateInstance's value goes to
+            // the caller.
+            let target = method_address(cpu, factory, 3);
+            let mut words = pascal(&[out, riid, outer]);
+            words.extend([(factory >> 16) as u16, factory as u16]);
+            let more = vec![0, 0, factory, 2];
+            thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_METHOD, more);
+            None
+        }
+        _ => unreachable!("a step of a call to a server"),
+    }
+}
+
+/// The words of a Pascal call with the dwords `args`: the first one
+/// first, a dword's high word before its low one. A C call's are these
+/// of its arguments in reverse.
+fn pascal(args: &[u32]) -> Vec<u16> {
+    args.iter()
+        .flat_map(|&a| [(a >> 16) as u16, a as u16])
+        .collect()
 }
 
 /// CoRegisterMessageFilter(lpMessageFilter, lplpMessageFilter): the

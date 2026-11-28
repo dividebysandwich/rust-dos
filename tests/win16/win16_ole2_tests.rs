@@ -1226,3 +1226,175 @@ fn storage_names_take_the_programs_allocator() {
     });
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }
+
+const CO_GET_CLASS_OBJECT: u16 = 7; // COMPOBJ
+const CO_CREATE_INSTANCE: u16 = 13;
+const REG_SET_VALUE: u16 = 5; // SHELL
+
+/// Where the program keeps things for the in-process server: the class,
+/// IID_IUnknown, the object the server makes (its vtable after it, and
+/// how many times Release was called), the registry's path and the
+/// server's name, and a second place for an interface.
+const CLSID: u16 = 0x40;
+const IID: u16 = 0x50;
+const SERVED: u16 = 0x60;
+const SERVED_VTABLE: u16 = 0x64;
+const RELEASES: u16 = 0x74;
+const KEY_PATH: u16 = 0x80;
+const SERVER_NAME: u16 = 0xC0;
+const OUT2: u16 = 0xD0;
+
+/// SRV.DLL, an in-process server whose DllGetClassObject (ordinal 1)
+/// makes its class object in the data segment of the class's GUID (the
+/// program's, in the test), at SERVED: an IClassFactory whose
+/// CreateInstance gives 1234:5678 and whose other methods are Release,
+/// which counts at RELEASES.
+fn server_dll() -> Vec<u8> {
+    let mut c = vec![0xB8, 0x01, 0x00, 0xCB]; // LibMain: mov ax,1; retf
+    let get_class_object = c.len() as u16;
+    // DllGetClassObject(rclsid, riid, ppv), Pascal's order.
+    c.extend([0x55, 0x8B, 0xEC]); // push bp; mov bp,sp
+    c.extend([0xC4, 0x5E, 0x0E]); // les bx,[bp+0Eh]: rclsid
+    // mov word es:[SERVED],SERVED_VTABLE; mov es:[SERVED+2],es
+    c.extend([0x26, 0xC7, 0x06, lo(SERVED), hi(SERVED)]);
+    c.extend([lo(SERVED_VTABLE), hi(SERVED_VTABLE)]);
+    c.extend([0x26, 0x8C, 0x06, lo(SERVED + 2), hi(SERVED + 2)]);
+    let mut methods = Vec::new();
+    for slot in 0..4u16 {
+        let at = SERVED_VTABLE + 4 * slot;
+        c.extend([0x26, 0xC7, 0x06, lo(at), hi(at)]);
+        methods.push(c.len());
+        c.extend([0, 0]); // the method's offset, patched below
+        c.extend([0x26, 0x8C, 0x0E, lo(at + 2), hi(at + 2)]); // mov es:[..],cs
+    }
+    c.extend([0x8C, 0xC0]); // mov ax,es
+    c.extend([0xC4, 0x5E, 0x06]); // les bx,[bp+6]: ppv
+    c.extend([0x26, 0xC7, 0x07, lo(SERVED), hi(SERVED)]); // mov word es:[bx],SERVED
+    c.extend([0x26, 0x89, 0x47, 0x02]); // mov es:[bx+2],ax
+    c.extend([0x31, 0xC0, 0x31, 0xD2]); // xor ax,ax; xor dx,dx
+    c.extend([0x5D, 0xCA, 0x0C, 0x00]); // pop bp; retf 12
+
+    // Release(this), as C calls it.
+    let release = c.len() as u16;
+    c.extend([0x55, 0x8B, 0xEC, 0xC4, 0x5E, 0x06]); // push bp; mov bp,sp; les bx,[bp+6]
+    c.extend([0x26, 0xFF, 0x47, (RELEASES - SERVED) as u8]); // inc word es:[bx+..]
+    c.extend([0x31, 0xC0, 0x31, 0xD2, 0x5D, 0xCB]); // xor ax,ax; xor dx,dx; pop bp; retf
+
+    // CreateInstance(this, pUnkOuter, riid, ppv), as C calls it.
+    let create = c.len() as u16;
+    c.extend([0x55, 0x8B, 0xEC, 0xC4, 0x5E, 0x12]); // push bp; mov bp,sp; les bx,[bp+12h]
+    c.extend([0x26, 0xC7, 0x07, 0x78, 0x56]); // mov word es:[bx],5678h
+    c.extend([0x26, 0xC7, 0x47, 0x02, 0x34, 0x12]); // mov word es:[bx+2],1234h
+    c.extend([0x31, 0xC0, 0x31, 0xD2, 0x5D, 0xCB]);
+
+    for (slot, &at) in methods.iter().enumerate() {
+        let target = if slot == 3 { create } else { release };
+        c[at..at + 2].copy_from_slice(&target.to_le_bytes());
+    }
+
+    let mut b = ne::Builder::new("SRV", ne::LIBMODULE);
+    let text = b.segment(ne::SegmentSpec {
+        data: c,
+        flags: CODE,
+        alloc: 0,
+        relocations: Vec::new(),
+    });
+    let entry = ne::Entry::Code {
+        segment: text as u8,
+        offset: get_class_object,
+        flags: ne::ENTRY_EXPORTED,
+        moveable: true,
+    };
+    b.entry(1, entry);
+    b.export("DllGetClassObject", 1, false);
+    b.entry_point(text, 0);
+    b.build()
+}
+
+/// Push the dword `value`.
+fn push_long(code: &mut Code, value: u32) {
+    code.push((value >> 16) as u16).push(value as u16);
+}
+
+/// A class registered with an `InprocServer` in HKEY_CLASSES_ROOT\CLSID
+/// and no class object in the task: CoGetClassObject loads the server
+/// from the registry's name, runs its LibMain, and gives what its
+/// DllGetClassObject gives, without releasing it. CoCreateInstance gives
+/// the object the server's class factory makes, then releases the
+/// factory. A class that isn't registered is REGDB_E_CLASSNOTREG. OLE 2's
+/// COMPOBJ starts in-process servers so; the built-in one gave
+/// REGDB_E_CLASSNOTREG for every class no task had registered, and The
+/// Magic School Bus Explores the Solar System stops at its start without
+/// the class MSPAM.DLL serves.
+#[test]
+fn an_in_process_server_gives_its_class_objects() {
+    let mut code = Code::new();
+    code.push(0).push(0).call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // {11223344-5566-7788-99AA-BBCCDDEEFF00} and IID_IUnknown.
+    let clsid = [
+        0x44, 0x33, 0x22, 0x11, 0x66, 0x55, 0x88, 0x77, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x00,
+    ];
+    let iid = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+    for i in 0..8 {
+        let word = |g: &[u8; 16]| u16::from_le_bytes([g[2 * i], g[2 * i + 1]]);
+        set(&mut code, CLSID + 2 * i as u16, word(&clsid));
+        set(&mut code, IID + 2 * i as u16, word(&iid));
+    }
+    set(&mut code, RELEASES, 0);
+
+    // RegSetValue(HKEY_CLASSES_ROOT, "CLSID\{...}\InprocServer", REG_SZ,
+    // "SRV.DLL", 7).
+    let key = b"CLSID\\{11223344-5566-7788-99AA-BBCCDDEEFF00}\\InprocServer";
+    put_text(&mut code, KEY_PATH, key);
+    put_text(&mut code, SERVER_NAME, b"SRV.DLL");
+    push_long(&mut code, 1);
+    push_ds(&mut code, KEY_PATH);
+    push_long(&mut code, 1);
+    push_ds(&mut code, SERVER_NAME);
+    push_long(&mut code, 7);
+    code.call("SHELL", REG_SET_VALUE);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // CoGetClassObject(&CLSID, CLSCTX_INPROC_SERVER, NULL, &IID, &OUT).
+    push_ds(&mut code, CLSID);
+    push_long(&mut code, 1);
+    push_long(&mut code, 0);
+    push_ds(&mut code, IID);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_GET_CLASS_OBJECT);
+    expect_dx_ax(&mut code, 0, 3);
+    expect(&mut code, OUT, SERVED, 4);
+    expect(&mut code, RELEASES, 0, 5);
+
+    // CoCreateInstance(&CLSID, NULL, CLSCTX_INPROC_SERVER, &IID, &OUT2).
+    push_ds(&mut code, CLSID);
+    push_long(&mut code, 0);
+    push_long(&mut code, 1);
+    push_ds(&mut code, IID);
+    push_ds(&mut code, OUT2);
+    code.call("COMPOBJ", CO_CREATE_INSTANCE);
+    expect_dx_ax(&mut code, 0, 6);
+    expect(&mut code, OUT2, 0x5678, 7);
+    expect(&mut code, OUT2 + 2, 0x1234, 8);
+    expect(&mut code, RELEASES, 1, 9);
+
+    // A class with no server: {11223345-...}.
+    set(&mut code, CLSID, 0x3345);
+    push_ds(&mut code, CLSID);
+    push_long(&mut code, 1);
+    push_long(&mut code, 0);
+    push_ds(&mut code, IID);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", CO_GET_CLASS_OBJECT);
+    expect_dx_ax(&mut code, 0x8004_0154, 10);
+
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = win16::run_with("ole2_inproc_server", program(&code, CODE), |_, d| {
+        std::fs::write(d.join("SRV.DLL"), server_dll()).unwrap();
+    });
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+    assert!(log.contains("Loaded SRV"), "{log}");
+}
