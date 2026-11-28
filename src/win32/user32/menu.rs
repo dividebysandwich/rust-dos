@@ -1999,6 +1999,26 @@ const L_MEASURE: u32 = 0x100;
 /// MEASUREITEMSTRUCT or DRAWITEMSTRUCT of an owner-drawn item.
 const MSG_SCRATCH: u32 = 32;
 const ITEM_SCRATCH: u32 = 48;
+/// The sizes of MEASUREITEMSTRUCT and DRAWITEMSTRUCT.
+const MEASURE_SIZE: u32 = 24;
+const DRAW_SIZE: u32 = 48;
+
+/// Where an owner-drawn item's structure of `size` bytes goes in
+/// tracking's `room` bytes of scratch space at `scratch`: after the MSG.
+/// Tracking that a state older than `OWNER_DRAWN` saved has the MSG's 32
+/// bytes only, with the caller's return address and arguments right
+/// above them. Its MEASUREITEMSTRUCT goes over the MSG, which tracking
+/// has read by then and GetMessageA fills again, and its DRAWITEMSTRUCT
+/// has no room: None.
+fn item_struct_at(room: u32, scratch: u32, size: u32) -> Option<u32> {
+    if room >= MSG_SCRATCH + size {
+        Some(scratch + MSG_SCRATCH)
+    } else if room >= size {
+        Some(scratch)
+    } else {
+        None
+    }
+}
 
 /// Owner-drawn items: ODT_MENU, and DRAWITEMSTRUCT's action and states.
 const ODT_MENU: u32 = 1;
@@ -2044,6 +2064,11 @@ struct Track {
     /// The owner-drawn item WM_DRAWITEM is drawing: its menu, its place,
     /// the DC lent for it and the menu font selected in that.
     drawing: [u32; 4],
+    /// The bytes of scratch space the task has, from its start to the
+    /// caller's return address: MSG_SCRATCH + ITEM_SCRATCH, or the MSG's
+    /// only in tracking a state older than `OWNER_DRAWN` saved. Not
+    /// saved: each step takes it from the task.
+    room: u32,
 }
 
 impl Track {
@@ -2109,6 +2134,7 @@ impl Track {
             destroy,
             sends,
             drawing,
+            room: 0,
         }
     }
 
@@ -2980,13 +3006,13 @@ fn owner_drawn_from(state: &State, h: u32, from: u32) -> Option<u32> {
 /// menu `lv`, which is being measured (L_MEASURE): WM_MEASUREITEM with
 /// a MEASUREITEMSTRUCT in the scratch space. None when all are measured.
 fn measure_next(cpu: &mut Cpu, tr: &mut Track, lv: usize, scratch: u32) -> Option<Next> {
+    let at = item_struct_at(tr.room, scratch, MEASURE_SIZE)?;
     let l = tr.levels[lv];
     let i = owner_drawn_from(user(cpu), l.menu, l.state - L_MEASURE)?;
     let (id, data) = item(user(cpu), (l.menu, i as usize)).map(|it| (it.id, it.data))?;
     // Windows 98 starts the height as the menu font's (13 for 8-point
     // MS Sans Serif), where NT starts it as the dialog base unit's.
     let height = menu_font_height(cpu) as u32;
-    let at = scratch + MSG_SCRATCH;
     for (k, v) in [ODT_MENU, 0, id, 0, height, data].into_iter().enumerate() {
         cpu.bus.guest_write_32(at + 4 * k as u32, v);
     }
@@ -3016,7 +3042,9 @@ fn measured(cpu: &mut Cpu, tr: &Track, scratch: u32) {
     let Some(l) = tr.levels.iter().find(|l| l.state > L_MEASURE) else {
         return;
     };
-    let at = scratch + MSG_SCRATCH;
+    let Some(at) = item_struct_at(tr.room, scratch, MEASURE_SIZE) else {
+        return;
+    };
     let width = cpu.bus.guest_read_32(at + 12) as i32;
     let height = cpu.bus.guest_read_32(at + 16) as i32;
     let pos = (l.menu, (l.state - L_MEASURE - 1) as usize);
@@ -3032,6 +3060,16 @@ fn measured(cpu: &mut Cpu, tr: &Track, scratch: u32) {
 /// area, inside the 3-pixel edge, where rcItem is. None when no item
 /// waits.
 fn next_owner_draw(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Option<Next> {
+    let Some(at) = item_struct_at(tr.room, scratch, DRAW_SIZE) else {
+        // No room to draw them in: the items waiting are dropped, so
+        // that none is drawn late when the menu shows next.
+        for l in &tr.levels {
+            if let Some(m) = get_mut(user(cpu), l.menu) {
+                m.od_queue.clear();
+            }
+        }
+        return None;
+    };
     for l in tr.levels.clone() {
         if l.hwnd == 0 || l.state != L_SHOWN {
             continue;
@@ -3096,7 +3134,6 @@ fn next_owner_draw(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Option<Next> 
             r.bottom as u32,
             it.data,
         ];
-        let at = scratch + MSG_SCRATCH;
         for (k, v) in words.into_iter().enumerate() {
             cpu.bus.guest_write_32(at + 4 * k as u32, v);
         }
@@ -3163,6 +3200,9 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         };
     }
     let mut tr = Track::decode(t.vars.get(1..).unwrap_or(&[]));
+    if t.scratch != 0 {
+        tr.room = t.resume.1.wrapping_sub(t.scratch);
+    }
     let next = match t.step {
         S_CREATED => {
             if let Some(lv) = tr.levels.iter().position(|l| l.state == L_SHOW) {
@@ -3297,5 +3337,48 @@ mod tests {
         assert_eq!(rect(3), Rect::new(3, 46, 128, 63), "Exit");
         assert_eq!(item(state, (h, 1)).unwrap().tab + 24, 106, "Ctrl+S");
         assert_eq!(text_x(), 22);
+    }
+
+    /// Tracking from a state older than `OWNER_DRAWN` has scratch space
+    /// for the MSG only: it measures an owner-drawn item over the MSG,
+    /// and draws none, as a DRAWITEMSTRUCT would overwrite the caller's
+    /// return address above the MSG (#1630). Tracking started since
+    /// keeps both after the MSG.
+    #[test]
+    fn owner_drawn_structures_fit_the_scratch_space() {
+        let new = MSG_SCRATCH + ITEM_SCRATCH;
+        let at = |room, size| item_struct_at(room, 0x1000, size);
+        assert_eq!(at(new, MEASURE_SIZE), Some(0x1000 + MSG_SCRATCH));
+        assert_eq!(at(new, DRAW_SIZE), Some(0x1000 + MSG_SCRATCH));
+        assert_eq!(at(MSG_SCRATCH, MEASURE_SIZE), Some(0x1000));
+        assert_eq!(at(MSG_SCRATCH, DRAW_SIZE), None);
+    }
+
+    /// Tracking with no room for a DRAWITEMSTRUCT drops the items waiting
+    /// to be drawn and sends no WM_DRAWITEM (#1630).
+    #[test]
+    fn tracking_without_item_room_sends_no_owner_draw_messages() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        let h = new_menu(user(&mut cpu), MF_POPUP, 0);
+        let info = info_of(MF_OWNERDRAW, 1, 0, None);
+        insert_item(&mut cpu, h, NONE, MF_BYPOSITION, &info);
+        if let Some(m) = get_mut(user(&mut cpu), h) {
+            *m.od_queue = vec![(0, ODA_SELECT)];
+        }
+        let mut tr = Track {
+            owner: 1,
+            mode: M_POPUP,
+            levels: vec![Level {
+                menu: h,
+                hwnd: 2,
+                state: L_SHOWN,
+                first: 0,
+            }],
+            room: MSG_SCRATCH,
+            ..Track::default()
+        };
+        assert!(next_owner_draw(&mut cpu, &mut tr, 0x1000).is_none());
+        assert!(get(user(&mut cpu), h).unwrap().od_queue.is_empty());
     }
 }

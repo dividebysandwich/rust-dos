@@ -1242,8 +1242,9 @@ counts what the OpenGL renderer costs and misses:
   the shader `programs` compiled and `failed_programs`, the
   `surfaces` and `textures` it holds, the `framebuffers` it keeps for
   its draws, clears and read-backs, `framebuffers_made` (each asked
-  once whether it is complete), and `packed_565` (whether 16-bit
-  targets are the GPU's 5-6-5 format).
+  once whether it is complete), `flushes` (runs of the card's commands
+  whose work went to the GPU at the run's end), and `packed_565`
+  (whether 16-bit targets are the GPU's 5-6-5 format).
 
 A run with `--deterministic` draws the card in software, so that its
 pictures are the same on every host. To compare the two renderers at
@@ -1371,6 +1372,11 @@ the software rasterizer's. A game that detects no card usually left
   `copy_from_depth`, a depth fill for a `colour_hot` buffer, and
   `no_layout`, `no_colour_buffer`, `renderer` or `blit_refused` where
   OpenGL couldn't take it.
+- **2D on the CPU:** `banshee.plain_copy_pixels` counts the pixels the
+  2D engine copied in the card's memory as plain copies (ROP CCh, no
+  colour key or transparent mono pattern, source and destination in one
+  format of 8, 16 or 32 bits), which it copies a run at a time instead
+  of through the raster operation for each pixel.
 - **Memory:** `/api/mem` reads the card's window (`phys:D0000000`, 16 MB):
   registers at +0, the frame buffer at +400000h (2048 bytes a row of
   16-bit pixels), texture memory at +800000h (write-only; reads give FFh).

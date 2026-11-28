@@ -710,3 +710,168 @@ fn local_walk_lists_the_heaps_blocks() {
     let (status, log) = run("toolhelp_local_walk", program(&code, CODE));
     assert_eq!(status, 0, "check {status} failed:\n{log}");
 }
+
+/// KERNEL's and TOOLHELP's ordinals the notification test calls.
+const YIELD: u16 = 29;
+const MAKE_PROC_INSTANCE: u16 = 51;
+const WIN_EXEC: u16 = 166;
+const NOTIFY_REGISTER: u16 = 73;
+const NOTIFY_UNREGISTER: u16 = 74;
+
+/// Where the notification test keeps what it learns: the events seen so
+/// far, the child's instance and module, the result the callback sets
+/// (FFh until it does), the callback's MakeProcInstance address, and a
+/// TASKENTRY.
+const SEEN: u16 = 0x10;
+const CHILD_INSTANCE: u16 = 0x12;
+const RESULT: u16 = 0x14;
+const CHILD_MODULE: u16 = 0x16;
+const PROC: u16 = 0x18;
+const TASK_ENTRY: u16 = 0x40;
+
+/// Emit the jump `op` (a short one) to a place given later: its
+/// operand's place, for `land`.
+fn jump(code: &mut Code, op: u8) -> usize {
+    code.emit(&[op, 0]);
+    code.bytes.len() - 1
+}
+
+/// The short jump whose operand is at `at` goes here.
+fn land(code: &mut Code, at: usize) {
+    let distance = code.bytes.len() - (at + 1);
+    assert!(distance < 0x80, "a short jump of {distance} bytes");
+    code.bytes[at] = distance as u8;
+}
+
+/// `mov byte [RESULT],value` and a short jump to a place given later.
+fn result_and_jump(code: &mut Code, value: u8) -> usize {
+    code.emit(&[0xC6, 0x06, lo(RESULT), hi(RESULT), value]);
+    jump(code, 0xEB)
+}
+
+#[test]
+fn notify_register_tells_a_task_end_in_the_ending_task() {
+    // Sierra's setup (Outpost 1.5) starts a copy of itself and waits for
+    // it with a TOOLHELP callback: on NFY_EXITTASK (5) it compares the
+    // instance TaskFindHandle gives for GetCurrentTask with the one
+    // WinExec gave. Windows 95 calls the callbacks as the task ends, in
+    // its context, with NFY_EXITTASK (the exit code in dwData) and then
+    // NFY_DELMODULE (6, the module's handle) for its module, as a probe
+    // program run on it showed.
+    //
+    // The program registers a callback (through MakeProcInstance, which
+    // gives it its data segment in AX) and starts CHILD, which yields
+    // and ends with 37h. The callback checks the events, their order and
+    // data, and the current task, and sets RESULT; the program waits
+    // for it and ends with it.
+    let mut code = Code::new();
+    set(&mut code, RESULT, 0xFF);
+    set(&mut code, SEEN, 0);
+    set(&mut code, TASK_ENTRY, 0x28);
+    set(&mut code, TASK_ENTRY + 2, 0);
+    let callback_at = code.here() + 2;
+    code.push_far(0).push(0).call("KERNEL", MAKE_PROC_INSTANCE);
+    code.emit(&[0xA3, lo(PROC), hi(PROC)]) // mov [PROC],ax
+        .emit(&[0x89, 0x16, lo(PROC + 2), hi(PROC + 2)]); // mov [PROC+2],dx
+    code.push(0)
+        .emit(&[0x52, 0x50]) // push dx; push ax
+        .push(0)
+        .call("TOOLHELP", NOTIFY_REGISTER);
+    expect_ax(&mut code, 1, 7);
+    // A second registration of the same callback for the task is refused
+    // (FALSE on Windows 95), and the first stays.
+    code.push(0)
+        .emit(&[0xFF, 0x36, lo(PROC + 2), hi(PROC + 2)]) // push word [PROC+2]
+        .emit(&[0xFF, 0x36, lo(PROC), hi(PROC)]) // push word [PROC]
+        .push(0)
+        .call("TOOLHELP", NOTIFY_REGISTER);
+    expect_ax(&mut code, 0, 8);
+    let path_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    store_ax(&mut code, CHILD_INSTANCE);
+    let name_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE);
+    store_ax(&mut code, CHILD_MODULE);
+    // Wait for RESULT, a hundred turns at most.
+    code.emit(&[0xBE, 100, 0]); // mov si,100
+    let wait = code.here();
+    code.emit(&[0x80, 0x3E, lo(RESULT), hi(RESULT), 0xFF]); // cmp byte [RESULT],FFh
+    let done = jump(&mut code, 0x75); // jne done
+    code.call("KERNEL", YIELD).emit(&[0x4E]); // dec si
+    let back = wait as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x75, back as i8 as u8]); // jnz wait
+    code.emit(&[0xB0, 9]).exit_al();
+    land(&mut code, done);
+    // The callback goes with NotifyUnregister, once.
+    code.push(0).call("TOOLHELP", NOTIFY_UNREGISTER);
+    expect_ax(&mut code, 1, 5);
+    code.push(0).call("TOOLHELP", NOTIFY_UNREGISTER);
+    expect_ax(&mut code, 0, 6);
+    code.emit(&[0xA0, lo(RESULT), hi(RESULT)]).exit_al(); // mov al,[RESULT]
+
+    // BOOL CALLBACK f(WORD wID, DWORD dwData): wID at [bp+0Ah], dwData
+    // at [bp+6].
+    let callback = code.here();
+    code.emit(&[0x55, 0x8B, 0xEC, 0x1E, 0x8E, 0xD8]); // push bp; mov bp,sp; push ds; mov ds,ax
+    code.emit(&[0x8B, 0x46, 0x0A, 0x3D, 0x05, 0x00]); // mov ax,[bp+0Ah]; cmp ax,5
+    let not_exit = jump(&mut code, 0x75);
+    // NFY_EXITTASK: the exit code, and nothing seen before.
+    code.emit(&[0x83, 0x7E, 0x06, 0x37]); // cmp word [bp+6],37h
+    let fail1 = jump(&mut code, 0x75);
+    code.emit(&[0x83, 0x3E, lo(SEEN), hi(SEEN), 0x00]); // cmp word [SEEN],0
+    let fail2 = jump(&mut code, 0x75);
+    set(&mut code, SEEN, 1);
+    let ret1 = jump(&mut code, 0xEB);
+    land(&mut code, not_exit);
+    code.emit(&[0x3D, 0x06, 0x00]); // cmp ax,6
+    let ret2 = jump(&mut code, 0x75);
+    // NFY_DELMODULE: after NFY_EXITTASK, CHILD's module, and CHILD the
+    // current task.
+    code.emit(&[0x83, 0x3E, lo(SEEN), hi(SEEN), 0x01]); // cmp word [SEEN],1
+    let fail2b = jump(&mut code, 0x75);
+    code.emit(&[0x8B, 0x46, 0x06]) // mov ax,[bp+6]
+        .emit(&[0x3B, 0x06, lo(CHILD_MODULE), hi(CHILD_MODULE)]); // cmp ax,[CHILD_MODULE]
+    let fail4 = jump(&mut code, 0x75);
+    code.call("KERNEL", GET_CURRENT_TASK);
+    code.emit(&[0x1E]).push(TASK_ENTRY).emit(&[0x50]); // push ds; push TASK_ENTRY; push ax
+    code.call("TOOLHELP", TASK_FIND_HANDLE);
+    code.emit(&[0xA1, lo(TASK_ENTRY + 8), hi(TASK_ENTRY + 8)]) // mov ax,[hInst]
+        .emit(&[0x3B, 0x06, lo(CHILD_INSTANCE), hi(CHILD_INSTANCE)]); // cmp ax,[CHILD_INSTANCE]
+    let fail3 = jump(&mut code, 0x75);
+    let ret3 = result_and_jump(&mut code, 0);
+    land(&mut code, fail1);
+    let ret4 = result_and_jump(&mut code, 1);
+    land(&mut code, fail2);
+    land(&mut code, fail2b);
+    let ret5 = result_and_jump(&mut code, 2);
+    land(&mut code, fail3);
+    let ret6 = result_and_jump(&mut code, 3);
+    land(&mut code, fail4);
+    code.emit(&[0xC6, 0x06, lo(RESULT), hi(RESULT), 4]);
+    for at in [ret1, ret2, ret3, ret4, ret5, ret6] {
+        land(&mut code, at);
+    }
+    code.emit(&[0x31, 0xC0, 0x1F, 0x5D, 0xCA, 0x06, 0x00]); // xor ax,ax; pop ds; pop bp; retf 6
+
+    let path = code.here();
+    code.emit(b"C:\\CHILD.EXE\0");
+    let name = code.here();
+    code.emit(b"CHILD\0");
+    code.patch(callback_at, callback);
+    code.patch(path_at, path);
+    code.patch(name_at, name);
+
+    let mut child = Code::new();
+    child.emit(&[0xBE, 0x03, 0x00]); // mov si,3
+    let again = child.here();
+    child.call("KERNEL", YIELD).emit(&[0x4E]); // dec si
+    let back = again as i32 - (child.here() as i32 + 2);
+    child.emit(&[0x75, back as i8 as u8, 0xB0, 0x37]); // jnz again; mov al,37h
+    child.exit_al();
+    let child = win16::program_named("CHILD", &child, CODE);
+
+    let (status, log) = win16::run_with("toolhelp_notify", program(&code, CODE), |_, base| {
+        std::fs::write(base.join("CHILD.EXE"), child).unwrap();
+    });
+    assert_eq!(status, 0, "check {status} failed:\n{log}");
+}

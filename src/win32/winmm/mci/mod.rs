@@ -336,7 +336,7 @@ pub struct Driver16 {
 
 /// The W32 version whose states keep the 16-bit MCI drivers' devices
 /// (`Mci::drivers16`).
-pub const DRIVERS16_SAVED: u16 = 113;
+pub const DRIVERS16_SAVED: u16 = 117;
 
 /// MCI's state.
 #[derive(Clone, Debug, Default)]

@@ -23,8 +23,8 @@ use super::poll;
 use super::{
     DEVICE, DI_NOEFFECT, DI_OK, DIERR_ACQUIRED, DIERR_DEVICENOTREG, DIERR_INPUTLOST,
     DIERR_INVALIDPARAM, DIERR_NOTACQUIRED, DIERR_NOTBUFFERED, DIERR_NOTFOUND, DIERR_NOTINITIALIZED,
-    DIERR_OTHERAPPHASPRIO, DIERR_READONLY, DIERR_UNSUPPORTED, E_HANDLE, check_version, is_eight,
-    new_object, object_of, release_object, result, state, version_of,
+    DIERR_OTHERAPPHASPRIO, DIERR_READONLY, DIERR_UNSUPPORTED, E_HANDLE, check_version, interface,
+    is_eight, new_object, object_of, release_object, result, state, version_of,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::{self, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid};
@@ -39,7 +39,7 @@ const fn device_iid(d1: u32) -> Guid {
     )
 }
 
-pub const IID_IDIRECT_INPUT_DEVICE_A: Guid = device_iid(0x5944_E680);
+const IID_IDIRECT_INPUT_DEVICE_A: Guid = device_iid(0x5944_E680);
 const IID_IDIRECT_INPUT_DEVICE_2A: Guid = device_iid(0x5944_E682);
 const IID_IDIRECT_INPUT_DEVICE_7A: Guid = Guid::new(
     0x57D7_C6BC,
@@ -47,27 +47,57 @@ const IID_IDIRECT_INPUT_DEVICE_7A: Guid = Guid::new(
     0x11D3,
     [0x8E, 0x9D, 0x00, 0xC0, 0x4F, 0x68, 0x44, 0xAE],
 );
-pub const IID_IDIRECT_INPUT_DEVICE_8A: Guid = Guid::new(
+const IID_IDIRECT_INPUT_DEVICE_8A: Guid = Guid::new(
     0x54D4_1080,
     0xDC15,
     0x4833,
     [0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79],
 );
+const IID_IDIRECT_INPUT_DEVICE_W: Guid = device_iid(0x5944_E681);
+const IID_IDIRECT_INPUT_DEVICE_2W: Guid = device_iid(0x5944_E683);
+const IID_IDIRECT_INPUT_DEVICE_7W: Guid = Guid::new(
+    0x57D7_C6BD,
+    0x2356,
+    0x11D3,
+    [0x8E, 0x9D, 0x00, 0xC0, 0x4F, 0x68, 0x44, 0xAE],
+);
+const IID_IDIRECT_INPUT_DEVICE_8W: Guid = Guid::new(
+    0x54D4_1081,
+    0xDC15,
+    0x4833,
+    [0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79],
+);
 
-/// Whether `iid` is one of a device's interfaces: DirectInput 8's
-/// devices (`eight`) have IDirectInputDevice8A alone, DINPUT's the
-/// interfaces before it.
-pub fn is_device_iid(iid: &Guid, eight: bool) -> bool {
-    if eight {
-        return [com::IID_IUNKNOWN, IID_IDIRECT_INPUT_DEVICE_8A].contains(iid);
+/// Whether `iid` is one of a device's interfaces, and whether it is a
+/// Unicode one: DirectInput 8's devices (`eight`) have
+/// IDirectInputDevice8A and 8W alone, DINPUT's the interfaces before
+/// them. IUnknown is the ANSI interface.
+pub fn device_interface(iid: &Guid, eight: bool) -> Option<bool> {
+    let (ansi, wide): (&[Guid], &[Guid]) = if eight {
+        (
+            &[com::IID_IUNKNOWN, IID_IDIRECT_INPUT_DEVICE_8A],
+            &[IID_IDIRECT_INPUT_DEVICE_8W],
+        )
+    } else {
+        (
+            &[
+                com::IID_IUNKNOWN,
+                IID_IDIRECT_INPUT_DEVICE_A,
+                IID_IDIRECT_INPUT_DEVICE_2A,
+                IID_IDIRECT_INPUT_DEVICE_7A,
+            ],
+            &[
+                IID_IDIRECT_INPUT_DEVICE_W,
+                IID_IDIRECT_INPUT_DEVICE_2W,
+                IID_IDIRECT_INPUT_DEVICE_7W,
+            ],
+        )
+    };
+    if ansi.contains(iid) {
+        Some(false)
+    } else {
+        wide.contains(iid).then_some(true)
     }
-    [
-        com::IID_IUNKNOWN,
-        IID_IDIRECT_INPUT_DEVICE_A,
-        IID_IDIRECT_INPUT_DEVICE_2A,
-        IID_IDIRECT_INPUT_DEVICE_7A,
-    ]
-    .contains(iid)
 }
 
 /// SetCooperativeLevel's flags.
@@ -358,10 +388,10 @@ pub fn create_uninitialized_8(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
 }
 
 fn uninitialized(cpu: &mut Cpu, iid: &Guid, out: u32, eight: bool) -> u32 {
-    if !is_device_iid(iid, eight) {
+    let Some(wide) = device_interface(iid, eight) else {
         return E_NOINTERFACE;
-    }
-    let Some(this) = new_object(cpu, DEVICE, eight, 0, Some(Device::default())) else {
+    };
+    let Some(this) = new_object(cpu, DEVICE, eight, 0, Some(Device::default()), wide) else {
         return E_OUTOFMEMORY;
     };
     if !com::write_out(cpu, out, this) {
@@ -393,13 +423,13 @@ pub fn query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !com::write_out(cpu, out, 0) {
             return Err(E_POINTER);
         }
-        if !is_device_iid(&iid, is_eight(cpu, id)) {
-            return Err(E_NOINTERFACE);
-        }
+        let eight = is_eight(cpu, id);
+        let wide = device_interface(&iid, eight).ok_or(E_NOINTERFACE)?;
+        let it = interface(cpu, id, wide).ok_or(E_OUTOFMEMORY)?;
         if let Some(o) = state(cpu).object_mut(id) {
             o.refs += 1;
         }
-        com::write_out(cpu, out, this);
+        com::write_out(cpu, out, it);
         Ok(S_OK)
     })();
     result(r)
@@ -584,7 +614,7 @@ pub fn get_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             DIPROP_JOYSTICKID if d.kind >= JOYSTICK => value(d.kind - JOYSTICK),
             DIPROP_INSTANCENAME | DIPROP_PRODUCTNAME => {
                 // The names, which are the same for every version.
-                let info = objects::instance(d.kind, d.shape, objects::INSTANCE_SIZE, 0x700);
+                let info = objects::instance(d.kind, d.shape, objects::INSTANCE_SIZE, 0x700, false);
                 let from = if prop == DIPROP_INSTANCENAME { 40 } else { 300 };
                 let name: Vec<u8> = info[from..from + 260]
                     .iter()
@@ -1099,6 +1129,15 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetObjectInfo(info, obj, how): DIDEVICEOBJECTINSTANCEA.
 pub fn get_object_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    object_info(cpu, args, false)
+}
+
+/// The Unicode interface's GetObjectInfo: DIDEVICEOBJECTINSTANCEW.
+pub fn get_object_info_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    object_info(cpu, args, true)
+}
+
+fn object_info(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let (this, at, obj, how) = (args[0], args[1], args[2], args[3]);
     let r = (|| {
         let id = ready(cpu, this)?;
@@ -1106,7 +1145,7 @@ pub fn get_object_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Err(E_POINTER);
         }
         let size = cpu.bus.guest_read_32(at);
-        if size != objects::OBJECT_SIZE && size != objects::OBJECT_SIZE_DX3 {
+        if !objects::OBJECT_SIZES.contains(&(size, wide)) {
             return Err(DIERR_INVALIDPARAM);
         }
         let d = dev(cpu, id);
@@ -1119,7 +1158,7 @@ pub fn get_object_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         .ok_or(DIERR_NOTFOUND)?;
         let ofs = d.offset(k).unwrap_or(objs[k].ofs);
-        let bytes = objects::object_instance(d.kind, &objs[k], ofs, size);
+        let bytes = objects::object_instance(d.kind, &objs[k], ofs, size, wide);
         if !cpu.bus.guest_probe(at, size as usize, true) {
             return Err(E_POINTER);
         }
@@ -1131,6 +1170,15 @@ pub fn get_object_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetDeviceInfo(info): DIDEVICEINSTANCEA.
 pub fn get_device_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    device_info(cpu, args, false)
+}
+
+/// The Unicode interface's GetDeviceInfo: DIDEVICEINSTANCEW.
+pub fn get_device_info_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    device_info(cpu, args, true)
+}
+
+fn device_info(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let (this, at) = (args[0], args[1]);
     let r = (|| {
         let id = ready(cpu, this)?;
@@ -1138,7 +1186,7 @@ pub fn get_device_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Err(E_POINTER);
         }
         let size = cpu.bus.guest_read_32(at);
-        if size != objects::INSTANCE_SIZE && size != objects::INSTANCE_SIZE_DX3 {
+        if !objects::INSTANCE_SIZES.contains(&(size, wide)) {
             return Err(DIERR_INVALIDPARAM);
         }
         if !cpu.bus.guest_probe(at, size as usize, true) {
@@ -1146,7 +1194,7 @@ pub fn get_device_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         let version = version_of(cpu, id);
         let d = dev(cpu, id);
-        let bytes = objects::instance(d.kind, d.shape, size, version);
+        let bytes = objects::instance(d.kind, d.shape, size, version, wide);
         cpu.bus.guest_write_bytes(at, &bytes);
         Ok(DI_OK)
     })();

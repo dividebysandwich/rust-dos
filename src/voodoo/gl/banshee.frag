@@ -128,7 +128,7 @@ vec3 desktop(ivec2 p, vec2 f) {
     uint r = byte_at(start + surface_addr(a + 2u, line, stride, tiled));
     uint g = byte_at(start + surface_addr(a + 1u, line, stride, tiled));
     uint b = byte_at(start + surface_addr(a, line, stride, tiled));
-    return vec3(r, g, b) / 255.0;
+    return through(ivec3(int(r), int(g), int(b)), u_desk.y, bypass);
 }
 
 vec3 overlay(ivec2 p, vec2 f) {

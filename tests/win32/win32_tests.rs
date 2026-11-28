@@ -1120,6 +1120,190 @@ fn an_idle_loop_that_waits_for_a_deadline_by_get_tick_count_is_skipped_to_it() {
     assert!(stats.skipped / stats.proofs > 4 * ms, "{stats:?}");
 }
 
+/// Run a loop that waits 200 ms by GetTickCount and in every pass calls
+/// the functions of `pass` with the object `create` made (and a timeout
+/// of 0 where it says so), on a machine that skips passes and one that
+/// runs them all, in lockstep. What the skipping one skipped, and its
+/// instructions a millisecond.
+fn object_loop(
+    test: &str,
+    create: (&str, &[i32]),
+    pass: &[(&str, bool)],
+) -> (rust_dos::idle::IdleStats, u64) {
+    let names: Vec<&str> = ["GetTickCount", create.0]
+        .into_iter()
+        .chain(pass.iter().map(|&(name, _)| name))
+        .collect();
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names)];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut spin = a.create_label();
+        for &arg in create.1.iter().rev() {
+            a.push(arg)?;
+        }
+        a.call(f(create.0))?;
+        a.mov(esi, eax)?;
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        for &(name, timeout) in pass {
+            if timeout {
+                a.push(0)?;
+            }
+            a.push(esi)?;
+            a.call(f(name))?;
+        }
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    assert_eq!(
+        skipping.errorlevel, 0x2A,
+        "{:?}",
+        skipping.bus.observe.stats
+    );
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    (skipping.bus.observe.stats, ms)
+}
+
+/// Zanzarah's wait for its next frame (#1240): it takes a free mutex with
+/// WaitForSingleObject(mutex, 0) and releases it in every pass, and reads
+/// the clock. Every pass leaves the mutex free, as the one before found
+/// it, so the passes are skipped, and come out the same as when they all
+/// run.
+#[test]
+fn a_loop_that_takes_and_releases_a_free_mutex_is_skipped() {
+    let (stats, ms) = object_loop(
+        "mutex_pass",
+        ("CreateMutexA", &[0, 0, 0]),
+        &[("WaitForSingleObject", true), ("ReleaseMutex", false)],
+    );
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+}
+
+/// The same with an auto-reset event that is signaled: the wait takes the
+/// signal and SetEvent gives it back in every pass.
+#[test]
+fn a_loop_that_takes_and_sets_an_event_is_skipped() {
+    let (stats, ms) = object_loop(
+        "event_pass",
+        ("CreateEventA", &[0, 0, 1, 0]),
+        &[("WaitForSingleObject", true), ("SetEvent", false)],
+    );
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+}
+
+/// A loop that takes the mutex in every pass and never releases it owns
+/// it once more after each pass: no pass leaves the machine as the one
+/// before found it, and none is skipped.
+#[test]
+fn a_loop_that_takes_a_mutex_without_releasing_it_is_not_skipped() {
+    let (stats, _) = object_loop(
+        "mutex_held",
+        ("CreateMutexA", &[0, 0, 0]),
+        &[("WaitForSingleObject", true)],
+    );
+    assert_eq!(stats.skipped, 0, "{stats:?}");
+    assert!(
+        stats.failed_by.iter().any(|&(why, n)| why == "object" && n > 0),
+        "{stats:?}"
+    );
+}
+
+/// Bink's timer, as Zanzarah's frame wait reads it (#2252): a loop that
+/// waits 200 ms by QueryPerformanceCounter, which it reads into the stack,
+/// subtracts the start count from in 64 bits (SUB, SBB), multiplies the
+/// difference by 1000 (MUL of each half), divides it by the counter's
+/// rate (DIV) and takes the absolute value of the milliseconds (CDQ, XOR,
+/// SUB). It reads GetTickCount too, as Bink's timer reads timeGetTime,
+/// whose reads arm the loop. The count moves on in every pass. A count
+/// proof follows it through that arithmetic, so the passes are skipped up
+/// to the next timer event, and come out the same as when they all run.
+#[test]
+fn a_loop_that_waits_by_the_performance_counter_through_a_division_is_skipped() {
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["QueryPerformanceCounter", "GetTickCount"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        // The start count at [esp], the count now at [esp+8].
+        a.sub(esp, 16)?;
+        a.mov(eax, esp)?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.mov(edi, 1000)?;
+        a.set_label(&mut spin)?;
+        a.lea(eax, ptr(esp + 8))?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.call(l.import(1))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.sub(eax, dword_ptr(esp))?;
+        a.sbb(edx, dword_ptr(esp + 4))?;
+        // EDX:EAX times 1000.
+        a.mov(ecx, eax)?;
+        a.mov(eax, edx)?;
+        a.mul(edi)?;
+        a.mov(esi, eax)?;
+        a.mov(eax, ecx)?;
+        a.mul(edi)?;
+        a.add(edx, esi)?;
+        a.mov(ecx, 1_193_182)?;
+        a.div(ecx)?;
+        a.cdq()?;
+        a.xor(eax, edx)?;
+        a.sub(eax, edx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.add(esp, 16)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("performance_plain", CoreMode::Normal, false);
+    let mut skipping = start("performance_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+}
+
 /// Tribal Rage's MFC idle loop (#1729): it counts its passes in RAM, hands
 /// the count to OnIdle, which compares it with 0 and 1, and waits for a
 /// deadline by GetTickCount. A proof skips up to the next timer event,
@@ -7033,8 +7217,10 @@ fn a_program_commits_and_touches_more_memory_than_the_machine_has() {
 /// A zeroed block takes no physical memory until it is touched: after
 /// GlobalAlloc(GMEM_ZEROINIT) of 8 MB, GlobalMemoryStatus has nearly as
 /// much physical memory available as before, and 8 MB less room in the
-/// page file. Touching a page takes it from the physical memory. A bit
-/// each in the exit code.
+/// page file, with a page or so more for the heap's own bytes around the
+/// block (Windows 98's header before it and end marker after it).
+/// Touching a page takes it from the physical memory. A bit each in the
+/// exit code.
 #[test]
 fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
     const GMEM_ZEROINIT: i32 = 0x40;
@@ -7062,11 +7248,16 @@ fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
             a.jae(much)?;
             a.or(ebx, 1)?;
             a.set_label(&mut much)?;
-            // dwAvailPageFile down by the block.
+            // dwAvailPageFile down by the block, and by less than 64 KB
+            // more: the pages of the heap's bytes before and after it.
             a.mov(eax, dword_ptr(l.at(0x14)))?;
             a.sub(eax, dword_ptr(l.at(0x34)))?;
-            a.cmp(eax, SIZE)?;
-            bit_if_equal(a, 1)?;
+            a.sub(eax, SIZE)?;
+            a.cmp(eax, 0x1_0000)?;
+            let mut more = a.create_label();
+            a.jae(more)?;
+            a.or(ebx, 2)?;
+            a.set_label(&mut more)?;
             // A page of it touched: a page less physical memory, a page
             // more room in the page file.
             a.mov(dword_ptr(esi + 0x4000), 1)?;
@@ -11699,6 +11890,182 @@ fn load_image_unpacks_an_rle8_bitmap_into_a_dib_section() {
     );
     let (code, text) = run_files("load_image_rle8", &[("T.EXE", exe)]);
     assert_eq!(code, 0x1F, "the checks that failed: {:05b} {text}", !code & 0x1F);
+}
+
+/// LoadImageA's LR_LOADTRANSPARENT and LR_LOADMAP3DCOLORS change the
+/// color table of the bitmap it makes, as LoadImage's documentation has
+/// it: the first pixel's entry becomes COLOR_WINDOW, or COLOR_3DFACE
+/// with both flags, and the second flag turns 128, 192 and 223 grey
+/// into COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT. The resource
+/// keeps its colors. The scheme's colors differ from the greys, so
+/// each mapping shows, and its COLOR_3DFACE is the 223 grey, which the
+/// first pixel's entry keeps with both flags. InstallShield 6 setups
+/// (Anachronox) load their buttons' pictures this way, which have a
+/// magenta background.
+#[test]
+fn load_image_maps_a_bitmaps_transparent_and_3d_colors() {
+    let names: &[&str] = &[
+        "GetModuleHandleA",
+        "LoadImageA",
+        "SetSysColors",
+        "CreateCompatibleDC",
+        "SelectObject",
+        "GetDIBColorTable",
+        "GetPixel",
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &names[..1]),
+        ("USER32.DLL", &names[1..3]),
+        ("GDI32.DLL", &names[3..]),
+    ];
+    const RT_BITMAP: u16 = 2;
+    const LR_LOADTRANSPARENT: u32 = 0x0020;
+    const LR_LOADMAP3DCOLORS: u32 = 0x1000;
+    const LR_CREATEDIBSECTION: u32 = 0x2000;
+    const TABLE: u32 = 0x100;
+    const SCHEME: u32 = 0x180;
+    // COLOR_WINDOW, COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT, and
+    // the colors SetSysColors gives them: red and blue alike, so a
+    // COLORREF and an RGBQUAD read the same.
+    let (window, shadow, face, light) = (0x20_4020u32, 0x50_6050, 0xDF_DFDF, 0x70_A070);
+    let mut data = vec![0u8; 0x200];
+    for (i, w) in [5u32, 16, 15, 22, window, shadow, face, light].into_iter().enumerate() {
+        let at = SCHEME as usize + 4 * i;
+        data[at..at + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    // A 2x1 bitmap of 4 bits with five colors, its first pixel magenta
+    // (entry 1, in the byte's high half).
+    let colors = [0x80_8080u32, 0xFF_00FF, 0xC0_C0C0, 0xDF_DFDF, 0x12_3456];
+    let mut dib = Vec::new();
+    for w in [40u32, 2, 1, 1 | 4 << 16, 0, 4, 0, 0, 5, 0] {
+        dib.extend_from_slice(&w.to_le_bytes());
+    }
+    for c in colors {
+        dib.extend_from_slice(&c.to_le_bytes());
+    }
+    dib.extend_from_slice(&[0x10, 0, 0, 0]);
+    let both = [shadow, face, face, light, colors[4]];
+    let mut transparent = colors;
+    transparent[1] = window;
+    let map_3d = [shadow, colors[1], face, light, colors[4]];
+    let cases = [
+        (LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS, both),
+        (LR_LOADTRANSPARENT, transparent),
+        (LR_LOADMAP3DCOLORS, map_3d),
+        (0, colors),
+    ];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        call_with(a, l.import(0), &[Arg::I(0)])?;
+        a.mov(esi, eax)?;
+        call_with(a, l.import(3), &[Arg::I(0)])?;
+        a.mov(edi, eax)?;
+        // LoadImageA, and the bitmap selected into the DC in EDI.
+        let load = |a: &mut CodeAssembler, flags: u32| -> Result<(), IcedError> {
+            let image = [Arg::Esi, Arg::I(3), Arg::I(0), Arg::I(0), Arg::I(0)];
+            call_with(a, l.import(1), &[&image[..], &[Arg::I(flags)]].concat())?;
+            a.push(eax)?;
+            a.push(edi)?;
+            a.call(l.import(4))
+        };
+        // A bitmap of GDI's, in the default scheme: its first pixel is
+        // the button face's grey.
+        load(a, LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(l.import(6))?;
+        a.cmp(eax, 0xC0_C0C0)?;
+        check(a, false, 0)?;
+        let at = |offset: u32| Arg::I(l.at(offset) as u32);
+        call_with(a, l.import(2), &[Arg::I(4), at(SCHEME), at(SCHEME + 16)])?;
+        // The color tables of DIB sections, in the scheme set above.
+        for (bit, (flags, want)) in cases.into_iter().enumerate() {
+            load(a, flags | LR_CREATEDIBSECTION)?;
+            a.push(l.at(TABLE) as i32)?;
+            a.push(5)?;
+            a.push(0)?;
+            a.push(edi)?;
+            a.call(l.import(5))?;
+            let mut wrong = a.create_label();
+            for (i, c) in want.into_iter().enumerate() {
+                a.cmp(dword_ptr(l.at(TABLE + 4 * i as u32)), c as i32)?;
+                a.jne(wrong)?;
+            }
+            a.set_label(&mut wrong)?;
+            check(a, false, bit as u32 + 1)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(
+        BASE,
+        None,
+        imports,
+        &data,
+        &[("", &main)],
+        &[(RT_BITMAP, 3, 0x409, &dib)],
+    );
+    let (code, text) = run_files("load_image_3d_colors", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {text}", !code & 0x1F);
+}
+
+/// LoadImageA of a bitmap file takes its bits where the file header's
+/// bfOffBits says, as a GDI bitmap and as a DIB section, and from after
+/// the color table when bfOffBits is 0, as Wine's LoadImage reads it.
+/// GAP.BMP has four bytes between its table and its bits, ZERO.BMP a
+/// bfOffBits of 0. Each is one magenta pixel, entry 1 of its table;
+/// the gap's bytes and the file header's first are other entries.
+#[test]
+fn load_image_takes_a_bitmap_files_bits_at_bf_off_bits() {
+    let names: &[&str] = &["LoadImageA", "CreateCompatibleDC", "SelectObject", "GetPixel"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &names[..1]), ("GDI32.DLL", &names[1..])];
+    const LR_LOADFROMFILE: u32 = 0x0010;
+    const LR_CREATEDIBSECTION: u32 = 0x2000;
+    // A 1x1 bitmap of 8 bits, its table black and magenta.
+    let file = |offset: u32, gap: usize| {
+        let mut f = b"BM".to_vec();
+        for w in [0u32, 0, offset] {
+            f.extend_from_slice(&w.to_le_bytes());
+        }
+        for w in [40u32, 1, 1, 1 | 8 << 16, 0, 4, 0, 0, 2, 0, 0, 0xFF_00FF] {
+            f.extend_from_slice(&w.to_le_bytes());
+        }
+        f.extend(std::iter::repeat_n(0, gap));
+        f.extend_from_slice(&[1, 0, 0, 0]);
+        f
+    };
+    let gap = file(14 + 40 + 8 + 4, 4);
+    let zero = file(0, 0);
+    let mut data = vec![0u8; 0x40];
+    data[..8].copy_from_slice(b"GAP.BMP\0");
+    data[0x10..0x19].copy_from_slice(b"ZERO.BMP\0");
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        call_with(a, l.import(1), &[Arg::I(0)])?;
+        a.mov(esi, eax)?;
+        let mut bit = 0;
+        for name in [0, 0x10] {
+            for flags in [LR_LOADFROMFILE, LR_LOADFROMFILE | LR_CREATEDIBSECTION] {
+                let path = Arg::I(l.at(name) as u32);
+                let image = [Arg::I(0), path, Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(flags)];
+                call_with(a, l.import(0), &image)?;
+                a.push(eax)?;
+                a.push(esi)?;
+                a.call(l.import(2))?;
+                call_with(a, l.import(3), &[Arg::Esi, Arg::I(0), Arg::I(0)])?;
+                a.cmp(eax, 0xFF_00FF)?;
+                check(a, false, bit)?;
+                bit += 1;
+            }
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let files = [("T.EXE", exe), ("GAP.BMP", gap), ("ZERO.BMP", zero)];
+    let (code, text) = run_files("load_image_bf_off_bits", &files);
+    assert_eq!(code, 0xF, "the checks that failed: {:04b} {text}", !code & 0xF);
 }
 
 /// LoadLibraryA of files Windows 95 can't load: an empty one is in a bad
@@ -21014,6 +21381,162 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     });
     let code = run_family("icdecompress_cvid", &[("T.EXE", program)]);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+/// ICSendMessage's ICDecompressEx messages, as Leadfoot plays its Indeo
+/// 5 films: ICM_DECOMPRESSEX_QUERY and _BEGIN take an ICDECOMPRESSEX
+/// whose source rectangle is the whole frame and whose destination one
+/// is of the frame's size, or twice it, inside a larger output, and
+/// refuse another stretch (ICERR_BADFORMAT). ICM_DECOMPRESSEX writes the
+/// frame there and leaves the rest of the output as it was: an 8 by 4
+/// Cinepak frame at left 8 and top 4 of a bottom-up RGB555 DIB of 16 by
+/// 8, so in its first four rows in memory, from byte 16. Zoomed by two
+/// it fills the DIB. _END answers ICERR_OK. At the same place of a
+/// top-down RGB565 DIB of 16 by 8, as Leadfoot's surface is, the frame
+/// goes to its last four rows in memory. The program ends with the
+/// number of the first check that failed, or 0.
+#[test]
+fn icdecompressex_places_the_frame_in_a_larger_output() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const BIG: usize = 0x180;
+    const TOP_DOWN: usize = 0x1C0;
+    const FRAMES: usize = 0x200;
+    const EX: usize = 0x280;
+    const BITS: usize = 0x300;
+    let mut data = bitmap_info(8, 4, 24, b"cvid");
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(8, 4, 16, &[0; 4]));
+    data.resize(BIG, 0);
+    data.extend(bitmap_info(16, 8, 16, &[0; 4]));
+    data.resize(TOP_DOWN, 0);
+    // BI_BITFIELDS, with RGB565's masks after the header.
+    data.extend(bitmap_info(16, -8i32 as u32, 16, &3u32.to_le_bytes()));
+    for mask in [0xF800u32, 0x07E0, 0x001F] {
+        data.extend_from_slice(&mask.to_le_bytes());
+    }
+    data.resize(FRAMES, 0);
+    // A key frame: a grey V1 codebook of one entry, level 200, and both
+    // blocks V1 of it.
+    let books = cinepak_part(0x26, &[], &[200; 4]);
+    data.extend(cinepak_frame(0, &[books, cinepak_part(0x32, &[], &[0, 0])]));
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 256]);
+    const ICM_DECOMPRESSEX_BEGIN: i32 = 0x403C;
+    const ICM_DECOMPRESSEX_QUERY: i32 = 0x403D;
+    const ICM_DECOMPRESSEX: i32 = 0x403E;
+    const ICM_DECOMPRESSEX_END: i32 = 0x403F;
+    const ICERR_BADFORMAT: i32 = -2;
+    // RGB555 of grey 200, two pixels, and RGB565 of it.
+    const GREY_200: u32 = 0x6739_6739;
+    const GREY_200_565: u32 = 0xCE59_CE59;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        let vidc = i32::from_le_bytes(*b"vidc");
+        // The ICDECOMPRESSEX: flags, lpbiSrc, lpSrc, lpbiDst, lpDst,
+        // the destination rectangle, then the source's.
+        let ex = [0, at(0), at(FRAMES), at(BIG), at(BITS), 8, 4, 8, 4, 0, 0, 8, 4];
+        for (n, v) in ex.into_iter().enumerate() {
+            a.mov(dword_ptr(l.at((EX + 4 * n) as u32)), v)?;
+        }
+        let send = |a: &mut CodeAssembler, msg: i32| {
+            push_args(a, &[0, msg, at(EX), 52])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICSendMessage"))
+        };
+        // The number of the first check that failed, in ebx.
+        let check = |a: &mut CodeAssembler, n: i32| {
+            let mut held = a.create_label();
+            a.je(held)?;
+            a.test(ebx, ebx)?;
+            a.jnz(held)?;
+            a.mov(ebx, n)?;
+            a.set_label(&mut held)?;
+            a.nop()
+        };
+        a.xor(ebx, ebx)?;
+        push_args(a, &[vidc, 0, at(0), at(OUT), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setz(al)?;
+        a.cmp(al, 0)?;
+        check(a, 1)?;
+        send(a, ICM_DECOMPRESSEX_QUERY)?;
+        a.cmp(eax, 0)?;
+        check(a, 2)?;
+        // A destination of 12 by 8 would stretch the frame.
+        a.mov(dword_ptr(l.at((EX + 4 * 7) as u32)), 12)?;
+        a.mov(dword_ptr(l.at((EX + 4 * 8) as u32)), 8)?;
+        send(a, ICM_DECOMPRESSEX_QUERY)?;
+        a.cmp(eax, ICERR_BADFORMAT)?;
+        check(a, 3)?;
+        a.mov(dword_ptr(l.at((EX + 4 * 7) as u32)), 8)?;
+        a.mov(dword_ptr(l.at((EX + 4 * 8) as u32)), 4)?;
+        send(a, ICM_DECOMPRESSEX_BEGIN)?;
+        a.cmp(eax, 0)?;
+        check(a, 4)?;
+        send(a, ICM_DECOMPRESSEX)?;
+        a.cmp(eax, 0)?;
+        check(a, 5)?;
+        // Rows of 16 pixels of 2 bytes, the bottom one first.
+        let pixels = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 32 * y + 2 * x));
+        a.cmp(pixels(0, 8), GREY_200 as i32)?;
+        check(a, 6)?;
+        a.cmp(pixels(3, 14), GREY_200 as i32)?;
+        check(a, 7)?;
+        // Left of the frame and above it, the output is as it was.
+        a.cmp(pixels(0, 6), 0xCCCC_CCCCu32 as i32)?;
+        check(a, 8)?;
+        a.cmp(pixels(4, 8), 0xCCCC_CCCCu32 as i32)?;
+        check(a, 9)?;
+        send(a, ICM_DECOMPRESSEX_END)?;
+        a.cmp(eax, 0)?;
+        check(a, 10)?;
+        // Twice the frame's size, at 0, 0: the whole DIB.
+        for (n, v) in [(5, 0), (6, 0), (7, 16), (8, 8)] {
+            a.mov(dword_ptr(l.at((EX + 4 * n) as u32)), v)?;
+        }
+        send(a, ICM_DECOMPRESSEX)?;
+        a.cmp(eax, 0)?;
+        check(a, 11)?;
+        a.cmp(pixels(7, 0), GREY_200 as i32)?;
+        check(a, 12)?;
+        // The two corners the frame at its own size wouldn't reach.
+        a.cmp(pixels(0, 0), GREY_200 as i32)?;
+        check(a, 13)?;
+        a.cmp(pixels(4, 14), GREY_200 as i32)?;
+        check(a, 14)?;
+        // At 8, 4 of the top-down DIB: rows 4 to 7 in memory.
+        let place = [(3, at(TOP_DOWN)), (5, 8), (6, 4), (7, 8), (8, 4)];
+        for (n, v) in place {
+            a.mov(dword_ptr(l.at((EX + 4 * n) as u32)), v)?;
+        }
+        send(a, ICM_DECOMPRESSEX)?;
+        a.cmp(eax, 0)?;
+        check(a, 15)?;
+        a.cmp(pixels(4, 8), GREY_200_565 as i32)?;
+        check(a, 16)?;
+        a.cmp(pixels(7, 14), GREY_200_565 as i32)?;
+        check(a, 17)?;
+        a.cmp(pixels(3, 8), GREY_200 as i32)?;
+        check(a, 18)?;
+        a.cmp(pixels(4, 6), GREY_200 as i32)?;
+        check(a, 19)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompressex_cvid", &[("T.EXE", program)]);
+    assert_eq!(code, 0, "the first check that failed");
 }
 
 /// A program linked with MFC's OLE support imports OLEDLG.DLL's

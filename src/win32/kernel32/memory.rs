@@ -39,18 +39,52 @@ pub(super) fn tls_alloc(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 pub(super) fn tls_free(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let index = args[0];
-    let process = process(cpu);
-    if index >= TLS_SLOTS || process.tls_used & 1 << index == 0 {
-        process.last_error = ERROR_INVALID_PARAMETER;
+    if index >= TLS_SLOTS || process(cpu).tls_used & 1 << index == 0 {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    process.tls_used &= !(1 << index);
+    process(cpu).tls_used &= !(1 << index);
     super::threads::clear_tls_slot(cpu, index);
     Some(TRUE)
 }
 
-/// The value in slot `args[0]`, the last error cleared, as Windows does
-/// so that a value of 0 can be told from a failure.
+// TlsGetValue and TlsSetValue are x86 code, Windows 98 SE's: they read
+// and write the slot in the TIB that `fs:[18h]` points to, with no trap,
+// and TlsGetValue clears the last error there, so that a value of 0 can
+// be told from a failure. Neither checks that the slot was allocated. The
+// handlers below are for states saved when the functions were traps.
+
+/// TlsGetValue(index): the value in the thread's slot `index`.
+pub(super) const TLS_GET_VALUE: &[u8] = &[
+    0x8B, 0x4C, 0x24, 0x04, //                   mov ecx, [esp+4]
+    0x64, 0x8B, 0x15, 0x18, 0x00, 0x00, 0x00, // mov edx, fs:[18h]
+    0x83, 0xF9, 0x50, //                         cmp ecx, 50h
+    0x73, 0x11, //                               jae bad
+    0x8B, 0x84, 0x8A, 0x88, 0x00, 0x00, 0x00, // mov eax, [edx+ecx*4+88h]
+    0xC7, 0x42, 0x60, 0x00, 0x00, 0x00, 0x00, // mov dword [edx+60h], 0
+    0xC2, 0x04, 0x00, //                         ret 4
+    0xC7, 0x42, 0x60, 0x57, 0x00, 0x00, 0x00, // bad: mov dword [edx+60h], 57h
+    0x31, 0xC0, //                               xor eax, eax
+    0xC2, 0x04, 0x00, //                         ret 4
+];
+
+/// TlsSetValue(index, value): TRUE, or FALSE for an index past the
+/// slots.
+pub(super) const TLS_SET_VALUE: &[u8] = &[
+    0x8B, 0x4C, 0x24, 0x04, //                   mov ecx, [esp+4]
+    0x64, 0x8B, 0x15, 0x18, 0x00, 0x00, 0x00, // mov edx, fs:[18h]
+    0x83, 0xF9, 0x50, //                         cmp ecx, 50h
+    0x73, 0x13, //                               jae bad
+    0x8B, 0x44, 0x24, 0x08, //                   mov eax, [esp+8]
+    0x89, 0x84, 0x8A, 0x88, 0x00, 0x00, 0x00, // mov [edx+ecx*4+88h], eax
+    0xB8, 0x01, 0x00, 0x00, 0x00, //             mov eax, 1
+    0xC2, 0x08, 0x00, //                         ret 8
+    0xC7, 0x42, 0x60, 0x57, 0x00, 0x00, 0x00, // bad: mov dword [edx+60h], 57h
+    0x31, 0xC0, //                               xor eax, eax
+    0xC2, 0x08, 0x00, //                         ret 8
+];
+
+/// The value in slot `args[0]`, the last error cleared.
 pub(super) fn tls_get_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] >= TLS_SLOTS {
         set_error(cpu, ERROR_INVALID_PARAMETER);
@@ -439,5 +473,64 @@ mod tests {
             a.ret_1(8)
         });
         assert_eq!(exchange_add, INTERLOCKED_EXCHANGE_ADD);
+    }
+
+    /// TlsGetValue's, TlsSetValue's, GetLastError's and SetLastError's
+    /// bytes are their listings, with the slots and the last error where
+    /// the TIB has them.
+    #[test]
+    fn the_tls_and_last_error_functions_are_their_listings() {
+        use crate::win32::loader::{TIB_LAST_ERROR, TLS_ARRAY};
+        let assemble = |f: &dyn Fn(&mut CodeAssembler) -> Result<(), IcedError>| {
+            let mut a = CodeAssembler::new(32).unwrap();
+            f(&mut a).unwrap();
+            a.assemble(0).unwrap()
+        };
+        let slot = || dword_ptr(edx + ecx * 4 + TLS_ARRAY as i32);
+        let error = || dword_ptr(edx + TIB_LAST_ERROR as i32);
+        let get = assemble(&|a| {
+            let mut bad = a.create_label();
+            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(edx, dword_ptr(0x18).fs())?;
+            a.cmp(ecx, TLS_SLOTS as i32)?;
+            a.jae(bad)?;
+            a.mov(eax, slot())?;
+            a.mov(error(), 0)?;
+            a.ret_1(4)?;
+            a.set_label(&mut bad)?;
+            a.mov(error(), ERROR_INVALID_PARAMETER as i32)?;
+            a.xor(eax, eax)?;
+            a.ret_1(4)
+        });
+        assert_eq!(get, TLS_GET_VALUE);
+        let set = assemble(&|a| {
+            let mut bad = a.create_label();
+            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(edx, dword_ptr(0x18).fs())?;
+            a.cmp(ecx, TLS_SLOTS as i32)?;
+            a.jae(bad)?;
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.mov(slot(), eax)?;
+            a.mov(eax, 1)?;
+            a.ret_1(8)?;
+            a.set_label(&mut bad)?;
+            a.mov(error(), ERROR_INVALID_PARAMETER as i32)?;
+            a.xor(eax, eax)?;
+            a.ret_1(8)
+        });
+        assert_eq!(set, TLS_SET_VALUE);
+        let get_error = assemble(&|a| {
+            a.mov(edx, dword_ptr(0x18).fs())?;
+            a.mov(eax, error())?;
+            a.ret()
+        });
+        assert_eq!(get_error, super::super::GET_LAST_ERROR);
+        let set_error = assemble(&|a| {
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(edx, dword_ptr(0x18).fs())?;
+            a.mov(error(), eax)?;
+            a.ret_1(4)
+        });
+        assert_eq!(set_error, super::super::SET_LAST_ERROR);
     }
 }

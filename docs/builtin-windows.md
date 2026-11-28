@@ -193,6 +193,22 @@ The editor's window isn't there: REGEDIT started without a file ends at
 once. `/c` (replace the registry with a file) and `/d` (delete a key)
 do nothing, and `/l:` and `/r:` are ignored.
 
+### Registering a DLL
+
+`C:\WINDOWS\SYSTEM\REGSVR32.EXE` registers a DLL, as Leadfoot's setup
+runs `regsvr32.exe /s ir50_32.dll` for the Indeo 5 codec. Its command
+line works as on Windows 98:
+
+- `regsvr32 file.dll` loads the DLL and calls its DllRegisterServer,
+  and `/u` its DllUnregisterServer. The DLL's code runs in REGSVR32's
+  process, as on Windows.
+- `/i` calls its DllInstall too, after the registration (or before the
+  unregistration with `/u`), with the text after `/i:`; `/n` with `/i`
+  calls DllInstall alone.
+- A message box says whether it worked, and with `/s` there is none.
+  The exit code is 0 when it worked, 3 when the DLL doesn't load, 4
+  when the function isn't there and 5 when it fails.
+
 ### Text and dialogs
 
 MS Sans Serif 8, the font of menus, dialogs and buttons, has glyphs drawn in

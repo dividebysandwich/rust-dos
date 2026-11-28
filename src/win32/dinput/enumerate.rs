@@ -1,8 +1,8 @@
 //! EnumDevices and EnumObjects, which call the program's callback for
 //! each device or object: a task (task.rs) whose steps fill a
-//! DIDEVICEINSTANCEA or DIDEVICEOBJECTINSTANCEA in its scratch space and
-//! call the callback with it, until the callback returns DIENUM_STOP or
-//! there are no more.
+//! DIDEVICEINSTANCE or DIDEVICEOBJECTINSTANCE in its scratch space, the
+//! A or the W form as the interface has it, and call the callback with
+//! it, until the callback returns DIENUM_STOP or there are no more.
 
 use super::device::dev;
 use super::objects::{self, Obj};
@@ -20,6 +20,8 @@ const K_DEVICES: u32 = 0;
 const K_OBJECTS: u32 = 1;
 /// DirectInput 8's EnumDevices, whose devices have DI8DEVTYPE_ types.
 const K_DEVICES_8: u32 = 2;
+/// Added to the kind: the structures are the W forms.
+const K_WIDE: u32 = 0x100;
 
 /// The task's variables: the kind, the callback and its reference, the
 /// structure's size, the place reached; then the device (EnumObjects)
@@ -47,6 +49,15 @@ const DIEDFL_INCLUDEHIDDEN: u32 = 0x4_0000;
 /// a class of devices (DI8DEVCLASS_) or a DI8DEVTYPE_ instead. None has
 /// force feedback.
 pub fn enum_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    devices(cpu, args, false)
+}
+
+/// The Unicode interface's EnumDevices, with DIDEVICEINSTANCEW.
+pub fn enum_devices_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    devices(cpu, args, true)
+}
+
+fn devices(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let (this, ty, callback, reference, flags) = (args[0], args[1], args[2], args[3], args[4]);
     let r = (|| {
         let (id, version) = initialized(cpu, this)?;
@@ -67,12 +78,9 @@ pub fn enum_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Err(DIERR_INVALIDPARAM);
         }
         let what = if eight { K_DEVICES_8 } else { K_DEVICES };
-        let mut vars = vec![what, callback, reference, 0, 0];
-        vars[V_SIZE] = if version >= 0x500 {
-            objects::INSTANCE_SIZE
-        } else {
-            objects::INSTANCE_SIZE_DX3
-        };
+        let mut vars = vec![what | kind_wide(wide), callback, reference, 0, 0];
+        let dx = if version >= 0x500 { 0 } else { 1 };
+        vars[V_SIZE] = sizes(&objects::INSTANCE_SIZES, wide)[dx];
         if flags & DIEDFL_FORCEFEEDBACK == 0 {
             vars.extend(objects::present(cpu, version).into_iter().filter(|&k| {
                 let dev_type = objects::device_type(k, version);
@@ -95,6 +103,15 @@ pub fn enum_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// IDirectInputDevice::EnumObjects(callback, ref, flags): the device's
 /// objects of the DIDFT_ types in `flags`, or all.
 pub fn enum_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    objects_of(cpu, args, false)
+}
+
+/// The Unicode interface's EnumObjects, with DIDEVICEOBJECTINSTANCEW.
+pub fn enum_objects_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    objects_of(cpu, args, true)
+}
+
+fn objects_of(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let (this, callback, reference, flags) = (args[0], args[1], args[2], args[3]);
     let r = (|| {
         let id = super::object_of(cpu, this, super::DEVICE).ok_or(crate::win32::com::E_POINTER)?;
@@ -104,20 +121,32 @@ pub fn enum_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if callback == 0 {
             return Err(DIERR_INVALIDPARAM);
         }
-        let size = if super::version_of(cpu, id) >= 0x500 {
-            objects::OBJECT_SIZE
+        let dx = if super::version_of(cpu, id) >= 0x500 {
+            0
         } else {
-            objects::OBJECT_SIZE_DX3
+            1
         };
-        Ok((
-            vec![K_OBJECTS, callback, reference, size, 0, id, flags],
-            size,
-        ))
+        let size = sizes(&objects::OBJECT_SIZES, wide)[dx];
+        let what = K_OBJECTS | kind_wide(wide);
+        Ok((vec![what, callback, reference, size, 0, id, flags], size))
     })();
     match r {
         Ok((vars, size)) => task::start(cpu, TASK, vars, size),
         Err(e) => result(Err(e)),
     }
+}
+
+fn kind_wide(wide: bool) -> u32 {
+    if wide { K_WIDE } else { 0 }
+}
+
+/// The sizes in `all` of the A forms, or of the W forms if `wide`:
+/// DirectX 5's, then 3's.
+fn sizes(all: &[(u32, bool)], wide: bool) -> Vec<u32> {
+    all.iter()
+        .filter(|&&(_, w)| w == wide)
+        .map(|&(s, _)| s)
+        .collect()
 }
 
 /// Whether EnumObjects's `flags` take `obj`: its type among them, and
@@ -137,18 +166,15 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     }
     let (callback, reference, size, at) =
         (t.var(V_CALLBACK), t.var(V_REF), t.var(V_SIZE), t.var(V_AT));
-    let bytes = if t.var(0) != K_OBJECTS {
+    let (what, wide) = (t.var(0) & !K_WIDE, t.var(0) & K_WIDE != 0);
+    let bytes = if what != K_OBJECTS {
         let Some(&kind) = t.vars.get(V_LIST + at as usize) else {
             return Next::Done(DI_OK);
         };
         t.set(V_AT, at + 1);
         // Any version before 8 gives the same DIDEVTYPE_ types.
-        let version = if t.var(0) == K_DEVICES_8 {
-            0x800
-        } else {
-            0x700
-        };
-        objects::instance(kind, objects::shape(cpu, kind), size, version)
+        let version = if what == K_DEVICES_8 { 0x800 } else { 0x700 };
+        objects::instance(kind, objects::shape(cpu, kind), size, version, wide)
     } else {
         let (id, flags) = (t.var(V_DEVICE), t.var(V_FLAGS));
         let Some(d) = state(cpu).object(id).and_then(|o| o.device.as_ref()) else {
@@ -165,7 +191,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             .and_then(|f| f.offsets.get(k).copied())
             .filter(|&o| o != objects::NONE)
             .unwrap_or(objs[k].ofs);
-        objects::object_instance(d.kind, &objs[k], ofs, size)
+        objects::object_instance(d.kind, &objs[k], ofs, size, wide)
     };
     cpu.bus.guest_write_bytes(t.scratch, &bytes);
     Next::call(callback, &[t.scratch, reference], 1)

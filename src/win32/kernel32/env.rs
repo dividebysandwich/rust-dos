@@ -11,9 +11,6 @@ const COMPUTER_NAME: &[u8] = b"RUSTDOS";
 const MAX_COMPUTERNAME_LENGTH: u32 = 15;
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 
-/// The rate of the performance counter: the PIT's, as on Windows 95.
-const PERFORMANCE_FREQUENCY: u64 = 1_193_182;
-
 /// The value of the environment variable `name`, its name's case
 /// ignored.
 fn value_of(cpu: &mut Cpu, name: &[u8]) -> Option<Vec<u8>> {
@@ -174,14 +171,13 @@ pub(super) fn beep(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 pub(super) fn query_performance_counter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use crate::timer::{IO_READ_NS, IO_WRITE_NS};
     cpu.bus.clock.stall(IO_WRITE_NS);
-    let micros = cpu.bus.clock.now_micros() as u128;
-    let ticks = (micros * PERFORMANCE_FREQUENCY as u128 / 1_000_000) as u64;
+    let ticks = crate::idle::performance_count(cpu, args[0]);
     cpu.bus.clock.stall(2 * IO_READ_NS);
     write_u64(cpu, args[0], ticks)
 }
 
 pub(super) fn query_performance_frequency(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    write_u64(cpu, args[0], PERFORMANCE_FREQUENCY)
+    write_u64(cpu, args[0], crate::idle::PERFORMANCE_FREQUENCY)
 }
 
 fn write_u64(cpu: &mut Cpu, at: u32, value: u64) -> Option<u32> {

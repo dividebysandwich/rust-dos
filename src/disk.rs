@@ -667,6 +667,14 @@ enum OpenData {
 /// The seeks this leaves out are the ones that move nothing, so the
 /// frontend's handle (`VfsFile` in the libretro crate) makes that seek
 /// itself.
+///
+/// Its length is kept the same way (`len`), for `LEN_TRUST` after it was
+/// asked of the host, while nothing writes to a host file by another
+/// handle or by name (`HOST_WRITES`): MechCommander asks for the size of
+/// a file it writes 9,500 times in 17 ms of a mission's load, which at a
+/// call of the host's each took 25 ms of a host frame (#1359). Another
+/// program's change to the file's length shows within `LEN_TRUST`, as a
+/// change to a folder does (`HostDirCache`).
 struct HostFile {
     file: File,
     /// Whether anything was written or cut through it: only such a
@@ -675,6 +683,40 @@ struct HostFile {
     /// None until it is asked for, and after a call that failed, which
     /// may have left the pointer anywhere.
     pos: Cell<Option<u64>>,
+    /// None until it is asked for, and after a write that may have left
+    /// it anywhere.
+    len: Cell<Option<KnownLen>>,
+}
+
+/// A host file's length as `HostFile` keeps it.
+#[derive(Clone, Copy)]
+struct KnownLen {
+    len: u64,
+    /// `HOST_WRITES` when it was known.
+    writes: u64,
+    /// When the host was asked for it.
+    asked: web_time::Instant,
+}
+
+/// How long a host file's length asked of the host is taken as it was
+/// (`HostFile`).
+const LEN_TRUST: std::time::Duration = std::time::Duration::from_secs(1);
+
+thread_local! {
+    /// Counts the guest's writes to host files, and the cuts and changes
+    /// by name, through any handle: a length kept from before one of them
+    /// is asked of the host again (`HostFile::len`).
+    static HOST_WRITES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The guest wrote to a host file, cut it, or changed one by name: the
+/// lengths kept are asked of the host again, but where the writing handle
+/// keeps its own.
+fn host_file_written() -> u64 {
+    HOST_WRITES.with(|w| {
+        w.set(w.get().wrapping_add(1));
+        w.get()
+    })
 }
 
 impl HostFile {
@@ -683,6 +725,7 @@ impl HostFile {
             file,
             wrote: Cell::new(false),
             pos: Cell::new(None),
+            len: Cell::new(None),
         }
     }
 
@@ -707,8 +750,23 @@ impl HostFile {
         result
     }
 
+    /// The length kept (`KnownLen`), where no write by another handle
+    /// came since and it was asked of the host less than `LEN_TRUST` ago.
     fn len(&self) -> std::io::Result<u64> {
-        self.file.len()
+        let writes = HOST_WRITES.with(Cell::get);
+        if let Some(known) = self.len.get()
+            && known.writes == writes
+            && known.asked.elapsed() < LEN_TRUST
+        {
+            return Ok(known.len);
+        }
+        let len = self.file.len();
+        self.len.set(len.as_ref().ok().map(|&len| KnownLen {
+            len,
+            writes,
+            asked: web_time::Instant::now(),
+        }));
+        len
     }
 
     /// The host's own file systems leave the pointer where it was, even
@@ -718,6 +776,8 @@ impl HostFile {
     fn set_len(&self, len: u64) -> std::io::Result<()> {
         self.pos.set(None);
         self.wrote.set(true);
+        self.len.set(None);
+        host_file_written();
         self.file.set_len(len)
     }
 
@@ -737,9 +797,26 @@ impl Read for HostFile {
 }
 
 impl Write for HostFile {
+    /// A write that leaves the position known keeps the length known: it
+    /// ends there or further on.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.wrote.set(true);
-        self.moved((&self.file).write(buf))
+        let known = self
+            .len
+            .get()
+            .filter(|known| known.writes == HOST_WRITES.with(Cell::get));
+        let result = self.moved((&self.file).write(buf));
+        let writes = host_file_written();
+        let len = match (known, &result, self.pos.get()) {
+            (Some(known), Ok(_), Some(pos)) => Some(KnownLen {
+                len: known.len.max(pos),
+                writes,
+                ..known
+            }),
+            _ => None,
+        };
+        self.len.set(len);
+        result
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

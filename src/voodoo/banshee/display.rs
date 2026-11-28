@@ -443,21 +443,22 @@ impl Banshee {
                             rgb(desktop_clut[i])
                         }
                     }
-                    2 => {
-                        let a = 3 * x;
-                        [
-                            byte(ram, at(a + 2), mask),
-                            byte(ram, at(a + 1), mask),
-                            byte(ram, at(a), mask),
-                        ]
-                    }
                     _ => {
-                        let a = 4 * x;
-                        [
-                            byte(ram, at(a + 2), mask),
-                            byte(ram, at(a + 1), mask),
-                            byte(ram, at(a), mask),
-                        ]
+                        // 24 or 32 bits a pixel (the reserved formats
+                        // 4-7 as 32): blue, green and red, each through
+                        // its own component of the table unless the
+                        // desktop bypasses it, as in 5-6-5.
+                        let a = if format == 2 { 3 * x } else { 4 * x };
+                        let [r, g, b] = [2, 1, 0].map(|i| byte(ram, at(a + i), mask));
+                        if bypass {
+                            [r, g, b]
+                        } else {
+                            [
+                                (desktop_clut[r as usize] >> 16) as u8,
+                                (desktop_clut[g as usize] >> 8) as u8,
+                                desktop_clut[b as usize] as u8,
+                            ]
+                        }
                     }
                 };
                 *px = [r, g, b, 255];
@@ -861,6 +862,43 @@ mod tests {
         let at = (2 * 1024 + 3) * 4;
         assert_eq!(&out[at..at + 3], &[0xFF, 0, 0]);
         assert_eq!(&out[at + 4..at + 7], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn a_24_or_32_bit_desktop_goes_through_the_lookup_table() {
+        // Each component through its own part of the table, as 3dfx's
+        // driver uses it for gamma: here red doubled, green plus 16 and
+        // blue inverted, from the table's upper half.
+        let mut clut = [0u32; 512];
+        for i in 0..256u32 {
+            let r = (2 * i).min(255);
+            let g = (i + 16).min(255);
+            clut[256 + i as usize] = r << 16 | g << 8 | (255 - i);
+        }
+        let ram = Vram::new(MEMORY);
+        // Pixel (3, 2), blue, green, red: 40h, 30h, 20h.
+        for (format, bytes) in [(2u32, 3u32), (3, 4)] {
+            let addr = 0x1000 + 2 * 4096 + 3 * bytes;
+            for (i, v) in [0x40, 0x30, 0x20].into_iter().enumerate() {
+                ram.set_byte(addr as usize + i, v);
+            }
+            let cases = [
+                (0, [0x40, 0x40, 0xBF, 255]),
+                (VIDPROC_DESKTOP_CLUT_BYPASS, [0x20, 0x30, 0x40, 255]),
+            ];
+            for (bypass, expected) in cases {
+                let cfg = format << 18 | VIDPROC_DESKTOP_CLUT_SEL | bypass;
+                let mut b = card_1024x768(cfg);
+                b.clut.copy_from_slice(&clut);
+                b.ext_write(VID_DESKTOP_START_ADDR, 0x1000);
+                b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, 4096);
+                let mut out = vec![0; 1024 * 768 * 4];
+                b.render(&ram, &mut out, 1024);
+                let at = (2 * 1024 + 3) * 4;
+                let what = format!("format {format}, bypass {bypass:X}");
+                assert_eq!(out[at..at + 4], expected, "{what}");
+            }
+        }
     }
 
     #[test]

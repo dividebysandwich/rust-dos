@@ -616,6 +616,7 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    super::notify::task_ended(cpu, task.handle);
     crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
     // Its locks (INT 21h AH=5Ch) go before its PDB's selector is free
     // for another task to have, and them with it.
@@ -1188,10 +1189,20 @@ fn exec_win32(
     }
 }
 
+/// The running task, in the context `ctx` (its own, at the call or the
+/// fault that ends it), ends with exit code `code`. TOOLHELP's callbacks
+/// are told first, in the task's context (`notify::exit`), and then it
+/// ends (`end`).
+pub fn exit(cpu: &mut Cpu, code: u16, ctx: &Context) {
+    if !super::notify::exit(cpu, code, ctx) {
+        end(cpu, code);
+    }
+}
+
 /// The running task ends with exit code `code`: its windows, blocks and
 /// modules go, its starters learn of its end, and its thread ends, the
 /// Win16 process with the last task's.
-pub fn exit(cpu: &mut Cpu, code: u16) {
+pub fn end(cpu: &mut Cpu, code: u16) {
     let Some(t) = super::current_task(cpu) else {
         crate::win32::exit(cpu, code as u32);
         return;
@@ -1217,6 +1228,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    super::notify::task_ended(cpu, task.handle);
     crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
@@ -1312,7 +1324,7 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     );
     cpu.bus.log_string(&format!("[W16] {}", message));
     crate::win32::system::load_context(cpu, &ctx);
-    exit(cpu, 0xFF);
+    exit(cpu, 0xFF, &ctx);
 }
 
 /// Whether the instruction `ctx` faulted on is CLI or STI, which then

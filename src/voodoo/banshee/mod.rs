@@ -704,6 +704,7 @@ impl Banshee {
             "cursor": format!("{:08X}", self.reg(HW_CUR_LOC)),
             "overlay": format!("{:06X}", self.overlay_addr),
             "fifo": self.fifo.iter().map(|f| f.describe()).collect::<Vec<_>>(),
+            "plain_copy_pixels": self.engine.plain_pixels,
         })
     }
 }
@@ -926,6 +927,13 @@ impl Voodoo {
         self.display_dirty = true;
         let end = (start as u64 + data.len() as u64).min(mask as u64 + 1) as u32;
         self.mirror_memory(start, end);
+        // The next writes of the pages may be only the bytes, as after a
+        // dword's (`banshee_linear_store`): translated code's MMX and SSE
+        // stores come this way (`jit_dev_write_run`).
+        let page = super::tracker::PAGE;
+        for at in (start & !(page - 1)..end).step_by(page as usize) {
+            self.banshee_grant_write(at);
+        }
     }
 
     /// Runs of bytes written into the card's memory, each as
