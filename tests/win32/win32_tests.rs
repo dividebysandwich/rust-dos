@@ -21287,10 +21287,10 @@ fn cinepak_frame(flags: u8, chunks: &[Vec<u8>]) -> Vec<u8> {
 /// and codebooks from frame to frame, so a frame that skips a block
 /// gives the block it had. A null frame (ICDECOMPRESS_NULLFRAME) keeps
 /// the picture whatever its lpInput holds: here the key frame, which
-/// would undo the second. ICM_DECOMPRESS_GET_FORMAT gives 24 bits. For
-/// an 8-bit output ICLocate finds none, though on Windows iccvid.dll
-/// decodes to a palette of its own (#2202). The program ends with a bit
-/// set for each check that held.
+/// would undo the second. ICM_DECOMPRESS_GET_FORMAT gives 24 bits.
+/// ICLocate finds iccvid.dll for an 8-bit output too
+/// (`icdecompress_maps_frames_to_an_8_bit_dibs_colours`). The program
+/// ends with a bit set for each check that held.
 #[test]
 fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     let kernel32: &[&str] = &["ExitProcess"];
@@ -21336,7 +21336,7 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
         push_args(a, &[vidc, 0, at(0), at(OUT8), 2])?;
         a.call(f("ICLocate"))?;
         a.test(eax, eax)?;
-        bit_if_equal(a, 0)?;
+        a.setnz(bl)?;
         push_args(a, &[vidc, 0, at(0), at(OUT), 2])?;
         a.call(f("ICLocate"))?;
         a.mov(esi, eax)?;
@@ -21380,6 +21380,85 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
         a.int3()
     });
     let code = run_family("icdecompress_cvid", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+/// ICDecompress decodes to an 8-bit DIB in the colours of its table, as
+/// Civilization II has Indeo 4 decode its intro into its WinG DIB: each
+/// pixel is the index of the nearest colour. The table here has black,
+/// grey 90 and grey 200, so the Cinepak key frame's grey 200 is index 2
+/// and the next frame's grey 90 index 1. Windows's codecs dither to the
+/// palette ICM_DECOMPRESS_SET_PALETTE gives, or to one of their own
+/// without it (#2202); a program that asks for 8 bits sets its DIB's
+/// table to the palette it means to show. The program ends with a bit
+/// set for each check that held.
+#[test]
+fn icdecompress_maps_frames_to_an_8_bit_dibs_colours() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICDecompress", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT8: usize = 0x100;
+    const FRAMES: usize = 0x200;
+    const BITS: usize = 0x300;
+    let mut data = bitmap_info(8, 4, 24, b"cvid");
+    data.resize(OUT8, 0);
+    let mut out8 = bitmap_info(8, 4, 8, &[0; 4]);
+    out8[32..36].copy_from_slice(&3u32.to_le_bytes()); // biClrUsed
+    data.extend(out8);
+    data.extend_from_slice(&[0, 0, 0, 0, 90, 90, 90, 0, 200, 200, 200, 0]);
+    data.resize(FRAMES, 0);
+    let books = cinepak_part(0x26, &[], &[200; 4]);
+    data.extend(cinepak_frame(0, &[books, cinepak_part(0x32, &[], &[0, 0])]));
+    data.resize(FRAMES + 0x40, 0);
+    let update = cinepak_part(0x27, &[], &[0x80, 0, 0, 0, 90, 90, 90, 90]);
+    let blocks = cinepak_part(0x31, &[], &[0x40, 0, 0, 0, 0]);
+    data.extend(cinepak_frame(1, &[update, blocks]));
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 32]);
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[i32::from_le_bytes(*b"vidc"), 0, at(0), at(OUT8), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setnz(bl)?;
+        let decompress = |a: &mut CodeAssembler, frame: usize| {
+            push_args(a, &[0, 0, at(0), at(frame), at(OUT8), at(BITS)])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICDecompress"))?;
+            a.add(esp, 24)?;
+            a.cmp(eax, 0)
+        };
+        // Rows of 8 one-byte pixels: the left block's four, then the
+        // right block's.
+        let pixels = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 8 * y + x));
+        decompress(a, FRAMES)?;
+        bit_if_equal(a, 1)?;
+        a.cmp(pixels(0, 0), 0x0202_0202)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(pixels(3, 4), 0x0202_0202)?;
+        bit_if_equal(a, 3)?;
+        decompress(a, FRAMES + 0x40)?;
+        bit_if_equal(a, 4)?;
+        a.cmp(pixels(0, 0), 0x0202_0202)?;
+        bit_if_equal(a, 5)?;
+        a.cmp(pixels(0, 4), 0x0101_0101)?;
+        bit_if_equal(a, 6)?;
+        // Nothing written past the 32 bytes of the picture.
+        a.cmp(byte_ptr(l.at(BITS as u32 + 32)), 0)?;
+        bit_if_equal(a, 7)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompress_8_bits", &[("T.EXE", program)]);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
