@@ -1103,8 +1103,8 @@ impl Gpu {
     }
 
     /// The surfaces that are ahead, as translated code notes its writes
-    /// into them itself (`Bus::lfb_direct`), in the order `writing`
-    /// goes through them.
+    /// into them itself (`Bus::lfb_direct`, the first `lfb::NOTES` of
+    /// them), in the order `writing` goes through them.
     pub fn notes(&mut self) -> impl Iterator<Item = Note> + '_ {
         self.ahead.iter_mut().map(|a| {
             let (start, end) = range(&a.surface);
