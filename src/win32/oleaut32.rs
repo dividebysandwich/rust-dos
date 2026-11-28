@@ -791,7 +791,7 @@ fn disp_invoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// OleIconToCursor(instance, icon): a copy of the icon, as CopyCursor
 /// makes one, which is what Wine gives.
-fn ole_icon_to_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn ole_icon_to_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::user32::resource::copy_icon(cpu, &args[1..])
 }
 
