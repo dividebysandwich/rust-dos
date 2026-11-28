@@ -3,6 +3,7 @@
 //! byte by byte (tests/common/win16).
 
 use crate::win16;
+use rust_dos_ne as ne;
 
 use win16::{CODE, Code, program, run, run_with};
 
@@ -16,6 +17,10 @@ const WAVE_OUT_RESET: u16 = 411;
 const WAVE_OUT_GET_POSITION: u16 = 412;
 const WAVE_OUT_GET_DEV_CAPS: u16 = 402;
 const WAVE_OUT_GET_ID: u16 = 420;
+const WAVE_OUT_GET_PITCH: u16 = 413;
+const WAVE_OUT_SET_PITCH: u16 = 414;
+const WAVE_OUT_GET_PLAYBACK_RATE: u16 = 417;
+const WAVE_OUT_SET_PLAYBACK_RATE: u16 = 418;
 const MIDI_OUT_GET_ID: u16 = 215;
 const AUX_GET_NUM_DEVS: u16 = 350;
 const AUX_GET_DEV_CAPS: u16 = 351;
@@ -267,6 +272,53 @@ fn wave_out_get_id_writes_a_16_bit_uint() {
         .emit(&[0xB0, 0x01])
         .exit_al();
     let (exit, log) = run("wave_get_id", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// MMSYSTEM has waveOutGetPitch, waveOutSetPitch, waveOutGetPlaybackRate
+/// and waveOutSetPlaybackRate, as Windows 3.1's does. Authorware's
+/// runtime (Civilization II's Civilopedia) looks all four up and stops
+/// if one is missing. The device has neither control, so each answers
+/// MMSYSERR_NOTSUPPORTED and a Get leaves its DWORD alone. A handle that
+/// isn't one gets MMSYSERR_INVALHANDLE.
+#[test]
+fn wave_out_pitch_and_rate_are_not_supported() {
+    let mut code = Code::new();
+    open_wave(&mut code, |code| _ = code.push(0), 0, 30);
+    for (i, (ordinal, get)) in [
+        (WAVE_OUT_GET_PITCH, true),
+        (WAVE_OUT_SET_PITCH, false),
+        (WAVE_OUT_GET_PLAYBACK_RATE, true),
+        (WAVE_OUT_SET_PLAYBACK_RATE, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Exit codes 2 to 25: three for the device, three for a handle
+        // that isn't one.
+        for (j, (handle, error)) in [(None, 8), (Some(0x1234), 5)].into_iter().enumerate() {
+            let fail = 2 + 6 * i as u8 + 3 * j as u8;
+            mark(&mut code);
+            match handle {
+                None => push_word(&mut code, HANDLE),
+                Some(h) => _ = code.push(h),
+            }
+            if get {
+                code.emit(&[0x1E]).push(TIME);
+            } else {
+                code.push(1).push(0); // 1.0 in 16.16
+            }
+            code.call("MMSYSTEM", ordinal);
+            expect_ax(&mut code, error, fail);
+            expect(&mut code, TIME, 0xEEEE, true, fail + 1);
+            expect(&mut code, TIME + 2, 0xFFFF, true, fail + 2);
+        }
+    }
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_CLOSE)
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let (exit, log) = run("wave_pitch_rate", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
 }
 
@@ -1359,7 +1411,7 @@ fn mci_send_command_gives_sysinfos_name_in_a_16_bit_buffer() {
 
 /// The frames of an AVI file: twelve uncompressed 24-bit 32x32
 /// pictures, with an index.
-fn avi_clip() -> Vec<u8> {
+pub(crate) fn avi_clip() -> Vec<u8> {
     fn chunk(out: &mut Vec<u8>, id: &[u8], data: &[u8]) {
         out.extend_from_slice(id);
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -1609,4 +1661,580 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
         });
         assert_eq!(exit, 1, "{test}: {log}");
     }
+}
+
+/// MMSYSTEM's functions for drivers, and KERNEL's GetModuleHandle.
+const MCI_SET_DRIVER_DATA: u16 = 707;
+const MCI_GET_DRIVER_DATA: u16 = 708;
+const GET_MODULE_HANDLE: u16 = 47;
+const GET_DRIVER_MODULE_HANDLE: u16 = 254;
+const MCI_GETDEVCAPS: u16 = 0x80B;
+const MCIERR_FILE_NOT_FOUND: u16 = 275;
+
+/// What the test driver keeps in its data segment: how far its opening
+/// got (1 after DRV_LOAD, 2 after DRV_ENABLE).
+const DRIVER_STATE: u16 = 0x10;
+
+/// `cmp ax,value` and a `jne` over what follows, whose place
+/// `skip_to_here` patches.
+fn when_ax(code: &mut Code, value: u16) -> usize {
+    code.emit(&[0x3D, lo(value), hi(value), 0x75, 0x00]);
+    code.bytes.len() - 1
+}
+
+/// The `jne` at `at` goes here.
+fn skip_to_here(code: &mut Code, at: usize) {
+    let distance = code.bytes.len() - (at + 1);
+    code.bytes[at] = u8::try_from(distance).expect("a short jump");
+}
+
+/// `mov ax,value`, `cwd` (DX:AX `value`), and a `jmp` to the end, whose
+/// place goes in `ends`.
+fn answer(code: &mut Code, value: u16, ends: &mut Vec<usize>) {
+    code.emit(&[0xB8, lo(value), hi(value), 0x99, 0xE9, 0x00, 0x00]);
+    ends.push(code.bytes.len() - 2);
+}
+
+/// An installable MCI driver, TESTMCI: LibMain, and DriverProc, which
+/// answers the messages that open and close it, refuses DRV_OPEN unless
+/// DRV_LOAD and DRV_ENABLE came first, its lParam1 is the rest of the
+/// [mci] line ("hello") and its lParam2 an MCI_OPEN_DRIVER_PARMS, gives
+/// its device type as animation and returns the device's id as the
+/// driver's. MCI_OPEN_DRIVER refuses an element that doesn't start with
+/// 'C' (MCIERR_FILE_NOT_FOUND), and keeps 12345678h as the device's
+/// data, read from the program's MCI_OPEN_PARMS's wDeviceID, which
+/// MCI_STATUS gives back in dwReturn, read with the driver's id.
+/// MCI_GETDEVCAPS gives back GetDriverModuleHandle of the handle the
+/// driver is given. Other commands are MCIERR_UNSUPPORTED_FUNCTION.
+fn test_mci_driver() -> Vec<u8> {
+    let mut code = Code::new();
+    code.emit(&[0xB8, 0x01, 0x00, 0xCB]); // LibMain: mov ax,1; retf
+    let driver_proc = code.here();
+    // DriverProc(dwDriverID, hDriver, wMessage, lParam1, lParam2): after
+    // push bp, lParam2 at [bp+6], lParam1 at [bp+10], wMessage at
+    // [bp+14], dwDriverID at [bp+18].
+    code.emit(&[0x55, 0x8B, 0xEC, 0x1E]); // push bp; mov bp,sp; push ds
+    let data_at = code.here() + 1;
+    code.emit(&[0xB8, 0xFF, 0xFF, 0x8E, 0xD8]); // mov ax,data; mov ds,ax
+    code.fixup(
+        data_at,
+        ne::ADDR_SELECTOR,
+        ne::Target::Internal {
+            segment: 2,
+            offset: 0,
+        },
+    );
+    code.emit(&[0x8B, 0x46, 0x0E]); // mov ax,[bp+14]
+    let mut ends = Vec::new();
+    // DRV_LOAD.
+    let next = when_ax(&mut code, 1);
+    set(&mut code, DRIVER_STATE, 1);
+    answer(&mut code, 1, &mut ends);
+    skip_to_here(&mut code, next);
+    // DRV_ENABLE, after DRV_LOAD.
+    let next = when_ax(&mut code, 2);
+    code.emit(&[0x83, 0x3E, lo(DRIVER_STATE), hi(DRIVER_STATE), 0x01]); // cmp word [state],1
+    code.emit(&[0x75, 0x06]); // jne over the next
+    set(&mut code, DRIVER_STATE, 2);
+    answer(&mut code, 1, &mut ends);
+    skip_to_here(&mut code, next);
+    // DRV_OPEN, after DRV_ENABLE.
+    let next = when_ax(&mut code, 3);
+    code.emit(&[0x83, 0x3E, lo(DRIVER_STATE), hi(DRIVER_STATE), 0x02]); // cmp word [state],2
+    code.emit(&[0x75, 0x1A]); // jne to the refusal
+    code.emit(&[0xC4, 0x5E, 0x0A]); // les bx,[bp+10]
+    code.emit(&[0x26, 0x80, 0x3F, b'h']); // cmp byte es:[bx],'h'
+    code.emit(&[0x75, 0x11]); // jne to the refusal
+    code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
+    code.emit(&[0x26, 0xC7, 0x47, 0x08, 0x06, 0x02]); // mov word es:[bx+8],206h
+    code.emit(&[0x26, 0x8B, 0x07, 0x31, 0xD2]); // mov ax,es:[bx]; xor dx,dx
+    code.emit(&[0xE9, 0x00, 0x00]);
+    ends.push(code.bytes.len() - 2);
+    answer(&mut code, 0, &mut ends);
+    skip_to_here(&mut code, next);
+    // MCI_OPEN_DRIVER: the element starts with 'C', then
+    // mciSetDriverData(wDeviceID, 12345678h).
+    let next = when_ax(&mut code, 0x801);
+    code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
+    code.emit(&[0x26, 0xC4, 0x5F, 0x0C]); // les bx,es:[bx+12]
+    code.emit(&[0x26, 0x80, 0x3F, b'C']); // cmp byte es:[bx],'C'
+    code.emit(&[0x74, 0x07]); // je over the refusal
+    answer(&mut code, MCIERR_FILE_NOT_FOUND, &mut ends);
+    code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
+    code.emit(&[0x26, 0xFF, 0x77, 0x04]); // push word es:[bx+4]
+    code.push(0x1234).push(0x5678);
+    code.call("MMSYSTEM", MCI_SET_DRIVER_DATA);
+    answer(&mut code, 0, &mut ends);
+    skip_to_here(&mut code, next);
+    // MCI_STATUS: dwReturn is mciGetDriverData(dwDriverID).
+    let next = when_ax(&mut code, MCI_STATUS);
+    code.emit(&[0xFF, 0x76, 0x12]); // push word [bp+18]
+    code.call("MMSYSTEM", MCI_GET_DRIVER_DATA);
+    code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
+    code.emit(&[0x26, 0x89, 0x47, 0x04]); // mov es:[bx+4],ax
+    code.emit(&[0x26, 0x89, 0x57, 0x06]); // mov es:[bx+6],dx
+    answer(&mut code, 0, &mut ends);
+    skip_to_here(&mut code, next);
+    // MCI_GETDEVCAPS: dwReturn is GetDriverModuleHandle(hDriver).
+    let next = when_ax(&mut code, MCI_GETDEVCAPS);
+    code.emit(&[0xFF, 0x76, 0x10]); // push word [bp+16]
+    code.call("USER", GET_DRIVER_MODULE_HANDLE);
+    code.emit(&[0xC4, 0x5E, 0x06]); // les bx,[bp+6]
+    code.emit(&[0x26, 0x89, 0x47, 0x04]); // mov es:[bx+4],ax
+    code.emit(&[0x26, 0xC7, 0x47, 0x06, 0x00, 0x00]); // mov word es:[bx+6],0
+    answer(&mut code, 0, &mut ends);
+    skip_to_here(&mut code, next);
+    // MCI_CLOSE_DRIVER, DRV_CLOSE, DRV_DISABLE and DRV_FREE.
+    for (message, value) in [(0x802, 0), (4, 1), (5, 1), (6, 1)] {
+        let next = when_ax(&mut code, message);
+        answer(&mut code, value, &mut ends);
+        skip_to_here(&mut code, next);
+    }
+    // MCIERR_UNSUPPORTED_FUNCTION.
+    code.emit(&[0xB8, 0x12, 0x01, 0x99]);
+    let end = code.here();
+    for at in ends {
+        let at = at as u16;
+        code.patch(at, end.wrapping_sub(at + 2));
+    }
+    code.emit(&[0x1F, 0x5D, 0xCA, 0x10, 0x00]); // pop ds; pop bp; retf 16
+    win16::library("TESTMCI", &code, &[("DriverProc", driver_proc)])
+}
+
+/// MCI_OPEN of `element` with WIN.INI's [mci extensions] giving .TST
+/// the type TestAnim, which SYSTEM.INI's [mci] gives the 16-bit driver
+/// TESTMCI.DRV in the system folder, as Outpost's setup installs
+/// MCIAAP.DRV for .FLC. The open loads it and opens a device through
+/// its DriverProc (`test_mci_driver`): wDeviceID gets the device's id,
+/// the reserved word after it is left alone, and lpstrElementName is
+/// as the program set it. MCI_STATUS goes to the driver with the
+/// program's block and gets the data MCI_OPEN_DRIVER kept, and
+/// MCI_GETDEVCAPS the driver's instance; a play gets the driver's error
+/// as it is. The close closes the device and frees the driver, after
+/// which the id is no device's. The run's exit code, 1 or the check
+/// that failed, and its log.
+fn open_through_driver(test: &str, element: &[u8]) -> (u8, String) {
+    let mut code = Code::new();
+    let (_, element_place) = open_parms(&mut code);
+    mci(&mut code, MCI_OPEN, MCI_OPEN_ELEMENT, OPEN, 0, 2);
+    code.emit(&[0xA1, lo(OPEN + 12), hi(OPEN + 12)]); // mov ax,[OPEN+12]
+    let restored = code.here() + 1;
+    expect_ax(&mut code, 0, 12);
+    expect(&mut code, DEVICE, 0xEEEE, false, 3);
+    expect(&mut code, DEVICE, 0, false, 3);
+    expect(&mut code, DEVICE + 2, 0xCAFE, true, 4);
+    for i in 0..6 {
+        set(&mut code, STATUS + 2 * i, 0);
+    }
+    set(&mut code, STATUS + 8, MCI_STATUS_MODE);
+    mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, 5);
+    expect(&mut code, STATUS + 4, 0x5678, true, 6);
+    expect(&mut code, STATUS + 6, 0x1234, true, 7);
+    // GetDriverModuleHandle gave the driver its own instance: the module
+    // of that instance is TESTMCI's.
+    mci(&mut code, MCI_GETDEVCAPS, 0, STATUS, 0, 13);
+    code.push(0);
+    push_word(&mut code, STATUS + 4);
+    code.call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0xA3, lo(INFO), hi(INFO)]); // mov [INFO],ax
+    let module_name = code.here() + 2;
+    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x3B, 0x06, lo(INFO), hi(INFO)]) // cmp ax,[INFO]
+        .emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, 14, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,14; exit
+    let unsupported = 274;
+    mci(&mut code, MCI_PLAY, 0, 0, unsupported, 8);
+    mci(&mut code, MCI_CLOSE, 0, 0, 0, 9);
+    let invalid = MCIERR_INVALID_DEVICE_ID;
+    mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, invalid, 10);
+    let name = code.here() + 2;
+    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE);
+    expect_ax(&mut code, 0, 11);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let element_at = code.here();
+    code.emit(element).emit(&[0]);
+    let name_at = code.here();
+    code.emit(b"TESTMCI\0");
+    code.patch(element_place, element_at);
+    code.patch(restored, element_at);
+    code.patch(name, name_at);
+    code.patch(module_name, name_at);
+    run_with(test, program(&code, CODE), |_, dir| {
+        let system = dir.join("WINDOWS").join("SYSTEM");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(system.join("TESTMCI.DRV"), test_mci_driver()).unwrap();
+        let windows = dir.join("WINDOWS");
+        let system_ini = "[mci]\r\nTestAnim=testmci.drv hello\r\n";
+        std::fs::write(windows.join("SYSTEM.INI"), system_ini).unwrap();
+        let win_ini = "[mci extensions]\r\ntst=TestAnim\r\n";
+        std::fs::write(windows.join("WIN.INI"), win_ini).unwrap();
+        std::fs::write(dir.join("CLIP.TST"), b"a film").unwrap();
+    })
+}
+
+#[test]
+fn an_element_opens_through_the_installable_driver_its_extension_names() {
+    let (exit, log) = open_through_driver("mci_driver16", b"CLIP.TST");
+    assert_eq!(exit, 1, "{log}");
+    assert!(
+        log.contains("MCI driver testmci.drv for CLIP.TST: device"),
+        "{log}"
+    );
+}
+
+/// "type!element" opens the type's driver for an element whose
+/// extension has none, the device is named by the element alone, and
+/// the driver gets the element alone (it refuses one that doesn't start
+/// with 'C'), as WINMM does for its own types (`mci::open`).
+#[test]
+fn a_type_before_the_element_opens_its_installable_driver() {
+    let (exit, log) = open_through_driver("mci_driver16_bang", b"TestAnim!CLIP.XYZ");
+    assert_eq!(exit, 1, "{log}");
+    assert!(
+        log.contains("MCI driver testmci.drv for CLIP.XYZ: device"),
+        "{log}"
+    );
+}
+
+/// MMSYSTEM's mmio ordinals, and where the mmio tests keep two MMIOINFOs.
+const MMIO_OPEN: u16 = 1210;
+const MMIO_CLOSE: u16 = 1211;
+const MMIO_GET_INFO: u16 = 1215;
+const MMIO_SET_INFO: u16 = 1216;
+const MMIO_INFO: u16 = 0x100;
+const MMIO_INFO2: u16 = 0x180;
+
+/// Open a memory file with a 64 KB buffer, `buffer` filling in pchBuffer
+/// of the MMIOINFO at MMIO_INFO or leaving it null for MMIO_ALLOCBUF
+/// (`alloc`). mmioGetInfo's pchBuffer and pchEndWrite are at `offset`,
+/// and pchEndWrite, just past the buffer, has the selector stepped by
+/// __AHINCR (8), as a huge pointer is. mmioSetInfo takes it back, and
+/// the next mmioGetInfo gives the same.
+fn mmio_64_kb_buffer(name: &str, buffer: impl FnOnce(&mut Code), alloc: bool, offset: u16) {
+    let mut code = Code::new();
+    // push ds; pop es; mov di,MMIO_INFO; mov cx,80h; xor ax,ax; cld;
+    // rep stosw
+    code.emit(&[0x1E, 0x07, 0xBF, lo(MMIO_INFO), hi(MMIO_INFO)])
+        .emit(&[0xB9, 0x80, 0x00, 0x31, 0xC0, 0xFC, 0xF3, 0xAB]);
+    set(&mut code, MMIO_INFO + 4, 0x454D); // fccIOProc "MEM "
+    set(&mut code, MMIO_INFO + 6, 0x204D);
+    set(&mut code, MMIO_INFO + 18, 1); // cchBuffer 10000h
+    buffer(&mut code);
+    // mmioOpen(NULL, &info, MMIO_CREATE | MMIO_READWRITE, and
+    // MMIO_ALLOCBUF for `alloc`)
+    code.push(0)
+        .push(0)
+        .emit(&[0x1E])
+        .push(MMIO_INFO)
+        .push(u16::from(alloc))
+        .push(0x1002);
+    code.call("MMSYSTEM", MMIO_OPEN);
+    code.emit(&[0x85, 0xC0]) // test ax,ax
+        .emit(&[0x75, 0x06, 0xB0, 2, 0xB4, 0x4C, 0xCD, 0x21]);
+    code.emit(&[0xA3, lo(HANDLE), hi(HANDLE)]); // mov [HANDLE],ax
+    let get_info = |code: &mut Code, at: u16, fail: u8| {
+        push_word(code, HANDLE);
+        code.emit(&[0x1E]).push(at).push(0);
+        code.call("MMSYSTEM", MMIO_GET_INFO);
+        expect_ax(code, 0, fail);
+        expect(code, at + 20, offset, true, fail + 1); // pchBuffer's offset
+        expect(code, at + 32, offset, true, fail + 2); // pchEndWrite's
+        // mov ax,[pchBuffer's selector]; add ax,8; cmp ax,[pchEndWrite's]
+        code.emit(&[0xA1, lo(at + 22), hi(at + 22), 0x05, 0x08, 0x00])
+            .emit(&[0x3B, 0x06, lo(at + 34), hi(at + 34)])
+            .emit(&[0x74, 0x06, 0xB0, fail + 3, 0xB4, 0x4C, 0xCD, 0x21]);
+    };
+    get_info(&mut code, MMIO_INFO2, 3);
+    push_word(&mut code, HANDLE);
+    code.emit(&[0x1E]).push(MMIO_INFO2).push(0);
+    code.call("MMSYSTEM", MMIO_SET_INFO);
+    expect_ax(&mut code, 0, 7);
+    get_info(&mut code, MMIO_INFO, 8);
+    push_word(&mut code, HANDLE);
+    code.push(0).call("MMSYSTEM", MMIO_CLOSE);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run(name, program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_full_64_kb_mmio_buffer_ends_at_the_next_tile() {
+    // The buffer MMIO_ALLOCBUF gives, as Civilization II opens its
+    // intro's sound: at S:0000, so pchEndWrite is S+8:0000.
+    mmio_64_kb_buffer("mmio_huge_end", |_| {}, true, 0);
+}
+
+#[test]
+fn a_64_kb_mmio_buffer_inside_a_huge_block_ends_in_its_tile() {
+    // The program's buffer at S+8:8000 of a 192 KB block at S:0000, a
+    // tile into the block and halfway through it: pchEndWrite is
+    // S+16:8000, in the block's third tile, which the buffer's own
+    // selector S+8 reaches.
+    const GLOBAL_ALLOC: u16 = 15;
+    const GLOBAL_LOCK: u16 = 18;
+    let buffer = |code: &mut Code| {
+        // GlobalLock(GlobalAlloc(GMEM_FIXED, 30000h)): the block at DX:AX.
+        code.push(0).push(3).push(0).call("KERNEL", GLOBAL_ALLOC);
+        code.emit(&[0x50]).call("KERNEL", GLOBAL_LOCK); // push ax
+        // add dx,8; mov [pchBuffer's selector],dx
+        code.emit(&[0x83, 0xC2, 0x08])
+            .emit(&[0x89, 0x16, lo(MMIO_INFO + 22), hi(MMIO_INFO + 22)]);
+        set(code, MMIO_INFO + 20, 0x8000);
+    };
+    mmio_64_kb_buffer("mmio_huge_inside", buffer, false, 0x8000);
+}
+
+const CREATE_PALETTE: u16 = 360;
+const WSPRINTF: u16 = 420;
+const MCI_SETVIDEO: u16 = 0x876;
+const MCI_DGV_SETVIDEO_ITEM: u32 = 0x10_0000;
+const MCI_DGV_SETVIDEO_VALUE: u32 = 0x100_0000;
+const MCI_DGV_SETVIDEO_PALHANDLE: u16 = 0x4007;
+
+/// Where the MCI_SETVIDEO program keeps its MCI_DGV_SETVIDEO_PARMS, its
+/// LOGPALETTE, the palette's handle and the command string it makes.
+const SETVIDEO: u16 = 0x80;
+const LOGPAL: u16 = 0xA0;
+const HPAL: u16 = 0xB0;
+const COMMAND: u16 = 0xC0;
+
+#[test]
+fn mci_setvideo_gives_an_avi_device_the_programs_palette() {
+    // The Magic School Bus Explores the Solar System draws its scenes
+    // and its movies through one identity palette: it sends
+    // `setvideo <alias> palette handle to <hpal> wait`, made with
+    // wsprintf, and `setaudio <alias> off wait`. MCIAVI then draws with
+    // that palette, so `status palette handle` gives it, and closing the
+    // device leaves it to the program. The built-in Windows didn't know
+    // the commands (MCIERR_UNRECOGNIZED_COMMAND) and realized a palette
+    // of its own in the program's window, which sent the program's to
+    // the background. Exit code 1, or the check that failed.
+    let mut code = Code::new();
+    let open = mci_string(&mut code, 2);
+    code.emit(&[0x0E]); // push cs
+    let alias = code.here() + 1;
+    code.push(0).call("MMSYSTEM", MCI_GET_DEVICE_ID);
+    expect_nonzero(&mut code, 3);
+    code.emit(&[0xA3, lo(DEVICE), hi(DEVICE)]); // mov [DEVICE],ax
+    // CreatePalette of one colour.
+    set(&mut code, LOGPAL, 0x300);
+    set(&mut code, LOGPAL + 2, 1);
+    set(&mut code, LOGPAL + 4, 0x2010);
+    set(&mut code, LOGPAL + 6, 0x0030);
+    code.emit(&[0x1E]).push(LOGPAL); // push ds
+    code.call("GDI", CREATE_PALETTE);
+    expect_nonzero(&mut code, 4);
+    code.emit(&[0xA3, lo(HPAL), hi(HPAL)]); // mov [HPAL],ax
+    // wsprintf(DS:COMMAND, the format, [HPAL]), cdecl.
+    push_word(&mut code, HPAL);
+    code.emit(&[0x0E]); // push cs
+    let format = code.here() + 1;
+    code.push(0).emit(&[0x1E]).push(COMMAND); // push ds
+    code.call("USER", WSPRINTF);
+    code.emit(&[0x83, 0xC4, 0x0A]); // add sp,10
+    // mciSendString(DS:COMMAND, DS:BUFFER, 32, 0).
+    code.emit(&[0x1E]).push(COMMAND); // push ds
+    code.emit(&[0x1E]).push(BUFFER).push(32).push(0); // push ds
+    code.call("MMSYSTEM", MCI_SEND_STRING);
+    expect_ax(&mut code, 0, 5);
+    // MCI_STATUS of MCI_DGV_STATUS_HPAL gives the program's palette.
+    set(&mut code, STATUS, 0);
+    set(&mut code, STATUS + 2, 0);
+    set(&mut code, STATUS + 8, MCI_DGV_STATUS_HPAL);
+    set(&mut code, STATUS + 10, 0);
+    mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, 6);
+    // mov ax,[HPAL]; cmp ax,[STATUS+4]
+    code.emit(&[0xA1, lo(HPAL), hi(HPAL)]);
+    code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
+    code.emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, 7, 0xB4, 0x4C, 0xCD, 0x21]);
+    // MCI_DGV_SETVIDEO_PARMS through mciSendCommand: a handle of 0 gives
+    // the device a palette of its own again, the halftone palette's 256
+    // colours of a 24-bit movie, and the program's palette goes back in.
+    for (value, fail) in [(None, 11), (Some(HPAL), 15)] {
+        for k in 0..8 {
+            set(&mut code, SETVIDEO + 2 * k, 0);
+        }
+        set(&mut code, SETVIDEO + 4, MCI_DGV_SETVIDEO_PALHANDLE);
+        if let Some(at) = value {
+            // mov ax,[at]; mov [SETVIDEO+8],ax
+            code.emit(&[0xA1, lo(at), hi(at)]);
+            code.emit(&[0xA3, lo(SETVIDEO + 8), hi(SETVIDEO + 8)]);
+        }
+        let flags = MCI_DGV_SETVIDEO_ITEM | MCI_DGV_SETVIDEO_VALUE;
+        mci(&mut code, MCI_SETVIDEO, flags, SETVIDEO, 0, fail);
+        mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, fail + 1);
+        // mov ax,[HPAL]; cmp ax,[STATUS+4]
+        code.emit(&[0xA1, lo(HPAL), hi(HPAL)]);
+        code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
+        let same = if value.is_some() { 0x74 } else { 0x75 }; // je or jne
+        code.emit(&[same, 0x06]) // over the next
+            .emit(&[0xB0, fail + 2, 0xB4, 0x4C, 0xCD, 0x21]);
+        if value.is_none() {
+            // GetPaletteEntries(the device's palette, 0, 0, NULL).
+            push_word(&mut code, STATUS + 4);
+            code.push(0).push(0).push(0).push(0);
+            code.call("GDI", GET_PALETTE_ENTRIES);
+            expect_ax(&mut code, 256, fail + 3);
+        }
+    }
+    let mute = mci_string(&mut code, 8);
+    mci(&mut code, MCI_CLOSE, 0, 0, 0, 9);
+    // The palette is still there: GetPaletteEntries(hpal, 0, 0, NULL).
+    push_word(&mut code, HPAL);
+    code.push(0).push(0).push(0).push(0);
+    code.call("GDI", GET_PALETTE_ENTRIES);
+    expect_ax(&mut code, 1, 10);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    for (place, text) in [
+        (open, &b"open CLIP.AVI alias c\0"[..]),
+        (alias, b"c\0"),
+        (format, b"setvideo c palette handle to %u wait\0"),
+        (mute, b"setaudio c off wait\0"),
+    ] {
+        let at = code.here();
+        code.emit(text);
+        code.patch(place, at);
+    }
+    let (exit, log) = run_with("mci_setvideo", program(&code, CODE), |cpu, dir| {
+        cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+        std::fs::write(dir.join("CLIP.AVI"), avi_clip()).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+}
+
+const MMIO_READ: u16 = 1212;
+const MMIO_INSTALL_IO_PROC: u16 = 1221;
+const GET_SELECTOR_LIMIT: u16 = 188;
+
+/// Where the I/O procedure test keeps things: the file's name, its
+/// handle, what was read, the first byte of the name the procedure got,
+/// how many times it was closed, and the selector of the buffer its last
+/// MMIOM_READ got.
+const IO_NAME: u16 = 0x40;
+const IO_HANDLE: u16 = 0x50;
+const IO_BUFFER: u16 = 0x60;
+const IO_NAME0: u16 = 0x70;
+const IO_CLOSES: u16 = 0x72;
+const IO_SEL: u16 = 0x74;
+
+/// A 16-bit I/O procedure, IOProc(lpmmioinfo, wMsg, lParam1, lParam2),
+/// Pascal's: MMIOM_OPEN keeps the name's first byte at IO_NAME0 and
+/// starts at 0 (adwInfo[0] is the place), MMIOM_READ gives "HELLO" at
+/// the place 0 and nothing after, moving lDiskOffset, keeping the
+/// buffer's selector at IO_SEL, and MMIOM_CLOSE counts at IO_CLOSES. DS
+/// is the program's, the stack's.
+fn io_proc() -> Vec<u8> {
+    let mut c: Vec<u8> = Vec::new();
+    let mut to_ret0 = Vec::new();
+    c.extend([0x55, 0x8B, 0xEC]); // push bp; mov bp,sp
+    c.extend([0x8B, 0x46, 0x0E]); // mov ax,[bp+0Eh]: wMsg
+    c.extend([0x3D, 0x03, 0x00, 0x75, 0x00]); // cmp ax,3 (MMIOM_OPEN); jne
+    let not_open = c.len() - 1;
+    c.extend([0xC4, 0x5E, 0x10]); // les bx,[bp+10h]: the MMIOINFO
+    c.extend([0x26, 0xC7, 0x47, 0x2C, 0x00, 0x00]); // mov word es:[bx+2Ch],0
+    c.extend([0xC4, 0x5E, 0x0A]); // les bx,[bp+0Ah]: the name
+    c.extend([0x26, 0x8A, 0x07]); // mov al,es:[bx]
+    c.extend([0xA2, lo(IO_NAME0), hi(IO_NAME0)]); // mov [IO_NAME0],al
+    c.extend([0xEB, 0x00]); // jmp ret0
+    to_ret0.push(c.len() - 1);
+    c[not_open] = (c.len() - not_open - 1) as u8;
+    c.extend([0x3D, 0x04, 0x00, 0x75, 0x06]); // cmp ax,4 (MMIOM_CLOSE); jne
+    c.extend([0xFF, 0x06, lo(IO_CLOSES), hi(IO_CLOSES)]); // inc word [IO_CLOSES]
+    c.extend([0xEB, 0x00]); // jmp ret0
+    to_ret0.push(c.len() - 1);
+    c.extend([0x85, 0xC0, 0x75, 0x00]); // test ax,ax (MMIOM_READ); jnz ret0
+    to_ret0.push(c.len() - 1);
+    c.extend([0x8B, 0x46, 0x0C]); // mov ax,[bp+0Ch]: the buffer's selector
+    c.extend([0xA3, lo(IO_SEL), hi(IO_SEL)]); // mov [IO_SEL],ax
+    c.extend([0xC4, 0x5E, 0x10]); // les bx,[bp+10h]
+    c.extend([0x26, 0x83, 0x7F, 0x2C, 0x00, 0x75, 0x00]); // cmp word es:[bx+2Ch],0; jne ret0
+    to_ret0.push(c.len() - 1);
+    c.extend([0xC4, 0x7E, 0x0A]); // les di,[bp+0Ah]: the buffer
+    c.extend([0x26, 0xC7, 0x05, b'H', b'E']); // mov word es:[di],"HE"
+    c.extend([0x26, 0xC7, 0x45, 0x02, b'L', b'L']); // mov word es:[di+2],"LL"
+    c.extend([0x26, 0xC6, 0x45, 0x04, b'O']); // mov byte es:[di+4],'O'
+    c.extend([0xC4, 0x5E, 0x10]); // les bx,[bp+10h]
+    c.extend([0x26, 0xC7, 0x47, 0x2C, 0x05, 0x00]); // mov word es:[bx+2Ch],5
+    c.extend([0x26, 0x83, 0x47, 0x28, 0x05]); // add word es:[bx+28h],5: lDiskOffset
+    c.extend([0xB8, 0x05, 0x00, 0x31, 0xD2, 0xEB, 0x04]); // mov ax,5; xor dx,dx; jmp done
+    let ret0 = c.len();
+    for at in to_ret0 {
+        c[at] = (ret0 - at - 1) as u8;
+    }
+    c.extend([0x31, 0xC0, 0x31, 0xD2]); // xor ax,ax; xor dx,dx
+    c.extend([0x5D, 0xCA, 0x0E, 0x00]); // done: pop bp; retf 14
+    c
+}
+
+/// A Windows 3.1 program installs its own I/O procedure for 'TST ' and
+/// opens "X.TST+A": mmio calls the 16-bit procedure with the name and a
+/// 16-bit MMIOINFO, reads through it, and closes through it, and
+/// MMIO_FINDPROC gives the 16-bit procedure back. The selector a read's
+/// buffer is passed with is free once the read returns. MMSYSTEM had no
+/// mmioInstallIOProc, and a program that imports it, as The Magic School
+/// Bus Explores the Solar System's MSPAM.DLL does to read its sounds from
+/// its compound file, ended at its first call.
+#[test]
+fn a_programs_own_io_procedure_reads_its_files() {
+    let fcc = u32::from_le_bytes(*b"TST ");
+    let mut code = Code::new();
+    let mut proc_at = Vec::new();
+    set(&mut code, IO_CLOSES, 0);
+    set(&mut code, IO_SEL, 0);
+    // mmioInstallIOProc('TST ', proc, MMIO_INSTALLPROC).
+    code.push((fcc >> 16) as u16).push(fcc as u16);
+    code.emit(&[0x0E]);
+    proc_at.push(code.here() + 1);
+    code.push(0).push(1).push(0);
+    code.call("MMSYSTEM", MMIO_INSTALL_IO_PROC);
+    expect_nonzero(&mut code, 1);
+    // mmioOpen("X.TST+A", NULL, MMIO_READ).
+    for (i, pair) in b"X.TST+A\0".chunks(2).enumerate() {
+        let word = u16::from_le_bytes([pair[0], pair[1]]);
+        set(&mut code, IO_NAME + 2 * i as u16, word);
+    }
+    code.emit(&[0x1E])
+        .push(IO_NAME)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0);
+    code.call("MMSYSTEM", MMIO_OPEN);
+    expect_nonzero(&mut code, 2);
+    code.emit(&[0xA3, lo(IO_HANDLE), hi(IO_HANDLE)]); // mov [IO_HANDLE],ax
+    expect(&mut code, IO_NAME0, u16::from(b'X'), true, 3);
+    // GetSelectorLimit(the read's selector): 0, as it is free.
+    expect(&mut code, IO_SEL, 0, false, 11);
+    push_word(&mut code, IO_SEL);
+    code.call("KERNEL", GET_SELECTOR_LIMIT);
+    expect_ax(&mut code, 0, 10);
+    // mmioRead(hmmio, IO_BUFFER, 5).
+    push_word(&mut code, IO_HANDLE);
+    code.emit(&[0x1E]).push(IO_BUFFER).push(0).push(5);
+    code.call("MMSYSTEM", MMIO_READ);
+    expect_ax(&mut code, 5, 4);
+    expect(&mut code, IO_BUFFER, u16::from_le_bytes(*b"HE"), true, 5);
+    expect(&mut code, IO_BUFFER + 4, u16::from(b'O'), true, 6);
+    // mmioClose(hmmio, 0).
+    push_word(&mut code, IO_HANDLE);
+    code.push(0);
+    code.call("MMSYSTEM", MMIO_CLOSE);
+    expect_ax(&mut code, 0, 7);
+    expect(&mut code, IO_CLOSES, 1, true, 8);
+    // mmioInstallIOProc('TST ', NULL, MMIO_FINDPROC): the procedure.
+    code.push((fcc >> 16) as u16).push(fcc as u16);
+    code.push(0).push(0).push(4).push(0);
+    code.call("MMSYSTEM", MMIO_INSTALL_IO_PROC);
+    proc_at.push(code.here() + 1);
+    code.emit(&[0x3D, 0, 0]); // cmp ax,proc
+    code.emit(&[0x74, 0x06, 0xB0, 9, 0xB4, 0x4C, 0xCD, 0x21]);
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let proc = code.here();
+    code.emit(&io_proc());
+    for at in proc_at {
+        code.patch(at, proc);
+    }
+    let (exit, log) = run("mmio_io_proc16", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }

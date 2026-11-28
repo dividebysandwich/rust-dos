@@ -31,3 +31,4 @@ mod win16_tests;
 mod win16_toolhelp_tests;
 mod win16_typelib_tests;
 mod win16_user_tests;
+mod win16_vfw_tests;

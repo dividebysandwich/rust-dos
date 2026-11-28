@@ -277,8 +277,9 @@ fn new_ddb_in(
     )
 }
 
-/// The default bitmap, which a bitmap of no size is.
-fn default_bitmap(cpu: &mut Cpu) -> u32 {
+/// The default bitmap, which a bitmap of no size is, and which a new
+/// memory DC has selected.
+pub fn default_bitmap(cpu: &mut Cpu) -> u32 {
     init(cpu);
     super::handle(super::DEFAULT_BITMAP as usize)
 }
@@ -947,24 +948,47 @@ pub fn read_dib(
     start: u32,
     lines: u32,
 ) -> Option<Surface> {
+    read_dib_drawn(cpu, info, bits, start, lines).map(|(s, _)| s)
+}
+
+/// `read_dib`, and for an RLE DIB which of the surface's pixels its codes
+/// set, a row of `info.width` at a time in the surface's order. Windows
+/// draws only those: SetDIBitsToDevice and StretchDIBits leave the
+/// destination as it was where the codes skip pixels, and programs that
+/// play a film as RLE frames of what changed (Autodesk's AAPLAY) rely on
+/// it.
+pub fn read_dib_drawn(
+    cpu: &mut Cpu,
+    info: &DibInfo,
+    bits: u32,
+    start: u32,
+    lines: u32,
+) -> Option<(Surface, Option<Vec<bool>>)> {
     let height = info.abs_height();
     let lines = (lines as i32).min(height - start as i32).max(0);
     let mut s = Surface::memory(info.width, lines, info.bpp, info.colors.clone(), info.masks);
     s.pal_indices = info.pal_indices.clone();
     if info.compression == BI_RLE8 || info.compression == BI_RLE4 {
-        let full = read_rle(cpu, info, bits);
+        let codes = read_rle_codes(cpu, info, bits);
+        let full = decode_rle(&codes, info);
+        let width = info.width.max(0) as usize;
+        let all = rle_drawn(&codes, width, height as usize, info.compression == BI_RLE4);
+        let mut drawn = vec![false; width * lines as usize];
         // `full` has the scan lines from the bottom; `s` has them from
         // the last one wanted, as for bits that aren't compressed.
         let stride = s.stride;
         for i in 0..lines as usize {
             let scan = start as usize + i;
             let at = scan * stride;
+            let row = lines as usize - 1 - i;
             if at + stride <= full.len() {
-                let row = lines as usize - 1 - i;
                 s.data[row * stride..row * stride + stride].copy_from_slice(&full[at..at + stride]);
             }
+            if let Some(from) = all.get(scan * width..scan * width + width) {
+                drawn[row * width..row * width + width].copy_from_slice(from);
+            }
         }
-        return Some(s);
+        return Some((s, Some(drawn)));
     }
     let stride = s.stride;
     let mut data = vec![0u8; stride * lines as usize];
@@ -983,13 +1007,18 @@ pub fn read_dib(
             s.data[r * stride..r * stride + stride].copy_from_slice(&data[from..from + stride]);
         }
     }
-    Some(s)
+    Some((s, None))
 }
 
 /// The RLE8 or RLE4 DIB `info`'s codes at `bits`, unpacked into plain
-/// rows from the bottom: biSizeImage bytes of codes, or as many as the
-/// plain rows take if it is 0.
+/// rows from the bottom.
 fn read_rle(cpu: &mut Cpu, info: &DibInfo, bits: u32) -> Vec<u8> {
+    decode_rle(&read_rle_codes(cpu, info, bits), info)
+}
+
+/// The RLE8 or RLE4 DIB `info`'s codes at `bits`: biSizeImage bytes, or
+/// as many as the plain rows take if it is 0.
+fn read_rle_codes(cpu: &mut Cpu, info: &DibInfo, bits: u32) -> Vec<u8> {
     let size = if info.image_size != 0 {
         info.image_size.min(MAX_BITS as u32)
     } else {
@@ -997,7 +1026,7 @@ fn read_rle(cpu: &mut Cpu, info: &DibInfo, bits: u32) -> Vec<u8> {
     };
     let mut data = vec![0u8; size as usize];
     cpu.bus.guest_read_bytes(bits, &mut data);
-    decode_rle(&data, info)
+    data
 }
 
 /// Decode an RLE8 or RLE4 DIB into rows of its bits, bottom first.
@@ -1016,9 +1045,7 @@ fn decode_rle(data: &[u8], info: &DibInfo) -> Vec<u8> {
 /// way onto the picture before.
 pub fn rle_onto(out: &mut [u8], data: &[u8], width: usize, stride: usize, four: bool) {
     let height = out.len().checked_div(stride).unwrap_or(0);
-    let (mut x, mut y) = (0usize, 0usize);
-    let mut i = 0;
-    let put = |out: &mut [u8], x: usize, y: usize, v: u8| {
+    rle_walk(data, four, |x, y, v| {
         if y >= height || x >= width {
             return;
         }
@@ -1033,7 +1060,28 @@ pub fn rle_onto(out: &mut [u8], data: &[u8], width: usize, stride: usize, four: 
         } else {
             out[row + x] = v;
         }
-    };
+    });
+}
+
+/// Which pixels the RLE8 codes `data` (RLE4 with `four`) of a DIB
+/// `width` by `height` set, a row at a time from the bottom: those they
+/// pass over with a delta or by ending a line or the bitmap early are
+/// false.
+fn rle_drawn(data: &[u8], width: usize, height: usize, four: bool) -> Vec<bool> {
+    let mut drawn = vec![false; width * height];
+    rle_walk(data, four, |x, y, _| {
+        if y < height && x < width {
+            drawn[y * width + x] = true;
+        }
+    });
+    drawn
+}
+
+/// Run the RLE8 codes `data` (RLE4 with `four`): `put` gets each pixel
+/// they set, its column, its row from the bottom and its value.
+fn rle_walk(data: &[u8], four: bool, mut put: impl FnMut(usize, usize, u8)) {
+    let (mut x, mut y) = (0usize, 0usize);
+    let mut i = 0;
     while i + 1 < data.len() {
         let (n, v) = (data[i] as usize, data[i + 1]);
         i += 2;
@@ -1044,7 +1092,7 @@ pub fn rle_onto(out: &mut [u8], data: &[u8], width: usize, stride: usize, four: 
                 } else {
                     v
                 };
-                put(out, x, y, value);
+                put(x, y, value);
                 x += 1;
             }
             continue;
@@ -1076,7 +1124,7 @@ pub fn rle_onto(out: &mut [u8], data: &[u8], width: usize, stride: usize, four: 
                     } else {
                         byte
                     };
-                    put(out, x, y, value);
+                    put(x, y, value);
                     x += 1;
                 }
                 i += bytes.next_multiple_of(2);
@@ -1114,7 +1162,7 @@ pub fn set_di_bits_to_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let height = info.abs_height();
-    let Some(src) = read_dib(cpu, &info, bits, start, lines) else {
+    let Some((src, drawn)) = read_dib_drawn(cpu, &info, bits, start, lines) else {
         return Some(0);
     };
     let (w, h) = (w as i32, h as i32);
@@ -1136,6 +1184,7 @@ pub fn set_di_bits_to_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         surface: src,
         bk_color: 0xFFFFFF,
         origin: (0, 0),
+        drawn,
     };
     draw::blit_from(
         cpu,
@@ -1170,7 +1219,7 @@ pub fn stretch_dib(cpu: &mut Cpu, args: &[u32], halftone: bool) -> Option<u32> {
     let (x0, y0) = dc.to_device(xd as i32, yd as i32);
     let (x1, y1) = dc.to_device(xd as i32 + wd as i32, yd as i32 + hd as i32);
     let source = if draw::uses_source((rop >> 16) as u8) {
-        let Some(mut src) = read_dib(cpu, &info, bits, 0, height as u32) else {
+        let Some((mut src, drawn)) = read_dib_drawn(cpu, &info, bits, 0, height as u32) else {
             return Some(0);
         };
         let (xs, ys, ws, hs) = (xs as i32, ys as i32, ws as i32, hs as i32);
@@ -1196,6 +1245,7 @@ pub fn stretch_dib(cpu: &mut Cpu, args: &[u32], halftone: bool) -> Option<u32> {
                 surface: src,
                 bk_color: 0xFFFFFF,
                 origin: (0, 0),
+                drawn,
             },
             rect,
         ))

@@ -191,12 +191,14 @@ pub static MODULES: &[&Def] = &[
     &super::misc::DISPLAY,
     &super::setupx::MODULE,
     &super::ole2::COMPOBJ,
-    &super::ole2::STORAGE,
+    &super::storage::STORAGE,
     &super::ole2::OLE2,
     &super::ole2::OLE2NLS,
     &super::ole2disp::OLE2DISP,
     &super::typelib::TYPELIB,
     &super::universal::WIN32S16,
+    &super::vfw::AVIFILE,
+    &super::vfw::MSVIDEO,
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",
@@ -312,6 +314,18 @@ pub fn of_file(file: &[u8]) -> Option<usize> {
         .position(|def| parsed.name() == def.name && *text == description(def))
 }
 
+/// The size of USER's automatic data segment, its DGROUP. USER's
+/// instance is that segment's selector, which Windows gives as the
+/// desktop window's GWW_HINSTANCE. On Windows 3.1 a window's HWND is
+/// the offset of its WND there, and programs written for it read and
+/// write a window's WND at that offset: Civilization II's CIVJUMP.DLL
+/// writes hwndOwner at hwnd+6. Windows 95 kept the WND elsewhere, and
+/// its USER's DGROUP is a data segment where such a write changes no
+/// window (a probe on Windows 95 OSR2.5: limit 21Fh, the write at +6
+/// leaves GetWindow(GW_OWNER) as it was). Here it is 64 KB of zeros, so
+/// every 16-bit HWND is an offset inside it.
+const USER_DGROUP: u32 = 0x1_0000;
+
 /// The NE image of the system module `index`, to build, the values of its
 /// constants from `constant`.
 fn builder(index: usize, constant: impl Fn(fn(&Cpu) -> u16) -> u16) -> ne::Builder {
@@ -349,13 +363,18 @@ fn builder(index: usize, constant: impl Fn(fn(&Cpu) -> u16) -> u16) -> ne::Build
         })
         .copied()
         .collect();
-    if !data.is_empty() {
+    // USER's variables, if it had any, would start its DGROUP.
+    let dgroup = std::ptr::eq(def, &super::user::MODULE);
+    if !data.is_empty() || dgroup {
         b.segment(ne::SegmentSpec {
             data,
             flags: ne::SEG_DATA,
-            alloc: 0,
+            alloc: if dgroup { USER_DGROUP } else { 0 },
             relocations: Vec::new(),
         });
+    }
+    if dgroup {
+        b.auto_data(2, 0, 0);
     }
     b.description(&description(def));
     b.expected_version(0x030A);
@@ -705,7 +724,11 @@ pub fn thunk16_id() -> u16 {
 /// built-in DLL `dll` in the running process, whose image of the DLL may
 /// be from an older table (`stub_tables::stub_address_in`).
 pub fn win32_address(cpu: &Cpu, dll: &str, function: &str) -> Option<u32> {
-    let index = crate::win32::stubs::find_dll(dll)?;
+    address_in(cpu, crate::win32::stubs::find_dll(dll)?, function)
+}
+
+/// `win32_address` of the DLL `index` of `stubs::DLLS`.
+fn address_in(cpu: &Cpu, index: usize, function: &str) -> Option<u32> {
     let api = crate::win32::stubs::DLLS[index]
         .apis
         .iter()
@@ -814,7 +837,15 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             handler(cpu, &args)
         }
         Run::Win32(dll, function, ret) => {
-            match win32_address(cpu, dll, function) {
+            let Some(index) = super::task::map_dll(cpu, dll) else {
+                crate::win32::fatal(
+                    cpu,
+                    &format!("{}.{} goes on to {}, which isn't there", def.name, api.name, dll),
+                    None,
+                );
+                return;
+            };
+            match address_in(cpu, index, function) {
                 Some(target) => {
                     auto_thunk(cpu, target, api.args, &raw, ret);
                     // Converting no handle, the stub changes nothing but

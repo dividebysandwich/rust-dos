@@ -109,10 +109,21 @@ fn delete_tree(cpu: &mut Cpu, dir: &str) -> bool {
 /// The program and the arguments of a command line. The program ends
 /// where CreateProcessA finds it does, so an unquoted one can have spaces
 /// in its path; one that isn't there ends at its closing quote, or at the
-/// first space.
+/// first space. Quotes around the whole line can be the DDE string's,
+/// which Windows 3.1 setups put around a command line with arguments:
+/// The Magic School Bus Explores the Solar System adds
+/// `"WINHELP.EXE C:\MSKIDS\MSBSOLAR\README.HLP"`. When the quoted text
+/// isn't a program, the program is looked for in the line inside them.
 fn split_command(cpu: &mut Cpu, line: &str) -> (String, String) {
     let line = line.trim();
     if let Some(found) = kernel32::program_in_line(cpu, line) {
+        return (found.name.to_string(), found.args.trim().to_string());
+    }
+    let inner = line
+        .strip_prefix('"')
+        .and_then(|l| l.strip_suffix('"'))
+        .filter(|l| !l.contains('"'));
+    if let Some(found) = inner.and_then(|l| kernel32::program_in_line(cpu, l)) {
         return (found.name.to_string(), found.args.trim().to_string());
     }
     if let Some(rest) = line.strip_prefix('"') {

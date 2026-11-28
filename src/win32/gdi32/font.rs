@@ -28,7 +28,10 @@
 //! (GdiGetCharDimensions), so a dialog's size and the way its text wraps
 //! come out as on Windows. MS Sans Serif's 8-point size, too narrow for
 //! a squeezed ROM glyph to stay legible, has glyphs drawn for it in
-//! `sans8`.
+//! `sans8`. System's 16-pixel size, VGASYS.FON's, is drawn with the
+//! glyphs of Wine's System font (`system16`), which has VGASYS.FON's
+//! widths: squeezed into them and made bold, the ROM's serifs and
+//! slashed zero ran together.
 //!
 //! Arial, Times New Roman and Courier New, the TrueType faces, take
 //! metrics and widths that roughly match the real fonts' dimensions
@@ -48,6 +51,7 @@ use super::fnt::{AddedFile, Fnt};
 use super::ttf::{self, Ttf};
 use super::draw::{Canvas, Fill, value_for};
 use super::sans8;
+use super::system16;
 use super::truetype;
 use super::{CB_AT, CB_LIST, CB_PARAM, CB_PROC};
 use super::{
@@ -562,10 +566,18 @@ fn raster_width(r: &Raster, page: CodePage, b: u8, x_scale: i32) -> i32 {
 /// ones), or else the most common width of the ASCII letters with as many
 /// lit columns, or the size's average. In MS Sans Serif's 8-point size, a
 /// letter `sans8` draws (one with an accent, or with a stroke) is as wide
-/// as its glyph.
+/// as its glyph, and in System's 16-pixel size a character `system16`
+/// draws with a glyph of its own (`system16_lacks`) moves on as far as
+/// that font's does.
 fn derived_width(r: &Raster, c: u16) -> i32 {
     if is_sans8(r)
         && let Some(w) = sans8::width(c)
+    {
+        return w;
+    }
+    if is_system16(r)
+        && !system16_lacks(r, c)
+        && let Some(w) = system16::advance(c)
     {
         return w;
     }
@@ -910,20 +922,52 @@ fn is_sans8(r: &Raster) -> bool {
     r.face == SANS_FACE && r.height == sans8::HEIGHT as i32
 }
 
-/// The glyph `sans8` draws for the byte `b` of the code page `page` in
-/// the raster size `r`, `w` wide, if `r` is MS Sans Serif's 8-point size
-/// and the character has one: its rows stretched to the key's cell and
+/// Whether the raster size `r` is System's 16-pixel one, whose glyphs
+/// `system16` has.
+fn is_system16(r: &Raster) -> bool {
+    r.face == SYSTEM_FACE && r.height == system16::HEIGHT as i32
+}
+
+/// Whether `system16` draws the character `c` with the bar of the raster
+/// size `r`'s default character, as Wine's System font does the
+/// characters of code page 1252's 80h to 9Fh that VGASYS.FON lacks (€,
+/// ƒ, ˆ, Œ, ˜, œ and Ÿ). In code page 1252 the bar is what Windows draws
+/// for them; in another code page they are letters its font has.
+fn system16_lacks(r: &Raster, c: u16) -> bool {
+    let default = CodePage::WESTERN.char(r.default);
+    c != default
+        && system16::advance(c)
+            .is_some_and(|w| system16::glyph(c, w) == system16::glyph(default, w))
+}
+
+/// The glyph drawn for the byte `b` of the code page `page` in the
+/// raster size `r`, `w` wide, if the size has drawn glyphs and the
+/// character has one: `sans8`'s for MS Sans Serif's 8-point size, and
+/// for System's 16-pixel size `system16`'s where it moves on as far as
+/// `w`, unless it is the bar for a character VGASYS.FON lacks and the
+/// code page isn't 1252. Its rows are stretched to the key's cell and
 /// width by whole numbers, and made bold as `raster_glyphs` does. A
-/// character stretched past the 60 columns `raster_glyphs` gives a glyph
-/// has none: its ROM glyph squeezed into them keeps all its strokes,
-/// where the drawn one would lose its right side.
+/// character stretched past the 60 columns `raster_glyphs` gives a
+/// glyph has none: its ROM glyph squeezed into them keeps all its
+/// strokes, where the drawn one would lose its right side.
 fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Vec<u64>> {
-    if !is_sans8(r) || b < 0x20 || w - 1 > 60 {
+    if b < 0x20 || w - 1 > 60 {
         return None;
     }
     let x_scale = key.glyph_width.max(1);
     let y_scale = (key.cell / r.height).max(1) as usize;
-    let rows = sans8::glyph(page.char(b), w / x_scale - 1)?;
+    let made_bold = key.bold && FACES[r.face].weight < 600;
+    let rows: &[u64] = if is_sans8(r) {
+        &sans8::glyph(page.char(b), w / x_scale - 1)?
+    } else if is_system16(r) {
+        let c = page.char(b);
+        if page.number() != CodePage::WESTERN.number() && system16_lacks(r, c) {
+            return None;
+        }
+        &system16::glyph(c, w / x_scale)?
+    } else {
+        return None;
+    };
     let wide = |row: u64| {
         (0..64 / x_scale)
             .filter(|x| row >> x & 1 != 0)
@@ -933,7 +977,7 @@ fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Ve
         rows.iter()
             .flat_map(|&row| {
                 let mut out = wide(row);
-                if key.bold {
+                if made_bold {
                     out |= out << 1;
                 }
                 std::iter::repeat_n(out, y_scale)
@@ -944,9 +988,9 @@ fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Ve
 
 /// The glyphs of a raster size: each byte's ROM glyph, its lit columns
 /// squeezed or stretched to the character's width less the column
-/// between characters, or the glyph `sans8` draws. A bold face's widths
-/// have its extra column in them; a font made bold moves on a column
-/// more.
+/// between characters, or the glyph `drawn_rows` gives. A bold face's
+/// widths have its extra column in them; a font made bold moves on a
+/// column more.
 fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let native_bold = FACES[r.face].weight >= 600;
     let made_bold = key.bold && !native_bold;
@@ -1638,15 +1682,35 @@ pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
         (y1 - y0).abs() * log.height.signum()
     };
     let width = dc.width_to_device(log.width.abs());
+    realize_sized(cpu, &log, height, width)
+}
+
+/// The font the LOGFONTA `log` gives on a DC whose logical units are
+/// its pixels (MM_TEXT), as a memory DC of the screen has them. OLE's
+/// standard font object picks its font this way.
+pub fn realize_log(cpu: &mut Cpu, log: &[u8]) -> Realized {
+    let log = Log::of(log);
+    realize_sized(cpu, &log, log.height, log.width.abs())
+}
+
+/// The font of `log` at the device height and width given.
+fn realize_sized(cpu: &mut Cpu, log: &Log, height: i32, width: i32) -> Realized {
     let sys = System::of(cpu);
-    let sizes = file_sizes(cpu, &log);
-    if let Some(f) = realize_file(&log, &sys, &sizes, height, width) {
+    let sizes = file_sizes(cpu, log);
+    if let Some(f) = realize_file(log, &sys, &sizes, height, width) {
         return f;
     }
-    if let Some(f) = realize_added_truetype(&gdi(cpu).font_files, &log, &sys, height, width) {
+    if let Some(f) = realize_added_truetype(&gdi(cpu).font_files, log, &sys, height, width) {
         return f;
     }
-    realize(&log, &sys, height, width)
+    realize(log, &sys, height, width)
+}
+
+/// A new HFONT of the LOGFONTA `log` (60 bytes), for a built-in DLL.
+pub fn new_font(cpu: &mut Cpu, mut log: Vec<u8>) -> u32 {
+    log.resize(60, 0);
+    log[59] = 0;
+    add(cpu, Kind::Font { font: Font { log } })
 }
 
 /// The font of the DC `hdc`, or None with the error set.
@@ -1851,6 +1915,20 @@ pub fn get_text_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tm = text_metric(&dc, &f);
     cpu.bus.guest_write_bytes(args[1], &tm);
     Some(TRUE)
+}
+
+/// The TEXTMETRICW of the font of the DC `hdc`, the 57 bytes of its
+/// fields up to tmCharSet: TEXTMETRICA's with the four characters in
+/// Unicode. For a built-in DLL (OLE's IFont::QueryTextMetrics).
+pub fn text_metric_wide(cpu: &mut Cpu, hdc: u32) -> Option<Vec<u8>> {
+    let (dc, f) = font_of(cpu, hdc)?;
+    let a = text_metric(&dc, &f);
+    let mut b = a[..44].to_vec();
+    for &c in &a[44..48] {
+        b.extend_from_slice(&f.page.char(c).to_le_bytes());
+    }
+    b.extend_from_slice(&a[48..]);
+    Some(b)
 }
 
 fn write_size(cpu: &mut Cpu, at: u32, (w, h): (i32, i32)) {
@@ -3048,6 +3126,64 @@ mod tests {
         assert_eq!(f.ascent + f.descent, 16);
         assert!(f.weight >= 600);
         assert!(f.advance(b'W') > f.advance(b'i'));
+    }
+
+    #[test]
+    fn system_glyphs_have_vgasys_widths() {
+        // Wine's System font moves on as VGASYS.FON does for every
+        // character of code page 1252 that both have.
+        let r = &RASTERS[0];
+        assert_eq!((r.face, r.height), (SYSTEM_FACE, system16::HEIGHT as i32));
+        for b in 0x21..=0xFFu8 {
+            if (0x80..0xA0).contains(&b) {
+                continue;
+            }
+            let c = CodePage::WESTERN.char(b);
+            let w = r.widths[b as usize - 0x20] as i32;
+            assert_eq!(system16::advance(c), Some(w), "{b:02X}");
+        }
+    }
+
+    #[test]
+    fn system_bar_stands_for_a_missing_character_in_1252_only() {
+        // Wine's System font draws Œ, Ÿ, € and the like with the bar of
+        // VGASYS.FON's default character. Code page 1252's font lacks
+        // them; code page 1254's has them as letters.
+        let r = &RASTERS[0];
+        let key = |page: u32| Key {
+            page: page as u16,
+            base: 16,
+            cell: 16,
+            glyph_width: 1,
+            bold: true,
+            fixed: false,
+            widths: Widths::Raster(0),
+        };
+        let western = CodePage::WESTERN;
+        let w = raster_width(r, western, 0x9F, 1);
+        assert_eq!(w, 4);
+        let bar = drawn_rows(&key(1252), r, western, 0x80, 4).unwrap();
+        assert_eq!(drawn_rows(&key(1252), r, western, 0x9F, w), Some(bar));
+        // Ÿ in Turkish: as wide as Y, and not the bar.
+        let turkish = CodePage::by_number(1254).unwrap();
+        let w = raster_width(r, turkish, 0x9F, 1);
+        assert_eq!(w, raster_width(r, western, b'Y', 1));
+        assert_eq!(drawn_rows(&key(1254), r, turkish, 0x9F, w), None);
+        assert_eq!(drawn_rows(&key(1254), r, turkish, 0x8C, 4), None);
+    }
+
+    #[test]
+    fn system_zero_is_a_plain_oval() {
+        // VGASYS.FON's zero has no stroke through it: two-pixel sides
+        // and nothing lit between them below its top and above its
+        // bottom. The ROM's slashed zero squeezed into its width wasn't.
+        let log = Log::of(&logfont(0, 0, 0, 0, 0, "System"));
+        let f = realize(&log, 0, 0);
+        let g = f.glyph(b'0');
+        assert_eq!(g.advance, 8);
+        let lit: Vec<u64> = g.rows.iter().copied().filter(|&r| r != 0).collect();
+        assert_eq!(lit.len(), 10);
+        assert!(lit[1..9].iter().all(|&r| r == 0b11_0011 << 1), "{lit:?}");
     }
 
     #[test]

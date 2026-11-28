@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 4;
-const WIN32_VERSION: u16 = 116;
+const WIN32_VERSION: u16 = 121;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -94,10 +94,17 @@ const WIN32_VERSION: u16 = 116;
 /// (`win16::notify::NOTIFY_SAVED`), 71's to 113's the last errors
 /// outside the TIBs and the TLS slots at TIB+100h
 /// (`win32::thread::TIB_98`, which the load moves), 71's to 114's no
-/// VxD handles (`object::Kind::Vxd`, which they load without), and
-/// 71's to 115's no Unicode interfaces of DirectInput
-/// (`dinput::WIDE_SAVED`).
-const WIN32_LOADS: [u16; 46] = [
+/// VxD handles (`object::Kind::Vxd`, which they load without), 71's
+/// to 115's no Unicode interfaces of DirectInput
+/// (`dinput::WIDE_SAVED`), 71's to 116's no True Color desktop depths
+/// (`DesktopDepth::TrueColor24` and `TrueColor32`, which they load
+/// without), 71's to 117's not the order the Win16 selectors were freed in
+/// (`win16::ldt::FREED_SAVED`), 71's to 118's not the in-process servers a
+/// Win16 task's COMPOBJ loaded (`win16::ole2::SERVERS_SAVED`), 71's to
+/// 119's no OLE standard font or picture objects
+/// (`oleaut32::font::FONTS_SAVED`), and 71's to 120's no devices of
+/// 16-bit MCI drivers (`winmm::mci::DRIVERS16_SAVED`).
+const WIN32_LOADS: [u16; 51] = [
     71,
     72,
     73,
@@ -143,6 +150,11 @@ const WIN32_LOADS: [u16; 46] = [
     113,
     114,
     115,
+    116,
+    117,
+    118,
+    119,
+    120,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1308,6 +1320,11 @@ mod tests {
         (114, 0x21C4_F6F9_14CC_F1AA), // the last error and TLS slots in the TIB, as Windows 98's
         (115, 0x3DE4_F58C_0828_F3E7), // VxD handles of DeviceIoControl
         (116, 0x331A_F2D2_3CFD_2C62), // DirectInput's Unicode interfaces
+        (117, 0x6D75_7369_BF80_C137), // the desktop depths of 24 and 32 bits
+        (118, 0x014E_6DAC_6954_2375), // the order the Win16 selectors were freed in
+        (119, 0xA26B_235A_D4AE_6628), // the in-process servers a Win16 task's COMPOBJ loaded
+        (120, 0xCDA4_31D7_E708_A90D), // OLEAUT32's standard font and picture objects
+        (121, 0xE067_B2D5_B323_BD88), // the devices of 16-bit MCI drivers
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
