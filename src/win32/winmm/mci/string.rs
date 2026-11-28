@@ -53,6 +53,8 @@ enum Field {
     CmdShow,
     WindowText,
     Hdc,
+    /// MCI_SETVIDEO's and MCI_SETAUDIO's value.
+    Value,
     /// A value the device works out itself (waveaudio's bytes a second
     /// and alignment, its input and output).
     Ignored,
@@ -120,6 +122,29 @@ const PLAY_VIDEO: &[Keyword] = &[
         video::MCI_MCIAVI_PLAY_FULLSCREEN,
         Arg::None,
     ),
+];
+
+/// digitalvideo's MCI_SETVIDEO: the palette the pictures are drawn
+/// with ("palette handle to"), and whether they show.
+const SETVIDEO: &[Keyword] = &[
+    (
+        &["palette", "handle"],
+        video::MCI_DGV_SETVIDEO_ITEM,
+        Arg::Item(video::MCI_DGV_SETVIDEO_PALHANDLE),
+    ),
+    (
+        &["to"],
+        video::MCI_DGV_SETVIDEO_VALUE,
+        Arg::Int(Field::Value),
+    ),
+    (&["on"], MCI_SET_ON, Arg::None),
+    (&["off"], MCI_SET_OFF, Arg::None),
+];
+
+/// digitalvideo's MCI_SETAUDIO: whether the sound plays.
+const SETAUDIO: &[Keyword] = &[
+    (&["on"], MCI_SET_ON, Arg::None),
+    (&["off"], MCI_SET_OFF, Arg::None),
 ];
 
 /// digitalvideo's MCI_WINDOW: the window, how it shows, its caption.
@@ -462,6 +487,8 @@ const VERBS: &[(&str, u32, &[Keyword])] = &[
     ("where", video::MCI_WHERE, WHERE),
     ("update", video::MCI_UPDATE, UPDATE),
     ("realize", video::MCI_REALIZE, REALIZE),
+    ("setvideo", video::MCI_SETVIDEO, SETVIDEO),
+    ("setaudio", video::MCI_SETAUDIO, SETAUDIO),
     ("spin", MCI_SPIN, &[]),
     ("sound", MCI_SOUND, &[]),
 ];
@@ -593,6 +620,7 @@ fn parse(mut rest: &[String], table: &[Keyword], p: &mut Parms) -> Result<u32, u
             Field::Hwnd => p.hwnd = v,
             Field::CmdShow => p.cmd_show = v,
             Field::Hdc => p.hdc = v,
+            Field::Value => p.value = v,
             Field::Type | Field::Alias | Field::WindowText | Field::Ignored => {}
         };
         match arg {

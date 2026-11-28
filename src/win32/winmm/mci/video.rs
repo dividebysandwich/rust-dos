@@ -59,6 +59,16 @@ pub const MCI_WINDOW: u32 = 0x0841;
 pub const MCI_PUT: u32 = 0x0842;
 pub const MCI_WHERE: u32 = 0x0843;
 pub const MCI_UPDATE: u32 = 0x0854;
+pub const MCI_SETAUDIO: u32 = 0x0873;
+pub const MCI_SETVIDEO: u32 = 0x0876;
+
+/// MCI_SETVIDEO's: an item and its value; the item that names the
+/// palette the pictures are drawn with.
+pub const MCI_DGV_SETVIDEO_ITEM: u32 = 0x0010_0000;
+pub const MCI_DGV_SETVIDEO_VALUE: u32 = 0x0100_0000;
+pub const MCI_DGV_SETVIDEO_PALHANDLE: u32 = 0x4007;
+/// MCI_SETAUDIO's item.
+pub const MCI_DGV_SETAUDIO_ITEM: u32 = 0x0080_0000;
 
 /// MCI_OPEN's flags of digitalvideo: the window's style and parent.
 pub const MCI_DGV_OPEN_WS: u32 = 0x0001_0000;
@@ -167,8 +177,9 @@ pub struct Video {
     /// The file, which a save state doesn't keep, and its decoder.
     pub media: Option<Arc<Media>>,
     pub pictures: Pictures,
-    /// On a palette device, the palette the pictures are drawn with,
-    /// once one was drawn, realized or asked for by MCI_STATUS
+    /// On a palette device, the palette the pictures are drawn with:
+    /// the program's, given with MCI_SETVIDEO, or the device's own, made
+    /// once a frame was drawn, realized or asked for by MCI_STATUS
     /// (`movie_palette`); 0 before.
     pub palette: u32,
     /// Whether the palette is realized as a background palette: the
@@ -334,10 +345,12 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
             leave_full_screen(cpu, i);
             // The device's palette is the system's (`add_system`), so it
             // is still there when a process that ended closes its
-            // devices. Only a palette is deleted: DeleteObject of another
-            // handle sets the last error, of a process that may be gone.
+            // devices. Only that palette is deleted: a program's, given
+            // with MCI_SETVIDEO, stays the program's, and DeleteObject of
+            // another handle sets the last error, of a process that may
+            // be gone.
             let palette = std::mem::take(&mut video(cpu, i).palette);
-            if crate::win32::gdi32::gdi(cpu).palette(palette).is_some() {
+            if own_palette(cpu, palette) {
                 crate::win32::gdi32::delete_object(cpu, &[palette]);
             }
             // A process that ended has no windows left, and no process
@@ -397,6 +410,8 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
         MCI_PUT => put(cpu, i, flags, p),
         MCI_WHERE => place(cpu, i, flags, p),
         MCI_UPDATE => update(cpu, i, flags, p),
+        MCI_SETVIDEO => set_video(cpu, i, flags, p),
+        MCI_SETAUDIO => set_audio(cpu, i, flags, p),
         MCI_RECORD | MCI_SAVE => MCIERR_UNSUPPORTED_FUNCTION,
         _ => MCIERR_UNRECOGNIZED_COMMAND,
     }
@@ -998,6 +1013,80 @@ fn capabilities(flags: u32, p: &mut Parms) -> u32 {
     0
 }
 
+/// Whether `hpal` is a palette a device made (`movie_palette`), a
+/// system object, rather than one a program gave it with MCI_SETVIDEO,
+/// and no open device draws with it. A program can give one device the
+/// palette of another (`status palette handle`), which stays that
+/// device's until it closes.
+fn own_palette(cpu: &mut Cpu, hpal: u32) -> bool {
+    if mci(cpu).devices.iter().any(|d| d.video.palette == hpal) {
+        return false;
+    }
+    let gdi = crate::win32::gdi32::gdi(cpu);
+    gdi.palette(hpal).is_some() && gdi.get(hpal).is_some_and(|o| o.pid == 0)
+}
+
+/// MCI_SETVIDEO: the palette the pictures are drawn and realized with,
+/// a program's (MCI_DGV_SETVIDEO_PALHANDLE), as MCIAVI takes it for
+/// DrawDib. A program that shares one identity palette between its own
+/// pictures and the movie's gives it so: with the device's own palette
+/// realized in its window the program's goes to the background, and its
+/// pictures to the nearest colors of the movie's. The device's own
+/// palette goes. A handle of 0 gives the device a palette of its own
+/// again, as DrawDibSetPalette of NULL does. "on" and "off" are taken
+/// and change nothing.
+fn set_video(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
+    if flags & MCI_SET_ON != 0 && flags & MCI_SET_OFF != 0 {
+        return MCIERR_FLAGS_NOT_COMPATIBLE;
+    }
+    if flags & MCI_DGV_SETVIDEO_ITEM == 0 {
+        return if flags & (MCI_SET_ON | MCI_SET_OFF) != 0 {
+            0
+        } else {
+            MCIERR_MISSING_PARAMETER
+        };
+    }
+    if p.item != MCI_DGV_SETVIDEO_PALHANDLE {
+        return MCIERR_UNSUPPORTED_FUNCTION;
+    }
+    if flags & MCI_DGV_SETVIDEO_VALUE == 0 {
+        return MCIERR_MISSING_PARAMETER;
+    }
+    if p.value != 0 && crate::win32::gdi32::gdi(cpu).palette(p.value).is_none() {
+        return MCIERR_OUTOFRANGE;
+    }
+    if flags & MCI_TEST != 0 {
+        return 0;
+    }
+    let old = std::mem::replace(&mut video(cpu, i).palette, p.value);
+    if old != p.value && own_palette(cpu, old) {
+        crate::win32::gdi32::delete_object(cpu, &[old]);
+    }
+    video(cpu, i).drawn = None;
+    0
+}
+
+/// MCI_SETAUDIO: "on" and "off" do as MCI_SET's audio on and off. Its
+/// items (the volume, the stream) aren't kept.
+fn set_audio(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
+    let (on, off) = (flags & MCI_SET_ON != 0, flags & MCI_SET_OFF != 0);
+    if on && off {
+        return MCIERR_FLAGS_NOT_COMPATIBLE;
+    }
+    if !on && !off {
+        return if flags & MCI_DGV_SETAUDIO_ITEM != 0 {
+            MCIERR_UNSUPPORTED_FUNCTION
+        } else {
+            MCIERR_MISSING_PARAMETER
+        };
+    }
+    if flags & MCI_TEST != 0 {
+        return 0;
+    }
+    let audio = MCI_SET_AUDIO | (flags & (MCI_SET_ON | MCI_SET_OFF));
+    set(cpu, i, audio, p)
+}
+
 /// MCI_WINDOW: the window it paints, how that shows, its caption.
 fn set_window(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     if flags & MCI_DGV_WINDOW_HWND != 0 {
@@ -1281,8 +1370,9 @@ fn status_palette(cpu: &mut Cpu, i: usize) -> u32 {
 /// The palette the device `i` draws `m` with on a palette device: the
 /// movie's own colours for an 8-bit movie, the palette of iccvid.dll's
 /// 8-bit output for a Cinepak movie, the halftone palette for one of
-/// more bits. It is made the first time it is asked for and kept in
-/// `Video::palette` until the device closes.
+/// more bits, unless a program gave its own with MCI_SETVIDEO. It is
+/// made the first time it is asked for and kept in `Video::palette`
+/// until the device closes or MCI_SETVIDEO gives another.
 fn movie_palette(cpu: &mut Cpu, i: usize, m: &Media) -> u32 {
     let hpal = video(cpu, i).palette;
     if crate::win32::gdi32::gdi(cpu).palette(hpal).is_some() {
