@@ -1,6 +1,10 @@
 use super::tests::{dynamic, same_as_generic, two_unit_state};
 use super::*;
 
+/// A captured state: its registers, the units it draws with, and its
+/// full and combine variants.
+type State = ([u32; 6], usize, Option<usize>, Option<usize>);
+
 /// The registers of Redguard's triangles with the most area in the fight
 /// on the ship (Glide 2, `RGFX.EXE`, on a Voodoo Graphics with two
 /// units), as the card has them: fbzMode, fbzColorPath, alphaMode,
@@ -8,7 +12,7 @@ use super::*;
 /// that draws them, if any, and the combine variant for their colour
 /// path. TMU 0 ignores TMU 1 in all of them, so they draw with one unit;
 /// TMU 1's mode isn't in the capture and stands here as 0.
-const SHIP: [([u32; 6], usize, Option<usize>, Option<usize>); 8] = [
+const SHIP: [State; 8] = [
     (
         [0x94739, 0x0D42_2429, 0x0004_0400, 0x01, 0x8C26_150F, 0],
         1,
@@ -75,7 +79,11 @@ fn redguards_variants_draw_as_the_generic_code() {
     for (state, tmus, full, combine) in SHIP {
         for regs in dynamic(state) {
             let expected = full.or(combine);
-            assert_eq!(variant(&two_unit_state(regs), tmus), expected, "{regs:08X?}");
+            assert_eq!(
+                variant(&two_unit_state(regs), tmus),
+                expected,
+                "{regs:08X?}"
+            );
             for id in [full, combine].into_iter().flatten() {
                 same_as_generic(regs, tmus, id);
             }

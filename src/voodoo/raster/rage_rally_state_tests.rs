@@ -1,6 +1,10 @@
 use super::tests::{draw_rows, dynamic, same_as_generic, two_unit_state};
 use super::*;
 
+/// A captured state: its registers, the units it draws with, and its
+/// full and combine variants.
+type State = ([u32; 6], usize, Option<usize>, Option<usize>);
+
 /// The registers of Rage Rally's triangles with the most area in a race
 /// at Goldstone (the built-in Direct3D HAL on a Voodoo3), as the card has
 /// them: fbzMode, fbzColorPath, alphaMode, fogMode and the textureMode of
@@ -8,7 +12,7 @@ use super::*;
 /// combine variant for their colour path. TMU 0 ignores TMU 1 in all of
 /// them, so they draw with one unit; TMU 1's mode isn't in the capture
 /// and stands here as the HAL's.
-const RACE: [([u32; 6], usize, Option<usize>, Option<usize>); 12] = [
+const RACE: [State; 12] = [
     (
         [
             0x94771,
