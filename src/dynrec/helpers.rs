@@ -256,14 +256,14 @@ const NO_SLOT: NoteSlot = NoteSlot {
 
 /// What a byte of `JitCtx::card_pages` allows on its page: the code
 /// writes the bytes itself, it reads them itself, and with `PAGE_COUNT`
-/// a write also counts as the VESA frame buffer's writes count (bytes
-/// for `cycles=auto` within a burst, a ToadForce's page counts), with
-/// `PAGE_SHOWN` as bytes of the picture `cycles=auto` knows. Bits 4 to
-/// 6 hold the number (from 1) of the `card_notes` slot whose surface a
-/// write's bytes go into, noted there. `PAGE_RETRY`: a write through the
-/// bus there can let the code write the page (`card_state` after it), or
-/// in a Banshee's memory a read or write can let it read or write it
-/// (`card_granted`).
+/// a write also counts as the VESA frame buffer's and a Banshee's
+/// desktop's writes count (bytes for `cycles=auto` within a burst, a
+/// ToadForce's page counts), with `PAGE_SHOWN` as bytes of the picture
+/// `cycles=auto` knows. Bits 4 to 6 hold the number (from 1) of the
+/// `card_notes` slot whose surface a write's bytes go into, noted there.
+/// `PAGE_RETRY`: a write through the bus there can let the code write
+/// the page (`card_state` after it), or in a Banshee's memory a read or
+/// write can let it read or write it (`card_granted`).
 pub const PAGE_WRITE: u8 = 1;
 pub const PAGE_READ: u8 = 2;
 pub const PAGE_COUNT: u8 = 4;
@@ -328,10 +328,7 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
             ctx.card_notes = [NO_SLOT; NOTES];
             ctx.card_origin = direct.shown.0;
             make_card_map(ctx, direct.len, 0, &direct.kept);
-            let pages = ctx.card_map.len();
-            for (page, flags) in ctx.card_map.iter_mut().enumerate() {
-                *flags = desktop_page(*flags, page, direct.shown, pages);
-            }
+            counted_pages(&mut ctx.card_map, direct.shown, DESKTOP);
             ctx.card_retry = false;
             if direct.grants.is_some() {
                 // Only the pages the card says, and the others may become
@@ -355,17 +352,7 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
             // The bytes `cycles=auto` counts as the picture's: on its
             // whole pages the code counts them too, the others are the
             // bus's.
-            let (start, end) = direct.counted;
-            if let Some((first, last)) = page_span(start, end, ctx.card_map.len()) {
-                for (i, flags) in ctx.card_map[first..=last].iter_mut().enumerate() {
-                    let at = ((first + i) << 12) as u64;
-                    if at >= start as u64 && at + 0x1000 <= end as u64 {
-                        *flags |= PAGE_SHOWN;
-                    } else {
-                        *flags &= !PAGE_WRITE;
-                    }
-                }
-            }
+            counted_pages(&mut ctx.card_map, direct.counted, PAGE_SHOWN);
             ctx.card_notes = [NO_SLOT; NOTES];
             for (i, note) in direct.notes[..direct.ahead].iter().enumerate() {
                 ctx.card_notes[i] = NoteSlot {
@@ -444,19 +431,25 @@ fn card_granted(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32) {
         page_span(start, end, ctx.card_map.len()).is_some_and(|(a, b)| (a..=b).contains(&page))
     });
     let flags = PAGE_READ | if whole && !kept { PAGE_WRITE } else { 0 };
-    let flags = desktop_page(flags, page, direct.shown, ctx.card_map.len());
+    let flags = counted_page(flags, page, direct.shown, ctx.card_map.len(), DESKTOP);
     if let Some(f) = ctx.card_map.get_mut(page) {
         *f = granted(flags, grant);
     }
 }
 
-/// What page `page` of `pages` in a Banshee's memory allows with `flags`
-/// from `make_card_map`, given the desktop shown (`Direct::shown`): on
-/// its whole pages a write counts for `cycles=auto` and as the picture's
-/// (`PAGE_COUNT`, `PAGE_SHOWN`), which the code does itself
-/// (`x64::card_count`); its partial pages are the bus's to write, which
-/// counts only the bytes in it.
-fn desktop_page(flags: u8, page: usize, (start, end): (u32, u32), pages: usize) -> u8 {
+/// What a write into a Banshee's desktop shown (`Direct::shown`) counts
+/// as on the desktop's whole pages: bytes for `cycles=auto` and the
+/// picture's (`counted_page`).
+const DESKTOP: u8 = PAGE_COUNT | PAGE_SHOWN;
+
+/// What page `page` of a map of `pages` allows with `flags`, given the
+/// bytes (start, end) whose writes count as the picture's for
+/// `cycles=auto`: a Banshee's desktop shown, or the part of the VESA
+/// frame buffer `LfbDirect::counted` names. On their whole pages a write
+/// counts with `add` (`PAGE_SHOWN` and on), which the code does itself
+/// (`x64::card_count`); their partial pages are the bus's to write, which
+/// counts only the bytes in them. Other pages keep `flags`.
+fn counted_page(flags: u8, page: usize, (start, end): (u32, u32), pages: usize, add: u8) -> u8 {
     let Some((first, last)) = page_span(start, end, pages) else {
         return flags;
     };
@@ -465,9 +458,17 @@ fn desktop_page(flags: u8, page: usize, (start, end): (u32, u32), pages: usize) 
     }
     let at = (page as u64) << 12;
     if at >= start as u64 && at + 0x1000 <= end as u64 {
-        flags | PAGE_COUNT | PAGE_SHOWN
+        flags | add
     } else {
         flags & !PAGE_WRITE
+    }
+}
+
+/// `counted_page` for every page of `map`.
+fn counted_pages(map: &mut [u8], counted: (u32, u32), add: u8) {
+    let pages = map.len();
+    for (page, flags) in map.iter_mut().enumerate() {
+        *flags = counted_page(*flags, page, counted, pages, add);
     }
 }
 
@@ -1619,10 +1620,15 @@ mod tests {
         let (start, span) = cpu.bus.banshee().unwrap().desktop_memory();
         assert_eq!(start, 0x8000);
         assert!((0x1010..0x1FF0).contains(&span), "{span:#x} bytes");
-        assert_eq!(pages(&ctx), (0..0x400).filter(|&p| p != 9).collect::<Vec<_>>());
+        assert_eq!(
+            pages(&ctx),
+            (0..0x400).filter(|&p| p != 9).collect::<Vec<_>>()
+        );
         let counted = |ctx: &JitCtx| -> Vec<usize> {
             let both = PAGE_COUNT | PAGE_SHOWN;
-            (0..ctx.card_map.len()).filter(|&p| ctx.card_map[p] & both == both).collect()
+            (0..ctx.card_map.len())
+                .filter(|&p| ctx.card_map[p] & both == both)
+                .collect()
         };
         assert_eq!(counted(&ctx), [8]);
         assert_eq!(ctx.card_origin, 0x8000);
