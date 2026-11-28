@@ -453,7 +453,14 @@ fn output_colours(cpu: &mut Cpu, output: u32) -> Option<Vec<[u8; 3]>> {
     }
     let mut quads = vec![0; 4 * count as usize];
     cpu.bus.guest_read_bytes(at, &mut quads);
-    Some(quads.as_chunks::<4>().0.iter().map(|q| [q[2], q[1], q[0]]).collect())
+    Some(
+        quads
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|q| [q[2], q[1], q[0]])
+            .collect(),
+    )
 }
 
 /// The formats of a decompression by the codec `fourcc`.
