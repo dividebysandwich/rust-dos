@@ -1172,6 +1172,8 @@ const fn full(tmus: usize, [fbz, cp, am, fog, t0, t1]: [u32; 6]) -> [(u32, u32);
 }
 
 /// The bits of textureMode that choose the texture combine (12-29).
+/// Trilinear (bit 30) also changes it, flipping the reverse blend bits at
+/// odd levels, but isn't fixed: a variant reads it from the register.
 const TC_FIXED: u32 = 0x3FFF_F000;
 
 /// A variant that fixes only fbzColorPath (as `CP_FIXED` says) and the

@@ -380,6 +380,7 @@ impl Tmu {
         // it off where bits 31:28 are set, which games leave so without
         // meaning it.
         let multibase = self.v2 && lod & (1 << 24) != 0 && lod >> 28 == 0;
+        let bases = [TEX_BASE_ADDR, TEX_BASE_ADDR_1, TEX_BASE_ADDR_2, TEX_BASE_ADDR_3_8];
         let mut offset = 0u32;
         for level in 0..=8usize {
             if level > 0 && self.lodmask & (1 << (level - 1)) != 0 {
@@ -390,7 +391,7 @@ impl Tmu {
                 offset = offset.wrapping_add(size << bppscale);
             }
             let range = if multibase { level.min(3) } else { 0 };
-            let base = address([TEX_BASE_ADDR, TEX_BASE_ADDR_1, TEX_BASE_ADDR_2, TEX_BASE_ADDR_3_8][range]);
+            let base = address(bases[range]);
             self.lodoffset[level] = base.wrapping_add(offset) & self.mask;
         }
 
