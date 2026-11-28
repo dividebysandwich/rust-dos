@@ -1560,7 +1560,10 @@ mod tests {
         let base = cpu.bus.voodoo.as_ref().unwrap().base().unwrap();
         let (cpu_ptr, ctx_ptr) = (&mut *cpu as *mut Cpu, &mut ctx as *mut JitCtx);
         // fbzMode (110h), which reads back the bits the chip has.
-        assert_eq!(jit_dev_write(cpu_ptr, ctx_ptr, base + 0x110, 0xFFFF_0310, 4), 0);
+        assert_eq!(
+            jit_dev_write(cpu_ptr, ctx_ptr, base + 0x110, 0xFFFF_0310, 4),
+            0
+        );
         assert_eq!(cpu.bus.read_32(base as usize + 0x110), 0x001F_0310);
         // A misaligned dword, as the bus splits it: the high half of
         // fbzMode and the low half of the register after it (lfbMode).
