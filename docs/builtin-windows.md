@@ -175,9 +175,9 @@ asking whether to make it.
 
 `C:\WINDOWS\WINHELP.EXE` and `WINHLP32.EXE` are there, as on Windows
 98, and open a Windows 3.1 help file (`.HLP`) in the same viewer a
-game's Help menu opens: `winhelp C:\GAME\README.HLP` at the DOS prompt,
-or a shortcut a setup made for it. The DOS prompt comes back once the
-viewer is closed. The command line's options (`-k`, `-n` and the
+game's Help menu opens: `C:\WINDOWS\WINHELP C:\GAME\README.HLP` at
+the DOS prompt, or a shortcut a setup made for it. The DOS prompt comes
+back once the viewer is closed. The command line's options (`-k`, `-n` and the
 others) aren't read, and WINHELP without a file ends at once instead of
 showing an empty window.
 
