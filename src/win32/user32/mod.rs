@@ -1460,6 +1460,9 @@ static APIS: &[Api] = &[
     // procedure (notepad.rs).
     stdcall("NotepadMain", 0, 0, notepad::main),
     stdcall("NotepadWndProc", 0, 4, notepad::wnd_proc),
+    // WinHelp, C:\WINDOWS\WINHELP.EXE and WINHLP32.EXE: its start
+    // (winhelp/program.rs).
+    stdcall("WinHelpMain", 0, 0, winhelp::program::main),
     // A 16-bit SendMessage to another task's window, and the 16-bit
     // Yield that receives what other tasks sent (message.rs).
     stdcall("SendMessage16", 0, 4, message::send_message16),
