@@ -771,10 +771,13 @@ fn disp_get_ids_of_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// arg_err): ITypeInfo::Invoke of `info` with the same arguments, as
 /// Windows makes it.
 fn disp_invoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[this, info, member, flags, params, result, excepinfo, arg_err] = args else {
-        unreachable!()
-    };
-    let invoke_args = [info, this, member, flags, params, result, excepinfo, arg_err];
+    // ITypeInfo::Invoke takes the type before the object, and the rest
+    // as they are.
+    let (this, info) = (args[0], args[1]);
+    let mut invoke_args = [0; 8];
+    invoke_args[0] = info;
+    invoke_args[1] = this;
+    invoke_args[2..].copy_from_slice(&args[2..]);
     if typelib::info_of(cpu, info).is_some() {
         return invoke::invoke(cpu, &invoke_args);
     }
