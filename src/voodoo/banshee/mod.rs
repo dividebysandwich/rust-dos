@@ -704,6 +704,7 @@ impl Banshee {
             "cursor": format!("{:08X}", self.reg(HW_CUR_LOC)),
             "overlay": format!("{:06X}", self.overlay_addr),
             "fifo": self.fifo.iter().map(|f| f.describe()).collect::<Vec<_>>(),
+            "plain_copy_pixels": self.engine.plain_pixels,
         })
     }
 }
