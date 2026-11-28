@@ -1295,6 +1295,19 @@ macro_rules! variants {
 // V19 the same blends untextured; C4 covers its other blends, fog modes,
 // filtering and texel formats.
 //
+// V20-V22 and C5-C7 are Rage Rally on the same HAL with the texture's
+// alpha: fbzColorPath 0x0C00_2405 (the texel times the iterated colour),
+// 0x0C58_2405 (its alpha also times the iterated alpha) and 0x0C58_0004
+// (the iterated colour with that alpha). V20 and V21 are its textured
+// states with the most area in a race at Goldstone, fogged and opaque,
+// with the alpha test off and on, and V22 the blended triangles it draws
+// untextured; C5-C7 cover its other states with those colour paths.
+// V23-V25 and C8 are Redguard's Glide renderer (`RGFX.EXE`): TMU 0's
+// texel times the iterated colour, with depth from W. V23 and V24 are
+// its textured states with the most area in the fight on the ship,
+// fogged and not, V25 its untextured one, and C8 its other blends and
+// texture formats.
+//
 // A triangle whose TMU 0 ignores TMU 1 draws with one unit (`units`), so
 // V0, V1, V16, V17, C3 and C4 are one-unit variants: they take those
 // triangles whatever TMU 1 holds, on a Voodoo2 or Voodoo3 as on a
@@ -1318,11 +1331,21 @@ variants! {
     V17: 1, full[0x90110, 0x0000_2401, 0x0004_6010, 0, 0x0C26_1A0F, 0];
     V18: 0, full[0x80100, 0, 0x0004_6010, 0, 0, 0];
     V19: 0, full[0x80100, 0, 0x0004_4410, 0, 0, 0];
+    V20: 1, full[0x90110, 0x0C00_2405, 0x0004_0400, 0x19, 0x0C26_1B0F, 0];
+    V21: 1, full[0x90110, 0x0C00_2405, 0x0004_0409, 0x19, 0x0C26_1B0F, 0];
+    V22: 0, full[0x90110, 0, 0x0104_5119, 0, 0, 0];
+    V23: 1, full[0x90118, 0x0D42_2429, 0x0004_0400, 0x01, 0x8C26_150F, 0];
+    V24: 1, full[0x90118, 0x0D42_2429, 0x0004_0400, 0, 0x8C26_150F, 0];
+    V25: 0, full[0x90118, 0x0542_610A, 0x0004_5110, 0, 0, 0];
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
     C2: 2, combine_only[0x0000_2401, 0x0000_0507, 0x0824_1507];
     C3: 1, combine_only[0x0C00_0035, 0x0C26_150F, 0];
     C4: 1, combine_only[0x0000_2401, 0x0C26_1A0F, 0];
+    C5: 1, combine_only[0x0C00_2405, 0x0C26_1A0F, 0];
+    C6: 1, combine_only[0x0C58_2405, 0x0C26_1A0F, 0];
+    C7: 1, combine_only[0x0C58_0004, 0x0C26_1A0F, 0];
+    C8: 1, combine_only[0x0D42_2429, 0x8C26_150F, 0];
 }
 
 /// The texture units a triangle with `texcount` units and `st`'s registers
@@ -2112,3 +2135,11 @@ mod myth_state_tests;
 #[cfg(test)]
 #[path = "raster/hal_state_tests.rs"]
 mod hal_state_tests;
+
+#[cfg(test)]
+#[path = "raster/rage_rally_state_tests.rs"]
+mod rage_rally_state_tests;
+
+#[cfg(test)]
+#[path = "raster/redguard_state_tests.rs"]
+mod redguard_state_tests;
