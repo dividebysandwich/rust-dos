@@ -1813,3 +1813,48 @@ fn a_windows_4_programs_read_only_or_disabled_edit_asks_for_static_colors() {
     let (exit, log) = run("edit_colors_read_only_4", program);
     assert_eq!(exit, ASKED_STATIC | BLACK_TEXT, "{log}");
 }
+
+#[test]
+fn the_desktops_instance_is_users_dgroup() {
+    // GetWindowWord(GetDesktopWindow(), GWW_HINSTANCE) gives USER's
+    // instance, its DGROUP, as LoadLibrary("USER.EXE") does, on Windows
+    // 95 too (16CEh both). Civilization II's CIVJUMP.DLL reads and writes
+    // the word at hwnd+6 in it, as a Windows 3.1 WND's hwndOwner: it must
+    // be there for any HWND. GetWindowLong(GWL_HINSTANCE) gives the same
+    // instance in AX. Exit code 1 when all holds.
+    const GET_DESKTOP_WINDOW: u16 = 286;
+    const GET_WINDOW_WORD: u16 = 133;
+    const GET_WINDOW_LONG: u16 = 135;
+    const LOAD_LIBRARY: u16 = 95;
+    const GWW_HINSTANCE: u16 = 0xFFFA;
+    let mut code = Code::new();
+    code.call("USER", GET_DESKTOP_WINDOW)
+        .emit(&[0x8B, 0xD8, 0x53, 0x50]) // mov bx,ax; push bx; push ax
+        .push(GWW_HINSTANCE)
+        .call("USER", GET_WINDOW_WORD)
+        .emit(&[0x8B, 0xF0]) // mov si,ax
+        .emit(&[0x0B, 0xC0, 0x75, 0x06, 0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21]);
+    let name_at = code.here() + 2;
+    code.push_far(0)
+        .call("KERNEL", LOAD_LIBRARY)
+        .emit(&[0x3B, 0xC6, 0x74, 0x06, 0xB0, 0x03, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0x5B, 0x53, 0x53]) // pop bx; push bx; push bx
+        .push(GWW_HINSTANCE)
+        .call("USER", GET_WINDOW_LONG)
+        .emit(&[0x3B, 0xC6, 0x74, 0x06, 0xB0, 0x05, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[
+            0x5B, // pop bx
+            0x8E, 0xC6, // mov es,si
+            0x26, 0x8B, 0x47, 0x06, // mov ax,es:[bx+6]
+            0x26, 0x89, 0x5F, 0x06, // mov es:[bx+6],bx
+            0x26, 0x3B, 0x5F, 0x06, // cmp bx,es:[bx+6]
+            0x74, 0x06, 0xB0, 0x04, 0xB4, 0x4C, 0xCD, 0x21, // je; or exit 4
+            0xB0, 0x01, // mov al,1
+        ])
+        .exit_al();
+    let name = code.here();
+    code.patch(name_at, name);
+    code.emit(b"USER.EXE\0");
+    let (exit, log) = run("desktop_instance", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
