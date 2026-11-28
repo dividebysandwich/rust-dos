@@ -2058,12 +2058,15 @@ fn mmio_to16(cpu: &Cpu, buffer: Option<[u32; 4]>, flat: u32) -> u32 {
     let Some([_, segptr, base, _]) = buffer else {
         return 0;
     };
-    let at = (segptr & 0xFFFF) + flat.wrapping_sub(base);
-    if flat < base || at > mmio_tiles(cpu, segptr) << 16 {
+    let Some(delta) = flat.checked_sub(base) else {
+        return 0;
+    };
+    let at = (segptr & 0xFFFF).saturating_add(delta);
+    if at > mmio_tiles(cpu, segptr) << 16 {
         return 0;
     }
     let sel = (segptr >> 16) + (at >> 16) * u32::from(super::ldt::AHINCR);
-    (sel & 0xFFFF) << 16 | at & 0xFFFF
+    ((sel & 0xFFFF) << 16) | (at & 0xFFFF)
 }
 
 /// A 16:16 pointer into the file's buffer, in any of its tiles, as a
