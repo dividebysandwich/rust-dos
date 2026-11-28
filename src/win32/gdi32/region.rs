@@ -247,42 +247,39 @@ impl Region {
             }
             _ => {}
         }
-        let mut xs: Vec<i32> = Vec::new();
-        let mut ys: Vec<i32> = Vec::new();
+        // A sweep down the rows where either region's rectangles start or
+        // end. Between two such rows each region is the same spans on
+        // every row, those of the rectangles that cross the band, and the
+        // result's spans there come from walking both lists once. Its
+        // cost grows with the rectangles each band crosses; testing every
+        // cell of the grid the edges make against every rectangle grows
+        // with their product, and child windows with round or polygon
+        // regions, a rectangle a row each, made that tens of milliseconds
+        // a BeginPaint.
+        let mut ys: Vec<i32> = Vec::with_capacity(2 * (self.rects.len() + other.rects.len()));
         for r in self.rects.iter().chain(&other.rects) {
-            xs.extend([r.left, r.right]);
             ys.extend([r.top, r.bottom]);
         }
-        xs.sort_unstable();
-        xs.dedup();
         ys.sort_unstable();
         ys.dedup();
+        let a = by_top(&self.rects);
+        let b = by_top(&other.rects);
+        let (mut next_a, mut next_b) = (0, 0);
+        let (mut live_a, mut live_b) = (Vec::new(), Vec::new());
+        let (mut spans_a, mut spans_b, mut spans) = (Vec::new(), Vec::new(), Vec::new());
         let mut rects = Vec::new();
         for band in ys.windows(2) {
             let (top, bottom) = (band[0], band[1]);
-            let mut run: Option<i32> = None;
-            for cell in xs.windows(2) {
-                let (left, right) = (cell[0], cell[1]);
-                let a = self.contains(left, top);
-                let b = other.contains(left, top);
-                let inside = match op {
-                    Op::And => a && b,
-                    Op::Or => a || b,
-                    Op::Xor => a != b,
-                    Op::Diff => a && !b,
-                };
-                match (inside, run) {
-                    (true, None) => run = Some(left),
-                    (false, Some(start)) => {
-                        rects.push(Rect::new(start, top, left, bottom));
-                        run = None;
-                    }
-                    _ => {}
-                }
-                if inside && cell[1] == *xs.last().unwrap() {
-                    rects.push(Rect::new(run.take().unwrap(), top, right, bottom));
-                }
-            }
+            enter(&a, &mut next_a, &mut live_a, top);
+            enter(&b, &mut next_b, &mut live_b, top);
+            spans_of(&live_a, &mut spans_a);
+            spans_of(&live_b, &mut spans_b);
+            combine_spans(&spans_a, &spans_b, op, &mut spans);
+            rects.extend(
+                spans
+                    .iter()
+                    .map(|&(left, right)| Rect::new(left, top, right, bottom)),
+            );
         }
         let mut region = Region { rects };
         region.merge_bands();
@@ -349,6 +346,99 @@ impl Region {
     }
 }
 
+/// The rectangles sorted by top. A region's are already, apart from one
+/// a program gave as it liked.
+fn by_top(rects: &[Rect]) -> std::borrow::Cow<'_, [Rect]> {
+    if rects.is_sorted_by_key(|r| r.top) {
+        std::borrow::Cow::Borrowed(rects)
+    } else {
+        let mut v = rects.to_vec();
+        v.sort_by_key(|r| r.top);
+        std::borrow::Cow::Owned(v)
+    }
+}
+
+/// The band starting at row `top`: the rectangles of `rects` (sorted by
+/// top) from `next` on that start by then join `live`, and those that
+/// end by then leave it. The rows of a band are those between two edges,
+/// so each rectangle left crosses the whole band.
+fn enter(rects: &[Rect], next: &mut usize, live: &mut Vec<Rect>, top: i32) {
+    while *next < rects.len() && rects[*next].top <= top {
+        live.push(rects[*next]);
+        *next += 1;
+    }
+    live.retain(|r| r.bottom > top);
+}
+
+/// The spans the rectangles cover on a row, left to right, with those
+/// that overlap or touch joined.
+fn spans_of(live: &[Rect], spans: &mut Vec<(i32, i32)>) {
+    spans.clear();
+    spans.extend(
+        live.iter()
+            .filter(|r| r.right > r.left)
+            .map(|r| (r.left, r.right)),
+    );
+    spans.sort_unstable();
+    let mut n = 0;
+    for i in 0..spans.len() {
+        let s = spans[i];
+        if n > 0 && s.0 <= spans[n - 1].1 {
+            spans[n - 1].1 = spans[n - 1].1.max(s.1);
+        } else {
+            spans[n] = s;
+            n += 1;
+        }
+    }
+    spans.truncate(n);
+}
+
+/// The spans of a row where `op` of the two rows' spans holds, left to
+/// right, as long as they run.
+fn combine_spans(a: &[(i32, i32)], b: &[(i32, i32)], op: Op, out: &mut Vec<(i32, i32)>) {
+    out.clear();
+    let (mut i, mut j) = (0, 0);
+    let mut x = i32::MIN;
+    loop {
+        while i < a.len() && a[i].1 <= x {
+            i += 1;
+        }
+        while j < b.len() && b[j].1 <= x {
+            j += 1;
+        }
+        if i == a.len() && j == b.len() {
+            break;
+        }
+        let in_a = i < a.len() && a[i].0 <= x;
+        let in_b = j < b.len() && b[j].0 <= x;
+        // Where the next span starts or the one x is in ends.
+        let edge = |s: &[(i32, i32)], k: usize, inside: bool| match s.get(k) {
+            Some(&(l, r)) => {
+                if inside {
+                    r
+                } else {
+                    l
+                }
+            }
+            None => i32::MAX,
+        };
+        let to = edge(a, i, in_a).min(edge(b, j, in_b));
+        let inside = match op {
+            Op::And => in_a && in_b,
+            Op::Or => in_a || in_b,
+            Op::Xor => in_a != in_b,
+            Op::Diff => in_a && !in_b,
+        };
+        if inside {
+            match out.last_mut() {
+                Some(last) if last.1 == x => last.1 = to,
+                _ => out.push((x, to)),
+            }
+        }
+        x = to;
+    }
+}
+
 crate::state_fields!(Rect {
     left,
     top,
@@ -376,6 +466,97 @@ mod tests {
         );
         assert_eq!(hole.kind(), COMPLEXREGION);
         assert_eq!(hole.or_rect(&Rect::new(10, 10, 20, 20)), outer);
+    }
+
+    /// What `combine` gives, from a test of each cell of the grid the
+    /// rectangles' edges make, joined into runs and bands the same way.
+    fn by_cells(a: &Region, b: &Region, op: Op) -> Region {
+        let mut xs: Vec<i32> = Vec::new();
+        let mut ys: Vec<i32> = Vec::new();
+        for r in a.rects.iter().chain(&b.rects) {
+            xs.extend([r.left, r.right]);
+            ys.extend([r.top, r.bottom]);
+        }
+        xs.sort_unstable();
+        xs.dedup();
+        ys.sort_unstable();
+        ys.dedup();
+        let mut spans = Vec::new();
+        for band in ys.windows(2) {
+            for cell in xs.windows(2) {
+                let (x, y) = (cell[0], band[0]);
+                let (p, q) = (a.contains(x, y), b.contains(x, y));
+                let inside = match op {
+                    Op::And => p && q,
+                    Op::Or => p || q,
+                    Op::Xor => p != q,
+                    Op::Diff => p && !q,
+                };
+                if inside {
+                    for row in band[0]..band[1] {
+                        spans.push((row, cell[0], cell[1]));
+                    }
+                }
+            }
+        }
+        spans.sort_unstable();
+        Region::from_spans(&spans)
+    }
+
+    /// A region made of `n` random rectangles in a 40x40 square, joined
+    /// the way programs build them.
+    fn random_region(seed: &mut u32, n: usize) -> Region {
+        let mut next = |m: i32| {
+            *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (*seed >> 16) as i32 % m
+        };
+        let mut r = Region::new();
+        for _ in 0..n {
+            let (x, y) = (next(40), next(40));
+            let rect = Rect::new(x, y, x + next(20), y + next(20));
+            r = match next(3) {
+                0 => r.diff_rect(&rect),
+                _ => r.or_rect(&rect),
+            };
+        }
+        r
+    }
+
+    #[test]
+    fn the_sweep_gives_what_the_grid_of_cells_gives() {
+        let mut seed = 7;
+        for _ in 0..400 {
+            let n = (seed >> 20) as usize % 8;
+            let a = random_region(&mut seed, n);
+            let b = random_region(&mut seed, 3);
+            for op in [Op::And, Op::Or, Op::Xor, Op::Diff] {
+                assert_eq!(a.combine(&b, op), by_cells(&a, &b, op), "{a:?} {op:?} {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rectangles_out_of_order_or_overlapping_still_combine() {
+        // ExtCreateRegion takes rectangles as the program lists them.
+        let given = Region {
+            rects: vec![
+                Rect::new(0, 10, 10, 20),
+                Rect::new(5, 0, 15, 12),
+                Rect::new(0, 0, 0, 5),
+            ],
+        };
+        let got = given.or_rect(&Rect::new(20, 0, 30, 5));
+        assert_eq!(got, by_cells(&given, &Region::from_rect(Rect::new(20, 0, 30, 5)), Op::Or));
+        assert_eq!(
+            got.rects,
+            vec![
+                Rect::new(5, 0, 15, 5),
+                Rect::new(20, 0, 30, 5),
+                Rect::new(5, 5, 15, 10),
+                Rect::new(0, 10, 15, 12),
+                Rect::new(0, 12, 10, 20),
+            ]
+        );
     }
 
     #[test]
