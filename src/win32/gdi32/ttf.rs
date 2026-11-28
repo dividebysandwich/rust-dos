@@ -419,15 +419,21 @@ impl Path {
             return (rows, 0);
         }
         let (left, top) = (x0.floor(), y0.floor());
-        let width = ((x1.ceil() - left) as i32).clamp(1, MOST_WIDTH) as usize;
+        // The rasterizer keeps its rows in one buffer and sums coverage
+        // across it, so a part of a line right of its last column lands
+        // in the next row and fills that row where the glyph has a gap.
+        // It is as wide as the whole glyph, and the bitmap keeps the
+        // first `MOST_WIDTH` columns of it.
+        let width = ((x1.ceil() - left) as i32).clamp(1, 4 * MOST_PPEM) as usize;
         let depth = ((y1.ceil() - top) as i32).clamp(1, 4 * height.max(1)) as usize;
         // The rasterizer drops the part of a line in its first row that
-        // starts left of its first column, and a point on the glyph's left
-        // edge can land there by rounding: the coverage it would have
-        // taken off then carries on through every pixel after it, which
-        // turned Comic Sans MS Bold's "Y" at 13 pixels to the em inside
-        // out in Sorry!'s questions (#2262). A column to the left of the
-        // glyph's keeps such a part in the rasterizer.
+        // starts left of its first column, and puts it in the row above's
+        // last column in the other rows. A point on the glyph's left edge
+        // can land there by rounding: the coverage it would have taken
+        // off then carries on through every pixel after it, which turned
+        // Comic Sans MS Bold's "Y" at 13 pixels to the em inside out in
+        // Sorry!'s questions (#2262). A column to the left of the glyph's
+        // keeps such a part in the rasterizer, in its own row.
         let at = |(x, y): (f32, f32)| -> Point {
             point(x * stretch - left + 1.0, ascent as f32 - y - top)
         };
@@ -444,6 +450,7 @@ impl Path {
             let row = top + y as i32;
             if coverage >= 0.5
                 && let Some(x) = x.checked_sub(1)
+                && x < MOST_WIDTH as u32
                 && let Some(bits) = usize::try_from(row).ok().and_then(|i| rows.get_mut(i))
             {
                 *bits |= 1 << x;
@@ -766,5 +773,24 @@ pub(super) mod tests {
         assert_eq!(offset, 0);
         assert_eq!(drawn, freetype);
         assert!(rows[..4].iter().chain(&rows[14..]).all(|&r| r == 0));
+    }
+
+    #[test]
+    fn a_glyph_wider_than_a_row_loses_only_its_right_part() {
+        // Two bars 10 pixels wide, 70 apart: the right one is past the
+        // bitmap's 64 columns, and its coverage stays out of the rows
+        // below instead of filling the gap after the left one.
+        let mut p = Path::default();
+        for x in [0.0, 70.0] {
+            p.move_to(x, 0.0);
+            p.line_to(x + 10.0, 0.0);
+            p.line_to(x + 10.0, 10.0);
+            p.line_to(x, 10.0);
+            p.close();
+        }
+        let (rows, offset) = p.fill(1.0, 12, 14);
+        assert_eq!(offset, 0);
+        assert!(rows[..2].iter().chain(&rows[12..]).all(|&r| r == 0));
+        assert!(rows[2..12].iter().all(|&r| r == 0x3FF), "{rows:x?}");
     }
 }
