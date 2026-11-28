@@ -16,8 +16,9 @@
 //!
 //! The desktop's depth, the `win32_depth` setting, is read at the same
 //! time and kept the same way: the adapter's own, 8 bits a pixel with a
-//! system palette (`palette_desktop`), or 16 bits a pixel. So is its
-//! size, the `win32_desktop` setting (`own_size`).
+//! system palette (`palette_desktop`), 16 bits a pixel, or True Color
+//! of 24 or 32 bits a pixel (`screen::desktop_bpp`). So is its size,
+//! the `win32_desktop` setting (`own_size`).
 
 use crate::cpu::Cpu;
 

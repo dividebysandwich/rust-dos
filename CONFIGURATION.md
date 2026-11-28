@@ -3321,10 +3321,10 @@ last. Go through these in order:
 
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
 2. **Its message names `win32_version`:** set `win32_version=98se`.
-3. **It says it needs 256 colours or a 16 bit screen mode:** set
-   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits. If
-   it says it needs a screen resolution of 800x600, set
-   `win32_desktop=800x600`.
+3. **It says it needs 256 colours, a 16 bit screen mode or True
+   Color:** set `win32_depth=8` for 256 colours, `win32_depth=16` for
+   16 bits, `win32_depth=32` for True Color. If it says it needs a
+   screen resolution of 800x600, set `win32_desktop=800x600`.
 4. **It says there isn't enough memory:** raise `memsize`.
 5. **It can't find its CD or its files:** check its
    [registry keys](#registry-keys) and

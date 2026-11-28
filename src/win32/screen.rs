@@ -453,9 +453,7 @@ fn banshee_ramp_config(cpu: &Cpu) -> Option<u32> {
 /// The VBE mode of a size and depth, the list's or one of DirectDraw's
 /// own (`SIZES`), by a number no mode of the list has.
 fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
-    let packed = cpu.bus.vga.adapter.is_virge();
-    let truecolor = if packed { 24 } else { 32 };
-    if ![8, 16, truecolor].contains(&bpp) {
+    if ![8, 16, true_color(cpu)].contains(&bpp) {
         return None;
     }
     let adapter = cpu.bus.vga.adapter;
@@ -1448,10 +1446,10 @@ mod tests {
             (Adapter::ToadForce, [32, 32, 32]),
         ] {
             let asked = [Depth::Adapter, Depth::TrueColor24, Depth::TrueColor32];
-            let cases = asked.into_iter().zip(depths).chain([
-                (Depth::Palette, 8),
-                (Depth::HighColor, 16),
-            ]);
+            let cases = asked
+                .into_iter()
+                .zip(depths)
+                .chain([(Depth::Palette, 8), (Depth::HighColor, 16)]);
             for (depth, bpp) in cases {
                 let mut cpu = Cpu::new(std::path::PathBuf::from("."));
                 let setup = VideoSetup {
