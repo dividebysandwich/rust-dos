@@ -316,7 +316,8 @@ fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// ICGetInfo(hic, lpicinfo, cb): as MSVFW32's, in a 16-bit ICINFO; its
-/// size, or 0.
+/// size, or 0, or MSVFW32's error (ICERR_BADHANDLE for a handle that
+/// isn't open).
 fn ic_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [hic, at, size] = args[..] else {
         unreachable!()
@@ -328,11 +329,22 @@ fn ic_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let got = msvfw32::ic_get_info(cpu, &[hic, wide, ICINFO_32]).unwrap_or(0);
-    if got != 0 {
-        icinfo_to_16(cpu, wide, at);
-    }
+    let result = info_to_16(cpu, got, wide, at);
     super::global::free(cpu, block);
-    Some(if got != 0 { ICINFO_16 } else { 0 })
+    Some(result)
+}
+
+/// What a 16-bit ICGetInfo or ICM_GETINFO gives for MSVFW32's answer
+/// `got`, with the 32-bit ICINFO it filled at `wide`: a whole ICINFO
+/// written at `at` in the 16-bit layout and its size, or the answer as
+/// it is (0, or an error such as ICERR_BADHANDLE), with nothing
+/// written.
+fn info_to_16(cpu: &mut Cpu, got: u32, wide: u32, at: u32) -> u32 {
+    if got != ICINFO_32 {
+        return got;
+    }
+    icinfo_to_16(cpu, wide, at);
+    ICINFO_16
 }
 
 /// The messages whose parameters are converted.
@@ -419,11 +431,9 @@ fn send(cpu: &mut Cpu, hic: u32, msg: u32, first: u32, second: u32) -> u32 {
                 return 0;
             };
             let got = call(cpu, wide, ICINFO_32);
-            if got != 0 {
-                icinfo_to_16(cpu, wide, first);
-            }
+            let result = info_to_16(cpu, got, wide, first);
             super::global::free(cpu, block);
-            if got != 0 { ICINFO_16 } else { 0 }
+            result
         }
         ICM_DECOMPRESS => {
             let Some(fields) = super::peek(cpu, first, ICDECOMPRESS as usize) else {
